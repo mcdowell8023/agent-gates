@@ -9,18 +9,19 @@ description: "One-command project initialization for agent-assisted development.
 
 One-command setup for agent-assisted development in any project:
 
-1. **Quality Gate Hook** — pre-commit hook enforcing test file correspondence (agent-only)
+1. **Quality Gate Hook** — pre-commit hook enforcing test file correspondence + cross-review evidence (agent-only)
 2. **AGENTS.md Hierarchy** — AI-readable documentation for codebase understanding (via deepinit)
 3. **PROGRESS.md** — cross-session progress tracking for multi-day work (PingCode / standup / handoff)
 
 ### Quality Gate Details
 
 - Only fires for agent sessions (`AGENT_MODE=1`) — humans pass through freely
-- Checks that every new/modified source file has a corresponding test file
+- Gate 1: Checks that every new/modified source file has a corresponding test file
+- Gate 2: Checks for cross-review evidence (`.agent/reviews/*.md` within 2h) on multi-file logic commits
 - Skips trivial changes (no new source files + ≤15 added lines + ≤2 files)
 - Composes with existing husky/lefthook if present
 
-**Phase 1** (current): Test file correspondence only.
+**Phase 1** (current): Test file correspondence + cross-review evidence.
 Future phases add BDD `.feature` checks and OpenSpec change record checks.
 
 ### AGENTS.md Details
@@ -126,6 +127,7 @@ All agent working artifacts live in `.agent/` directory:
 |------|---------|
 | `.agent/PROGRESS.md` | 开发进度跟踪（跨会话/汇报/PingCode） |
 | `.agent/GATES.md` | 门禁检查清单 |
+| `.agent/reviews/` | 交叉审查证据文件（git tracked） |
 | `.agent/memory/` | 跨会话记忆（.gitignore） |
 | `.agent/plans/` | 实现计划文档 |
 | `AGENTS.md` | AI 可读项目文档（项目根） |
@@ -139,6 +141,7 @@ New session start: read `.agent/PROGRESS.md` first to restore context.
 - Before any `git commit`, run: `export AGENT_MODE=1`
 - NEVER use `--no-verify` flag unless user explicitly authorizes emergency bypass
 - New source files MUST have corresponding test files before commit
+- Multi-file logic changes (>1 file, excluding .lock/.md/.json) MUST have cross-review evidence in `.agent/reviews/`
 - Run `.githooks/agent-quality-gate.sh` with `AGENT_MODE=1` to preview gate results
 
 <!-- AGENT_PROGRESS_TRACKING -->
@@ -164,7 +167,7 @@ Skip progress section if `AGENT_PROGRESS_TRACKING` already exists.
 Create the `.agent/` directory structure:
 
 ```bash
-mkdir -p .agent/memory .agent/plans
+mkdir -p .agent/memory .agent/plans .agent/reviews
 ```
 
 Add `.agent/memory/` to `.gitignore` (create if not exists):
@@ -264,13 +267,16 @@ The following is the complete hook script to write to `.githooks/agent-quality-g
 
 ```bash
 #!/usr/bin/env bash
-# Agent Quality Gate v1 (Phase 1 — test correspondence only)
+# Agent Quality Gate v1.1 (Phase 1 — test correspondence + cross-review evidence)
 # Only fires when AGENT_MODE=1; human developers pass through.
-# Version: 1.0.0
+# Version: 1.1.0
 
 set -euo pipefail
 
 [[ "${AGENT_MODE:-0}" != "1" ]] && exit 0
+
+# Skip merge commits
+git rev-parse MERGE_HEAD &>/dev/null 2>&1 && exit 0
 
 FAILED=0
 fail() { echo "❌ GATE: $1"; FAILED=1; }
@@ -285,6 +291,7 @@ fi
 
 echo "🔍 Agent Quality Gate ($CHANGED_COUNT files, +${DIFF_LINES} lines)"
 
+# === Gate 1: Test file correspondence ===
 for f in $(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(ts|tsx|js|jsx|py|java|kt|go)$' | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.|\.d\.ts$|config)'); do
   case "$f" in
     *.ts|*.tsx|*.js|*.jsx)
@@ -304,10 +311,65 @@ for f in $(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(ts|tsx
   fi
 done
 
+# === Gate 2: Cross-review evidence (non-trivial commits only) ===
+# Count logic files only (exclude lockfiles, docs, generated, json)
+LOGIC_FILES=$(git diff --cached --name-only --diff-filter=ACMR \
+  | grep -vE '(\.(lock|md|json|yaml|yml)$|generated/|migrations/|\.d\.ts$)' \
+  | wc -l | tr -d ' ')
+
+# Also check single-file high-change threshold (>150 lines in one logic file)
+MAX_SINGLE_FILE_LINES=0
+for f in $(git diff --cached --name-only --diff-filter=ACMR | grep -vE '(\.(lock|md|json|yaml|yml)$|generated/|migrations/|\.d\.ts$)'); do
+  flines=$(git diff --cached -- "$f" | grep -c '^+[^+]' || echo "0")
+  [[ "$flines" -gt "$MAX_SINGLE_FILE_LINES" ]] && MAX_SINGLE_FILE_LINES="$flines"
+done
+
+NEEDS_REVIEW=0
+[[ "$LOGIC_FILES" -gt 1 ]] && NEEDS_REVIEW=1
+[[ "$MAX_SINGLE_FILE_LINES" -gt 150 ]] && NEEDS_REVIEW=1
+
+if [[ "$NEEDS_REVIEW" -eq 1 ]] && [[ -d .agent/reviews ]]; then
+  # Review evidence must be created within last 2 hours
+  REVIEW_FILE=$(find .agent/reviews/ -name "*.md" -mmin -120 2>/dev/null | sort -r | head -1)
+  if [[ -z "$REVIEW_FILE" ]]; then
+    fail "Cross-review evidence missing or stale (>2h old)"
+    echo "   Fix: Run cross-review with different model, save output to:"
+    echo "   .agent/reviews/$(date +%Y-%m-%d)-<topic>.md"
+    echo "   File must contain reviewer verdict (PASS/ISSUES/✅/❌)."
+  else
+    # Freshness gate: review must be newer than ALL staged logic files
+    REVIEW_MTIME=$(stat -f %m "$REVIEW_FILE" 2>/dev/null || stat -c %Y "$REVIEW_FILE" 2>/dev/null)
+    STALE_REVIEW=0
+    for sf in $(git diff --cached --name-only --diff-filter=ACMR | grep -vE '(\.(lock|md|json|yaml|yml)$|generated/|migrations/|\.d\.ts$)'); do
+      if [[ -f "$sf" ]]; then
+        SF_MTIME=$(stat -f %m "$sf" 2>/dev/null || stat -c %Y "$sf" 2>/dev/null)
+        if [[ "$SF_MTIME" -gt "$REVIEW_MTIME" ]]; then
+          STALE_REVIEW=1
+          break
+        fi
+      fi
+    done
+    if [[ "$STALE_REVIEW" -eq 1 ]]; then
+      fail "Review evidence outdated — staged file(s) modified AFTER review was written"
+      echo "   Fix: Re-run cross-review after your latest code changes."
+    fi
+    # Minimal content validation — must contain review-shaped content
+    if ! grep -qE '(^## .*(R|r)eview|PASS|ISSUES|❌|✅)' "$REVIEW_FILE"; then
+      fail "Review evidence file exists but appears invalid: $REVIEW_FILE"
+      echo "   File must contain reviewer model name and PASS/ISSUES verdict."
+    fi
+  fi
+elif [[ "$NEEDS_REVIEW" -eq 1 ]] && [[ ! -d .agent/reviews ]]; then
+  # First time: warn but don't block (init-project-gates creates this dir)
+  echo "⚠️  No .agent/reviews/ directory. Run init-project-gates to set up."
+  echo "   Process rule (agent-workflow-rules §7.1) still requires cross-review."
+fi
+
 if [[ "$FAILED" -eq 1 ]]; then
   echo ""
   echo "❌ Agent Quality Gate FAILED."
-  echo "   Fix: write corresponding test files before committing."
+  echo "   Fix test issues: write corresponding test files."
+  echo "   Fix review issues: run cross-review with different model (see agent-review-protocol skill §1)."
   exit 1
 fi
 

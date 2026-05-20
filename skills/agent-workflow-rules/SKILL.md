@@ -7,6 +7,8 @@ description: "Runtime discipline rules for agent-assisted development: TDD enfor
 
 Runtime development discipline for AI coding agents. This skill governs HOW the agent works within a project — enforcing test-driven development, plan review before execution, evidence-based verification, and minimal implementation.
 
+**Precedence**: When loaded alongside `10-workflow.md` (global rules), this skill supplements and extends it. On conflict, the **stricter rule** wins. This skill adds §7.1 cross-review enforcement and §8-§9 which are not in `10-workflow.md`.
+
 **Companion skills:**
 - `init-project-gates` — one-time project setup (hook, AGENTS.md, PROGRESS.md)
 - `agent-review-protocol` — code review quality (Three-Agent Review, cross-check)
@@ -230,6 +232,25 @@ When encountering bugs, test failures, or unexpected behavior: investigate root 
 - Mark complete IMMEDIATELY after finishing (never batch).
 - While user is still providing context → do NOT create implementation todos or touch code.
 
+### 7.1 Mandatory Cross-Review Todo (⛔ 硬性约束)
+
+When the task involves **>1 logic file** OR **>150 changed lines in a single logic file** (excluding `.lock`, `.md`, `.json`, `.yaml`, `generated/`, `migrations/`), the agent MUST:
+
+1. Include a final todo item: `"交叉审查：用不同模型审查本次变更"` — ALWAYS the **last** todo before claiming done.
+2. Ensure directory exists: `mkdir -p .agent/reviews`
+3. Execute cross-review using `agent-review-protocol` §1 (tool priority: opencode CLI > codex > code-reviewer).
+4. Save the review output to `.agent/reviews/<date>-<topic>.md` (file MUST contain reviewer verdict: PASS/ISSUES/✅/❌).
+5. Only THEN mark the final todo complete and proceed to commit.
+
+**Anti-loop (⛔)**: Cross-review follows the same 2-round cap as Three-Agent Pipeline (§4 of `agent-review-protocol`). After 2 rounds of fix→re-review still unresolved, escalate to user. Do NOT continue indefinitely.
+
+**Physical enforcement**: `agent-quality-gate.sh` v1.1+ blocks commits without valid review evidence when `.agent/reviews/` exists. If the directory doesn't exist, hook warns but passes — the process rule (this section) still applies regardless.
+
+**Exceptions (skip cross-review):**
+- Merge commits
+- First commit of a new project (no existing code to review against)
+- Hotfix with explicit user bypass authorization (`SKIP_REVIEW=1`)
+
 ---
 
 ## 8. Progress Tracking (Multi-Day Work)
@@ -248,6 +269,7 @@ All agent working artifacts live in `.agent/`:
 .agent/
 ├── PROGRESS.md    # Progress tracking (git tracked)
 ├── GATES.md       # Quality gates checklist (git tracked)
+├── reviews/       # Cross-review evidence (git tracked)
 ├── memory/        # Cross-session memory (.gitignore)
 └── plans/         # Implementation plans (git tracked)
 ```
@@ -263,6 +285,7 @@ Stop immediately if any of these are true:
 - Modifying 3+ files but don't have a plan → STOP
 - Plan ready to execute but hasn't been reviewed → STOP
 - About to say "done" but haven't run verification → STOP
+- Multi-file change about to commit but no `.agent/reviews/` evidence → STOP
 - Doing things beyond what was asked (adding features, refactoring unrelated code) → STOP
 - Same fix failed 3 times → STOP, question architecture
 
