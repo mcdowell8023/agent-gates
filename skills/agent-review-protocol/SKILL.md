@@ -22,17 +22,70 @@ All completed development and documentation MUST be independently verified by a 
 | Code (feature / bugfix / refactor) | Different model/agent does code review + runs tests |
 | Documentation | Different model/agent checks accuracy, completeness, actionability |
 
-### Acceptable Cross-Check Methods
+### Tool Priority (⛔ Hard Constraint)
 
-- Oracle consultation (read-only, high-reasoning)
-- Different `task` category agent (e.g., `ultrabrain` reviewing `quick` work)
-- Different model entirely (e.g., Codex reviewing Claude's work)
+Cross-check MUST use a different model/vendor. Priority order:
+
+| Priority | Tool | When to use |
+| --- | --- | --- |
+| 1. **opencode CLI + heterogeneous model** (首选) | `opencode run -m <provider/model> --dir <workdir> "<prompt>"` | Default for all cross-checks |
+| 2. **codex CLI + GPT-5 series** (备选) | Via `codex:codex-rescue` agent | When opencode unavailable; note 3-min timeout limit |
+| 3. **code-reviewer / critic agent** (兜底) | Same Claude model, different agent role | Only when 1+2 both unavailable |
+
+### Model Selection for Cross-Check
+
+| Scenario | Recommended model |
+| --- | --- |
+| Development review (find bugs/gaps) | `github-copilot/gpt-5.5` |
+| Diagnosis / root-cause verification | `openai/gpt-5.5-pro` (strong reasoning) |
+| Large document review | `github-copilot/gemini-3.1-pro-preview` (long context + different perspective) |
+| Small patch / short code | code-reviewer agent (fast, acceptable for trivial) |
+
+### opencode Command Template
+
+```bash
+# Write prompt to file, capture result to file
+opencode run -m github-copilot/gpt-5.5 --dir <workdir> "$(cat <prompt-file>)" > <result-file> 2>&1
+```
+
+- Prompt file: `~/AgentWorkspace/tmp/<task>-prompt.md`
+- Result file: `~/AgentWorkspace/tmp/<task>-result.md`
+- Run with `run_in_background=true` to avoid blocking main session (this is for the SHELL process, not the task() function).
+- **Arg-length limit**: macOS ~262KB. If prompt exceeds ~200KB, split into summary + file references instead of inlining full content.
+
+### Pre-Dispatch Requirements
+
+Before sending work for cross-check, the prompt MUST include:
+
+1. **Full context**: what was built, why, which files changed
+2. **Original conclusions**: paste the implementer's self-assessment verbatim
+3. **File list**: exact paths to review (no ambiguity)
+4. **Output format**: specify expected review format (table, checklist, etc.)
+5. **Explicit distrust instruction**: "Do not trust my conclusions. Read source and verify independently."
+6. **Read-only constraint**: reviewer must NOT modify files
+
+### Timeout / Failure Fallback
+
+If Priority #1 (opencode CLI) times out or errors:
+1. Retry once with shorter prompt (summary only, not full file contents).
+2. If still fails → fall through to Priority #2 (codex CLI).
+3. If codex also unavailable → fall through to Priority #3 (code-reviewer agent).
+4. Document which tool was actually used in the review evidence.
 
 ### Non-Negotiable
 
 - Cross-check failure → fix → re-verify. Never skip.
-- Self-review by the same agent that wrote the code does NOT count.
+- Self-review by the same agent/model that wrote the code does NOT count.
 - Evidence of cross-check must be available (reviewer output, pass/fail).
+- Same-model same-agent self-review violates 红线 #8.
+
+### Relationship to Three-Agent Pipeline
+
+**Cross-Check (§1) and Three-Agent Review (§3) are SEPARATE mechanisms:**
+- Three-Agent Pipeline = structured sequential review for implementation quality (can use same-model oracle agents)
+- Cross-Check = final heterogeneous-model verification gate AFTER the pipeline passes
+
+The Three-Agent Pipeline alone does NOT satisfy the Cross-Check requirement unless Role 2 or Role 3 uses Priority #1 or #2 tools (different model/vendor). If all three roles use same-model oracle, a separate Cross-Check step is still required before delivery.
 
 ---
 
@@ -101,6 +154,8 @@ The agent that wrote the code produces a self-assessment report:
 - [ ] Interface contracts (params, return types, error codes) match specification
 - [ ] No requirements were silently dropped or partially implemented
 
+**No formal spec document?** If requirements came from chat/ticket/verbal spec, the reviewer must first reconstruct requirements from the task description or PR body, confirm scope with implementer, THEN proceed with the checklist.
+
 #### Output Format
 
 ```markdown
@@ -167,10 +222,46 @@ The agent that wrote the code produces a self-assessment report:
 - Same issue: max **2 rounds** of fix-and-re-review
 - After 2 rounds still unresolved → escalate to user for decision
 - Re-review only covers modified code, not unchanged sections
+- **Cascading new issues**: if a fix introduces >2 NEW issues (not the original), escalate to user instead of continuing fix cycles indefinitely
 
 ---
 
 ## 5. Review Delegation Patterns
+
+### Cross-Check via opencode CLI (Priority #1 — PREFERRED)
+
+Use this for the final cross-check gate after Three-Agent Pipeline passes:
+
+```bash
+# 1. Write prompt to file
+cat > ~/AgentWorkspace/tmp/crosscheck-prompt.md << 'EOF'
+# Cross-Review: [feature name]
+
+You are independently reviewing work done by Claude. Do NOT trust the conclusions below — read source and verify yourself.
+
+## Author's Self-Assessment
+[paste implementer's self-assessment]
+
+## Files to Review
+- [file paths]
+
+## Check Dimensions
+1. Logic correctness and boundary conditions
+2. Test coverage adequacy
+3. Security (no hardcoded secrets, injection, permission leaks)
+4. Code style consistency with project
+
+## Output
+Return: PASS or ISSUES with file:line references. Max 500 words.
+EOF
+
+# 2. Run with heterogeneous model
+opencode run -m github-copilot/gpt-5.5 --dir <workdir> "$(cat ~/AgentWorkspace/tmp/crosscheck-prompt.md)" > ~/AgentWorkspace/tmp/crosscheck-result.md 2>&1 &
+```
+
+### Three-Agent Pipeline Roles via oracle (same-model, for structured review)
+
+> Note: These oracle-based patterns satisfy the Three-Agent Pipeline but do NOT satisfy the Cross-Check rule (§1) unless combined with a Priority #1 or #2 final gate.
 
 ### For Spec Review (Role 2)
 
