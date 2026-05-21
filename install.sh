@@ -10,8 +10,15 @@ REPO_URL="https://github.com/mcdowell8023/agent-gates"
 REPO_DIR=""
 TARGET_DIR=""
 INSTALL_DIR="$HOME/.agent-gates"
+
+if [[ "$INSTALL_DIR" == *" "* ]]; then
+  echo "Error: Install path contains spaces: $INSTALL_DIR" >&2
+  echo "agent-gates requires a space-free \$HOME path." >&2
+  exit 1
+fi
 SKILLS=(init-project-gates agent-workflow-rules agent-review-protocol)
 SKIP_HOOKS=0
+FORCE=0
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -23,6 +30,32 @@ info()  { echo -e "${GREEN}✓${NC} $1"; }
 warn()  { echo -e "${YELLOW}⚠${NC} $1"; }
 fail()  { echo -e "${RED}✗${NC} $1" >&2; exit 1; }
 section() { echo -e "\n${BLUE}━━━${NC} $1"; }
+
+# --- Version check ---
+check_version() {
+  [[ "$FORCE" -eq 1 ]] && return
+
+  local installed_version=""
+  if [[ -f "$INSTALL_DIR/.version" ]]; then
+    installed_version=$(cat "$INSTALL_DIR/.version" | tr -d '[:space:]')
+  fi
+
+  if [[ -z "$installed_version" ]]; then
+    return
+  fi
+
+  local repo_version=""
+  if [[ -f "$REPO_DIR/.version" ]]; then
+    repo_version=$(cat "$REPO_DIR/.version" | tr -d '[:space:]')
+  fi
+
+  if [[ "$installed_version" == "$repo_version" ]]; then
+    info "Already at version $installed_version (use --force to reinstall)"
+    exit 0
+  fi
+
+  info "Upgrading: $installed_version → $repo_version"
+}
 
 # --- Detect platform ---
 detect_platform() {
@@ -136,6 +169,7 @@ install_hook_files() {
   cp "$REPO_DIR/hooks/platform/memory-reminder.mjs" "$INSTALL_DIR/hooks/platform/memory-reminder.mjs"
   cp "$REPO_DIR/hooks/git/agent-quality-gate.sh" "$INSTALL_DIR/hooks/git/agent-quality-gate.sh"
   chmod +x "$INSTALL_DIR/hooks/git/agent-quality-gate.sh"
+  cp "$REPO_DIR/.version" "$INSTALL_DIR/.version" 2>/dev/null || true
 
   info "Installed: memory-reminder.mjs"
   info "Installed: agent-quality-gate.sh"
@@ -156,8 +190,19 @@ register_platform_hooks() {
     register_hook_json "$HOME/.claude/hooks.json" "OMC (Claude Code)"
   fi
 
-  # OMO: ~/.claude/settings.json is shared with OMC hooks.json location
-  # OpenCode reads from the same ~/.claude/hooks.json when hooks: true
+  # OMO: OpenCode can read from ~/.claude/hooks.json (shared with OMC)
+  # OR from its own override path ~/.config/opencode/hooks.json
+  if [[ -d "$HOME/.config/opencode" ]]; then
+    local omo_hooks="$HOME/.config/opencode/hooks.json"
+    if [[ -f "$omo_hooks" ]]; then
+      # Override exists — register there too
+      register_hook_json "$omo_hooks" "OMO (OpenCode override)"
+    elif [[ ! -d "$HOME/.claude" ]]; then
+      # No OMC detected, OMO standalone — create OMO-specific hooks
+      register_hook_json "$omo_hooks" "OMO (OpenCode)"
+    fi
+    # else: OMC hooks.json already handles OMO (shared path)
+  fi
 
   # OMX: ~/.codex/hooks.json (if Codex installed)
   if [[ -d "$HOME/.codex" ]]; then
@@ -170,7 +215,7 @@ register_hook_json() {
   local platform="$2"
   local hook_cmd="node $INSTALL_DIR/hooks/platform/memory-reminder.mjs"
 
-  # Check if already registered
+  # Check if already registered (idempotent)
   if [[ -f "$hooks_file" ]] && grep -q "memory-reminder.mjs" "$hooks_file" 2>/dev/null; then
     info "$platform: already registered"
     return
@@ -195,11 +240,21 @@ register_hook_json() {
 }
 EOF
     info "$platform: created $hooks_file"
+  elif command -v jq &>/dev/null; then
+    # Idempotent merge via jq: append our PostToolUse entry without clobbering existing hooks
+    jq --arg cmd "$hook_cmd" '
+      .PostToolUse = ((.PostToolUse // []) + [{
+        "matcher": "TodoWrite|todowrite",
+        "hooks": [{"type": "command", "command": $cmd, "timeout": 5}]
+      }])
+    ' "$hooks_file" > "${hooks_file}.tmp" && mv "${hooks_file}.tmp" "$hooks_file"
+    info "$platform: merged into existing $hooks_file"
   else
-    # File exists but doesn't have our hook — warn user to merge manually
-    warn "$platform: $hooks_file exists. Add manually:"
+    # No jq available — provide manual instructions
+    warn "$platform: $hooks_file exists but jq not found for safe merge."
+    echo "    Install jq and re-run, or add manually:"
     echo "    PostToolUse → matcher: \"TodoWrite|todowrite\" → command: \"$hook_cmd\""
-    echo "    See: $INSTALL_DIR/../docs/platform-hooks.md"
+    echo "    See: docs/platform-hooks.md"
   fi
 }
 
@@ -212,7 +267,7 @@ trap cleanup EXIT
 # --- Main ---
 main() {
   echo -e "${BLUE}╔══════════════════════════════════╗${NC}"
-  echo -e "${BLUE}║${NC}    Agent Gates Installer v1.0    ${BLUE}║${NC}"
+  echo -e "${BLUE}║${NC}    Agent Gates Installer v1.1    ${BLUE}║${NC}"
   echo -e "${BLUE}╚══════════════════════════════════╝${NC}"
   echo ""
 
@@ -220,12 +275,14 @@ main() {
     case "$1" in
       --target) TARGET_DIR="$2"; shift 2 ;;
       --skip-hooks) SKIP_HOOKS=1; shift ;;
+      --force) FORCE=1; shift ;;
       *) fail "Unknown option: $1" ;;
     esac
   done
 
   detect_platform
   fetch_repo
+  check_version
   install_skills
   create_symlinks
   install_hook_files

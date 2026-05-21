@@ -1,0 +1,7 @@
+{
+  "tool_name": "todowrite",
+  "tool_input": {
+    "status": "completed",
+    "content": "Deploy to production"
+  }
+}

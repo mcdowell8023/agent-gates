@@ -13,6 +13,14 @@
 
 import { readFileSync } from 'node:fs';
 
+// NOTE on readFileSync(0, 'utf8'):
+//   fd 0 = stdin. Hooks receive JSON payloads via stdin per platform protocol.
+//   This is intentional — NOT reading a file path.
+
+// NOTE on exit codes:
+//   Always exit(0) regardless of parse errors or no-op results.
+//   Non-zero exits would block the agent's tool pipeline (hooks are non-blocking by design).
+
 // --- Config ---
 const REMINDER_ZH = `你刚标记了一个 TODO 为已完成。请确认是否已用 Memory skill 保存关键产出：
 - 已完成工作的摘要
@@ -46,8 +54,15 @@ function detectTodoCompleted(payload) {
   // OMC/OMX PostToolUse: tool_name matches todo-related tools
   const toolName = String(payload.tool_name || payload.tool || '').toLowerCase();
   if (/todo|todowrite|task/i.test(toolName)) {
-    const inputStr = JSON.stringify(payload.tool_input || payload.input || {});
-    if (/completed|done/i.test(inputStr)) return true;
+    // Check specifically for status transitions to "completed"/"done"
+    // Avoids false-positives from todo content containing these words
+    const input = payload.tool_input || payload.input || {};
+    const todos = input.todos || [];
+    if (Array.isArray(todos)) {
+      if (todos.some(t => t.status === 'completed' || t.status === 'done')) return true;
+    }
+    // Single-todo payload
+    if (input.status === 'completed' || input.status === 'done') return true;
   }
 
   // Generic: check for status fields in nested structures
@@ -55,7 +70,10 @@ function detectTodoCompleted(payload) {
     return true;
   }
 
-  // Fallback: scan output text for completion signals
+  // Fallback: scan output text for completion signals.
+  // Known false-positive: informational messages like "was already marked complete"
+  // may trigger this. Acceptable as last-resort heuristic — better to over-remind
+  // than miss a persistence checkpoint.
   const output = String(payload.tool_output || payload.output || '');
   if (/status.*completed|marked.*complete/i.test(output) && /todo/i.test(output)) {
     return true;

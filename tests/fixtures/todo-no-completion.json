@@ -1,0 +1,9 @@
+{
+  "tool_name": "TodoWrite",
+  "tool_input": {
+    "todos": [
+      { "content": "Mark deployment as done later", "status": "pending", "priority": "high" },
+      { "content": "Review completed PR", "status": "pending", "priority": "medium" }
+    ]
+  }
+}

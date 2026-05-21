@@ -1,0 +1,5 @@
+{
+  "tool_name": "Read",
+  "tool_input": { "filePath": "/tmp/test.txt" },
+  "tool_output": "File contents here"
+}

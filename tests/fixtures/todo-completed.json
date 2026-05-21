@@ -1,0 +1,9 @@
+{
+  "tool_name": "TodoWrite",
+  "tool_input": {
+    "todos": [
+      { "content": "Implement auth middleware", "status": "completed", "priority": "high" },
+      { "content": "Write tests", "status": "pending", "priority": "medium" }
+    ]
+  }
+}
