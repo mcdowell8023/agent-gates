@@ -8,7 +8,11 @@
 //   - Outputs JSON to stdout with hookSpecificOutput.additionalContext
 //   - Must NOT print anything else to stdout (breaks protocol)
 //
-// Register via hooks.json → PostToolUse (matcher: "TodoWrite|todowrite")
+// Registered into platform config's .hooks.PostToolUse:
+//   OMC: ~/.claude/settings.json (settings.json, NOT hooks.json)
+//   OMX: ~/.codex/hooks.json
+//   OMO: manual (deferred to v1.3.0+)
+// Matcher: "TodoWrite|todowrite|TaskUpdate|TaskCreate"
 // Source: https://github.com/mcdowell8023/agent-gates
 
 import { readFileSync } from 'node:fs';

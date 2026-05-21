@@ -7,7 +7,7 @@ description: "Runtime discipline rules for agent-assisted development: TDD enfor
 
 Runtime development discipline for AI coding agents. This skill governs HOW the agent works within a project — enforcing test-driven development, plan review before execution, evidence-based verification, and minimal implementation.
 
-**Precedence**: When loaded alongside `10-workflow.md` (global rules), this skill supplements and extends it. On conflict, the **stricter rule** wins. This skill adds §7.1 cross-review enforcement; §8 Memory Persistence specializes the global session-persistence rule for use with the `memory-reminder` hook; §9 Progress Tracking and §10 Anti-Pattern Self-Check are additions.
+**Precedence**: When loaded alongside `10-workflow.md` (global rules), this skill supplements and extends it. On conflict, the **stricter rule** wins. This skill adds §7.1 cross-review enforcement; §8 Memory Persistence specializes the global session-persistence rule for use with the `memory-reminder` hook; §9–§11 (Progress Tracking, Anti-Pattern Self-Check, Completion Definition) are additions not present in `10-workflow.md`.
 
 **Companion skills:**
 - `init-project-gates` — one-time project setup (hook, AGENTS.md, PROGRESS.md)

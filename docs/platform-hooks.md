@@ -1,25 +1,29 @@
 # Platform Hooks
 
-agent-gates uses platform-specific hooks to inject reminders into agent sessions. All three major platforms (OMC, OMO, OMX) share the same hooks.json schema.
+agent-gates registers a `PostToolUse` hook (`memory-reminder.mjs`) on each supported agent platform. Each platform's configuration file uses Claude Code's nested `.hooks.<EventType>[]` schema.
 
-## Hook Schema (Shared)
+## Hook Schema (nested)
 
 ```json
 {
-  "EventName": [
-    {
-      "matcher": "pattern",
-      "hooks": [
-        {
-          "type": "command",
-          "command": "/path/to/script.mjs",
-          "timeout": 5
-        }
-      ]
-    }
-  ]
+  "hooks": {
+    "EventName": [
+      {
+        "matcher": "pattern",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/script.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
 }
 ```
+
+Other top-level keys in the config file (e.g. `model`, `permissions`, `theme` in `settings.json`) are preserved unchanged by the installer.
 
 ## Events
 
@@ -33,52 +37,77 @@ agent-gates uses platform-specific hooks to inject reminders into agent sessions
 
 ## memory-reminder.mjs
 
-Registered on `PostToolUse` with matcher `TodoWrite|todowrite`.
+Registered on `PostToolUse` with matcher `TodoWrite|todowrite|TaskUpdate|TaskCreate`. The four alternatives cover both the legacy `TodoWrite` tool name and Claude Code's current `TaskUpdate` / `TaskCreate` tools.
 
 **Protocol:**
-1. Receives JSON on stdin (tool call payload)
-2. Detects if a todo was marked "completed"
-3. If yes: outputs JSON with `hookSpecificOutput.additionalContext` containing a `<system-reminder>` block
-4. If no: outputs `{}` (no-op)
+1. Receives JSON on stdin (tool call payload).
+2. Detects if a todo was marked `completed` via `todos[].status` (status field check, not substring scan).
+3. If yes: outputs JSON with `hookSpecificOutput.additionalContext` containing a `<system-reminder>` block marked `[AGENT-GATES: Memory Persistence Reminder]`.
+4. If no: outputs `{}` (no-op).
 
 ## Registration Per Platform
 
 ### OMC (Claude Code)
 
-File: `~/.claude/hooks.json` (or merge into existing)
+File: `~/.claude/settings.json` → `.hooks.PostToolUse[]`
+
+The installer requires `~/.claude/settings.json` to exist (start Claude Code once before running `install.sh`). It uses `jq` to merge into `.hooks.PostToolUse` without disturbing other top-level keys.
 
 ```json
 {
-  "PostToolUse": [
-    {
-      "matcher": "TodoWrite|todowrite",
-      "hooks": [
-        {
-          "type": "command",
-          "command": "node ~/.agent-gates/hooks/platform/memory-reminder.mjs",
-          "timeout": 5
-        }
-      ]
-    }
-  ]
+  "model": "...",
+  "permissions": { },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "TodoWrite|todowrite|TaskUpdate|TaskCreate",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /Users/you/.agent-gates/hooks/platform/memory-reminder.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
 }
 ```
 
+> Claude Code reads `settings.json` at startup. After installing or upgrading, **start a new Claude Code session** for the hook to activate.
+
 ### OMO (OpenCode)
 
-File: `~/.claude/settings.json` (shared with Claude Code format)
+Automated registration is **not yet supported** (deferred to v1.3.0+). The installer prints manual instructions:
 
-Same JSON structure as OMC. OpenCode reads hooks from `~/.claude/settings.json` when `hooks: true` is enabled in oh-my-openagent config.
+```
+matcher: TodoWrite|todowrite|TaskUpdate|TaskCreate
+command: node ~/.agent-gates/hooks/platform/memory-reminder.mjs
+```
+
+Add these to OpenCode's hook config; consult OpenCode docs for the exact file path.
 
 ### OMX (Codex)
 
-File: `~/.codex/hooks.json` (merge into existing)
+File: `~/.codex/hooks.json` → `.hooks.PostToolUse[]`
 
-Same JSON structure. OMX's `codex-native-hook.js` dispatches events to registered hooks.
+Same nested schema as OMC. OMX's `codex-native-hook.js` already lives in `.hooks.PostToolUse`; the installer appends our entry as a new array item without overwriting.
 
 ## Payload Examples
 
-### PostToolUse (TodoWrite)
+### PostToolUse — TaskUpdate (current Claude Code)
+
+```json
+{
+  "tool_name": "TaskUpdate",
+  "tool_input": {
+    "taskId": "1",
+    "status": "completed"
+  }
+}
+```
+
+### PostToolUse — TodoWrite (legacy)
 
 ```json
 {
@@ -108,16 +137,10 @@ Same JSON structure. OMX's `codex-native-hook.js` dispatches events to registere
 
 ## Debugging
 
-Enable debug logging (writes to file, not stdout):
+Test with a sample payload (offline; does not register the hook):
 
 ```bash
-AGENT_GATES_DEBUG=1 node ~/.agent-gates/hooks/platform/memory-reminder.mjs < payload.json
-```
-
-Test with sample payload:
-
-```bash
-echo '{"tool_name":"TodoWrite","tool_input":{"todos":[{"status":"completed"}]}}' | \
+echo '{"tool_name":"TaskUpdate","tool_input":{"status":"completed"}}' | \
   node ~/.agent-gates/hooks/platform/memory-reminder.mjs | jq .
 ```
 
@@ -129,3 +152,9 @@ Expected output:
   }
 }
 ```
+
+For end-to-end verification, after running `install.sh`, **start a fresh agent session** and mark a todo completed — the system-reminder should appear in the next interaction.
+
+## Removing the hook
+
+`uninstall.sh` cleans both the current schema (`.hooks.PostToolUse`) and the legacy v1.0.0–v1.1.1 schema (root `.PostToolUse` in `~/.claude/hooks.json`). Other top-level keys in `settings.json` are preserved; pure dedicated `hooks.json` files become empty and are removed.
