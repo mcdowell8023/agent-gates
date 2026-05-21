@@ -7,7 +7,7 @@ description: "Runtime discipline rules for agent-assisted development: TDD enfor
 
 Runtime development discipline for AI coding agents. This skill governs HOW the agent works within a project — enforcing test-driven development, plan review before execution, evidence-based verification, and minimal implementation.
 
-**Precedence**: When loaded alongside `10-workflow.md` (global rules), this skill supplements and extends it. On conflict, the **stricter rule** wins. This skill adds §7.1 cross-review enforcement and §8-§9 which are not in `10-workflow.md`.
+**Precedence**: When loaded alongside `10-workflow.md` (global rules), this skill supplements and extends it. On conflict, the **stricter rule** wins. This skill adds §7.1 cross-review enforcement; §8 Memory Persistence specializes the global session-persistence rule for use with the `memory-reminder` hook; §9 Progress Tracking and §10 Anti-Pattern Self-Check are additions.
 
 **Companion skills:**
 - `init-project-gates` — one-time project setup (hook, AGENTS.md, PROGRESS.md)
@@ -258,7 +258,53 @@ When the task involves **>1 non-test logic file AND >50 total changed lines**, O
 
 ---
 
-## 8. Progress Tracking (Multi-Day Work)
+## 8. Memory Persistence (⛔ Hard Constraint)
+
+Session work MUST be persisted via a Memory skill so future sessions can resume context. This **complements** §9 Progress Tracking: Memory is semantic recall (skill-level), `.agent/PROGRESS.md` is file-level state.
+
+### When to save
+
+Persistence is **not** a final wrap-up action. Save throughout the session:
+
+| Trigger | What to save |
+| --- | --- |
+| Each todo marked completed | Short summary of that todo's outcome |
+| Each phase delivery (brainstorm conclusion, plan, TDD cycle, research result) | Conclusion + key decision |
+| Session about to end / context near limit | Handoff snapshot — where I am + next step |
+
+Do NOT batch saves to the end of the session — save right after each unit of work.
+
+### Acting on the `memory-reminder` hook
+
+When agent-gates is installed, `memory-reminder.mjs` injects a system-reminder marked `[AGENT-GATES: Memory Persistence Reminder]` after each todo is marked completed (matcher: `TodoWrite|todowrite|TaskUpdate|TaskCreate`). **Treat it as a mandatory check** — confirm you have persisted, or persist now. Do NOT respond with "I will save it later" — save before continuing to the next action.
+
+### What to record
+
+| Field | Description |
+| --- | --- |
+| Current progress | What's done in this session |
+| Key decisions | Decisions + rationale |
+| Outstanding work / blockers | What remains, what's blocked, why |
+| Files & branches | Critical paths, branch names |
+| Next step | Where to pick up on resume |
+
+### What NOT to save
+
+- Full code dumps or long log excerpts → use summaries + pointers (file path, line, function name)
+- Ephemeral chat context already in conversation history
+- Information derivable from `git log` / file reads — let the next session recover by reading the repo
+
+### Loading prior memory on session start
+
+On **new session start**, read prior memory (Memory skill recall, `.agent/PROGRESS.md`, project notes under `memory/`) BEFORE acting. The agent must restore context, not start fresh and guess.
+
+### When no Memory skill is installed
+
+The `memory-reminder` hook still fires but has no target skill to call → the reminder is informational only. Use `.agent/PROGRESS.md` + `.agent/memory/` (gitignored, see §9) as the persistence layer instead.
+
+---
+
+## 9. Progress Tracking (Multi-Day Work)
 
 If the project has `.agent/PROGRESS.md`:
 
@@ -281,7 +327,7 @@ All agent working artifacts live in `.agent/`:
 
 ---
 
-## 9. Anti-Pattern Self-Check
+## 10. Anti-Pattern Self-Check
 
 Stop immediately if any of these are true:
 
@@ -309,7 +355,7 @@ Stop immediately if any of these are true:
 
 ---
 
-## 10. Completion Definition
+## 11. Completion Definition
 
 Task is complete ONLY when ALL are true:
 

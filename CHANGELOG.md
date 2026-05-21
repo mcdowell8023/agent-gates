@@ -2,6 +2,15 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## [1.2.0] - 2025-05-21
+
+### Added
+- **agent-workflow-rules SKILL.md §8 Memory Persistence (⛔ Hard Constraint)** — new section detailing when to save (each completed todo, each phase delivery, session end), how to act on the `[AGENT-GATES: Memory Persistence Reminder]` system-reminder injected by `memory-reminder.mjs`, what to record, what NOT to save, loading prior memory on session start, and the no-Memory-skill fallback flow using `.agent/PROGRESS.md` + `.agent/memory/`.
+- §0 Precedence note updated to describe the new §8 in relation to global rules.
+
+### Changed
+- Renumbered subsequent SKILL.md sections: Progress Tracking → §9, Anti-Pattern Self-Check → §10, Completion Definition → §11.
+
 ## [1.1.2] - 2025-05-21
 
 ### Fixed (critical)
