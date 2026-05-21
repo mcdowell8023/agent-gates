@@ -234,17 +234,22 @@ When encountering bugs, test failures, or unexpected behavior: investigate root 
 
 ### 7.1 Mandatory Cross-Review Todo (⛔ 硬性约束)
 
-When the task involves **>1 logic file** OR **>150 changed lines in a single logic file** (excluding `.lock`, `.md`, `.json`, `.yaml`, `generated/`, `migrations/`), the agent MUST:
+When the task involves **>1 non-test logic file AND >50 total changed lines**, OR **>150 changed lines in a single logic file** (excluding `.lock`, `.md`, `.json`, `.yaml`, `.test.`, `.spec.`, `generated/`, `migrations/`), the agent MUST:
 
 1. Include a final todo item: `"交叉审查：用不同模型审查本次变更"` — ALWAYS the **last** todo before claiming done.
 2. Ensure directory exists: `mkdir -p .agent/reviews`
 3. Execute cross-review using `agent-review-protocol` §1 (tool priority: opencode CLI > codex > code-reviewer).
-4. Save the review output to `.agent/reviews/<date>-<topic>.md` (file MUST contain reviewer verdict: PASS/ISSUES/✅/❌).
+4. Save the review output to `.agent/reviews/<date>-<topic>.md`. File MUST end with explicit verdict line: `VERDICT: PASS` or `VERDICT: ISSUES`.
 5. Only THEN mark the final todo complete and proceed to commit.
 
 **Anti-loop (⛔)**: Cross-review follows the same 2-round cap as Three-Agent Pipeline (§4 of `agent-review-protocol`). After 2 rounds of fix→re-review still unresolved, escalate to user. Do NOT continue indefinitely.
 
-**Physical enforcement**: `agent-quality-gate.sh` v1.1+ blocks commits without valid review evidence when `.agent/reviews/` exists. If the directory doesn't exist, hook warns but passes — the process rule (this section) still applies regardless.
+**Physical enforcement**: `agent-quality-gate.sh` v1.3+ validates:
+- Has `.agent/` but no `reviews/` → blocks
+- Has `reviews/` but no file within 4h → blocks
+- Review file lacks `VERDICT: PASS` line → blocks
+- Staged files modified >20 lines after review mtime → blocks (requires re-review)
+- No `.agent/` dir at all → warns only (project not yet initialized)
 
 **Exceptions (skip cross-review):**
 - Merge commits

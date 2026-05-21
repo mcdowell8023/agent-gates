@@ -267,32 +267,35 @@ The following is the complete hook script to write to `.githooks/agent-quality-g
 
 ```bash
 #!/usr/bin/env bash
-# Agent Quality Gate v1.1 (Phase 1 — test correspondence + cross-review evidence)
+# Agent Quality Gate v1.3
 # Only fires when AGENT_MODE=1; human developers pass through.
-# Version: 1.1.0
+# Version: 1.3.0
 
 set -euo pipefail
 
 [[ "${AGENT_MODE:-0}" != "1" ]] && exit 0
 
-# Skip merge commits
 git rev-parse MERGE_HEAD &>/dev/null 2>&1 && exit 0
 
 FAILED=0
 fail() { echo "❌ GATE: $1"; FAILED=1; }
 
-NEW_SOURCE=$(git diff --cached --diff-filter=A --name-only | grep -E '\.(ts|tsx|js|jsx|py|java|kt|go)$' | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.)' || true)
 DIFF_LINES=$(git diff --cached --stat | tail -1 | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo "0")
 CHANGED_COUNT=$(git diff --cached --name-only --diff-filter=ACMR | wc -l | tr -d ' ')
+
+NEW_SOURCE=$(git diff --cached --diff-filter=A --name-only \
+  | grep -E '\.(ts|tsx|js|jsx|py|java|kt|go)$' \
+  | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.|\.setup\.)' || true)
 
 if [[ -z "$NEW_SOURCE" && "$DIFF_LINES" -le 15 && "$CHANGED_COUNT" -le 2 ]]; then
   exit 0
 fi
 
-echo "🔍 Agent Quality Gate ($CHANGED_COUNT files, +${DIFF_LINES} lines)"
+echo "🔍 Agent Quality Gate v1.3 ($CHANGED_COUNT files, +${DIFF_LINES} lines)"
 
 # === Gate 1: Test file correspondence ===
-for f in $(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(ts|tsx|js|jsx|py|java|kt|go)$' | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.|\.d\.ts$|config)'); do
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
   case "$f" in
     *.ts|*.tsx|*.js|*.jsx)
       t1="${f%.*}.test.${f##*.}"; t2="${f%.*}.spec.${f##*.}" ;;
@@ -309,67 +312,81 @@ for f in $(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(ts|tsx
   if [[ ! -f "$t1" ]] && [[ -z "$t2" || ! -f "$t2" ]]; then
     fail "No test for: $f → expected: $t1"
   fi
-done
+done < <(git diff --cached --name-only --diff-filter=ACMR \
+  | grep -E '\.(ts|tsx|js|jsx|py|java|kt|go)$' \
+  | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.|\.d\.ts$|\.setup\.|config)')
 
-# === Gate 2: Cross-review evidence (non-trivial commits only) ===
-# Count logic files only (exclude lockfiles, docs, generated, json)
-LOGIC_FILES=$(git diff --cached --name-only --diff-filter=ACMR \
+# === Gate 2: Cross-review evidence ===
+# Count non-test logic files (test files excluded from trigger count)
+LOGIC_FILES=0
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  LOGIC_FILES=$((LOGIC_FILES + 1))
+done < <(git diff --cached --name-only --diff-filter=ACMR \
   | grep -vE '(\.(lock|md|json|yaml|yml)$|generated/|migrations/|\.d\.ts$)' \
-  | wc -l | tr -d ' ')
+  | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.)')
 
-# Also check single-file high-change threshold (>150 lines in one logic file)
+# Single-file high-change threshold
 MAX_SINGLE_FILE_LINES=0
-for f in $(git diff --cached --name-only --diff-filter=ACMR | grep -vE '(\.(lock|md|json|yaml|yml)$|generated/|migrations/|\.d\.ts$)'); do
-  flines=$(git diff --cached -- "$f" | grep -c '^+[^+]' || echo "0")
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  flines=$(git diff --cached -- "$f" | grep -c '^+[^+]' 2>/dev/null || echo "0")
   [[ "$flines" -gt "$MAX_SINGLE_FILE_LINES" ]] && MAX_SINGLE_FILE_LINES="$flines"
-done
+done < <(git diff --cached --name-only --diff-filter=ACMR \
+  | grep -vE '(\.(lock|md|json|yaml|yml)$|generated/|migrations/|\.d\.ts$)' \
+  | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.)')
 
+# Trigger: (multi-file AND substantial change) OR single-file massive change
 NEEDS_REVIEW=0
-[[ "$LOGIC_FILES" -gt 1 ]] && NEEDS_REVIEW=1
+[[ "$LOGIC_FILES" -gt 1 && "$DIFF_LINES" -gt 50 ]] && NEEDS_REVIEW=1
 [[ "$MAX_SINGLE_FILE_LINES" -gt 150 ]] && NEEDS_REVIEW=1
 
-if [[ "$NEEDS_REVIEW" -eq 1 ]] && [[ -d .agent/reviews ]]; then
-  # Review evidence must be created within last 2 hours
-  REVIEW_FILE=$(find .agent/reviews/ -name "*.md" -mmin -120 2>/dev/null | sort -r | head -1)
-  if [[ -z "$REVIEW_FILE" ]]; then
-    fail "Cross-review evidence missing or stale (>2h old)"
-    echo "   Fix: Run cross-review with different model, save output to:"
-    echo "   .agent/reviews/$(date +%Y-%m-%d)-<topic>.md"
-    echo "   File must contain reviewer verdict (PASS/ISSUES/✅/❌)."
-  else
-    # Freshness gate: review must be newer than ALL staged logic files
-    REVIEW_MTIME=$(stat -f %m "$REVIEW_FILE" 2>/dev/null || stat -c %Y "$REVIEW_FILE" 2>/dev/null)
-    STALE_REVIEW=0
-    for sf in $(git diff --cached --name-only --diff-filter=ACMR | grep -vE '(\.(lock|md|json|yaml|yml)$|generated/|migrations/|\.d\.ts$)'); do
-      if [[ -f "$sf" ]]; then
-        SF_MTIME=$(stat -f %m "$sf" 2>/dev/null || stat -c %Y "$sf" 2>/dev/null)
-        if [[ "$SF_MTIME" -gt "$REVIEW_MTIME" ]]; then
-          STALE_REVIEW=1
-          break
+if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
+  if [[ -d .agent && ! -d .agent/reviews ]]; then
+    fail "Project has .agent/ but missing .agent/reviews/ directory"
+    echo "   Fix: mkdir -p .agent/reviews"
+  elif [[ -d .agent/reviews ]]; then
+    REVIEW_FILE=$(find .agent/reviews/ -name "*.md" -mmin -240 2>/dev/null | sort -r | head -1)
+    if [[ -z "$REVIEW_FILE" ]]; then
+      fail "Cross-review evidence missing or stale (>4h old)"
+      echo "   Fix: Run cross-review, save to .agent/reviews/$(date +%Y-%m-%d)-<topic>.md"
+      echo "   File MUST end with: VERDICT: PASS (or VERDICT: ISSUES)"
+    else
+      # Verdict validation: require explicit VERDICT line
+      if ! grep -qiE '^VERDICT:\s*(PASS|APPROVED)' "$REVIEW_FILE"; then
+        if grep -qiE '^VERDICT:\s*(ISSUES|FAIL|REJECT)' "$REVIEW_FILE"; then
+          fail "Review verdict is ISSUES/FAIL — resolve before committing"
+        else
+          fail "Review file missing explicit verdict line: $REVIEW_FILE"
+          echo "   Fix: Add 'VERDICT: PASS' or 'VERDICT: ISSUES' at the end of review file."
+        fi
+      else
+        # Freshness gate: skip if post-review changes are minor (<20 lines)
+        REVIEW_MTIME=$(stat -f %m "$REVIEW_FILE" 2>/dev/null || stat -c %Y "$REVIEW_FILE" 2>/dev/null || echo "0")
+        POST_REVIEW_LINES=0
+        while IFS= read -r sf; do
+          [[ -z "$sf" || ! -f "$sf" ]] && continue
+          SF_MTIME=$(stat -f %m "$sf" 2>/dev/null || stat -c %Y "$sf" 2>/dev/null || echo "0")
+          if [[ "$SF_MTIME" -gt "$REVIEW_MTIME" ]]; then
+            sf_lines=$(git diff --cached -- "$sf" | grep -c '^+[^+]' 2>/dev/null || echo "0")
+            POST_REVIEW_LINES=$((POST_REVIEW_LINES + sf_lines))
+          fi
+        done < <(git diff --cached --name-only --diff-filter=ACMR \
+          | grep -vE '(\.(lock|md|json|yaml|yml)$|generated/|migrations/|\.d\.ts$)')
+        if [[ "$POST_REVIEW_LINES" -gt 20 ]]; then
+          fail "Significant changes ($POST_REVIEW_LINES lines) made AFTER review — re-review required"
+          echo "   Fix: Re-run cross-review covering your latest changes."
         fi
       fi
-    done
-    if [[ "$STALE_REVIEW" -eq 1 ]]; then
-      fail "Review evidence outdated — staged file(s) modified AFTER review was written"
-      echo "   Fix: Re-run cross-review after your latest code changes."
     fi
-    # Minimal content validation — must contain review-shaped content
-    if ! grep -qE '(^## .*(R|r)eview|PASS|ISSUES|❌|✅)' "$REVIEW_FILE"; then
-      fail "Review evidence file exists but appears invalid: $REVIEW_FILE"
-      echo "   File must contain reviewer model name and PASS/ISSUES verdict."
-    fi
+  elif [[ ! -d .agent ]]; then
+    echo "⚠️  No .agent/ directory — cross-review check skipped (run init-project-gates)."
   fi
-elif [[ "$NEEDS_REVIEW" -eq 1 ]] && [[ ! -d .agent/reviews ]]; then
-  # First time: warn but don't block (init-project-gates creates this dir)
-  echo "⚠️  No .agent/reviews/ directory. Run init-project-gates to set up."
-  echo "   Process rule (agent-workflow-rules §7.1) still requires cross-review."
 fi
 
 if [[ "$FAILED" -eq 1 ]]; then
   echo ""
   echo "❌ Agent Quality Gate FAILED."
-  echo "   Fix test issues: write corresponding test files."
-  echo "   Fix review issues: run cross-review with different model (see agent-review-protocol skill §1)."
   exit 1
 fi
 
