@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # agent-gates uninstaller
 # Removes hooks, skill files, and platform registrations.
-# Usage: ./uninstall.sh [--keep-skills]
+# Usage: ./uninstall.sh [--keep-skills] [--purge-backups]
 
 set -euo pipefail
 
 INSTALL_DIR="$HOME/.agent-gates"
 KEEP_SKILLS=0
+PURGE_BACKUPS=0
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -19,6 +20,12 @@ warn()  { echo -e "${YELLOW}⚠${NC} $1"; }
 section() { echo -e "\n${BLUE}━━━${NC} $1"; }
 
 SKILLS=(init-project-gates agent-workflow-rules agent-review-protocol)
+SKILL_DIRS=(
+  "$HOME/.cc-switch/skills"
+  "$HOME/.claude/skills"
+  "$HOME/.config/opencode/skills"
+  "$HOME/.codex/skills"
+)
 
 remove_hook_entry() {
   local hooks_file="$1"
@@ -37,7 +44,6 @@ remove_hook_entry() {
       | if .PostToolUse | length == 0 then del(.PostToolUse) else . end
     ' "$hooks_file" > "${hooks_file}.tmp" && mv "${hooks_file}.tmp" "$hooks_file"
 
-    # Remove file entirely if now empty object
     if jq -e 'keys | length == 0' "$hooks_file" &>/dev/null; then
       rm -f "$hooks_file"
       info "$platform: removed empty $hooks_file"
@@ -51,10 +57,9 @@ remove_hook_entry() {
 
 remove_skills() {
   section "Removing skills"
-  local dirs=("$HOME/.cc-switch/skills" "$HOME/.claude/skills" "$HOME/.config/opencode/skills" "$HOME/.codex/skills")
   local removed=0
 
-  for dir in "${dirs[@]}"; do
+  for dir in "${SKILL_DIRS[@]}"; do
     [[ -d "$dir" ]] || continue
     for skill in "${SKILLS[@]}"; do
       local target="$dir/$skill"
@@ -72,15 +77,46 @@ remove_skills() {
   info "Removed $removed skill entries"
 }
 
+purge_backups() {
+  section "Purging SKILL.md.bak.* backups"
+  local removed=0
+
+  for dir in "${SKILL_DIRS[@]}"; do
+    [[ -d "$dir" ]] || continue
+    for skill in "${SKILLS[@]}"; do
+      local skill_dir="$dir/$skill"
+      [[ -d "$skill_dir" ]] || continue
+      while IFS= read -r -d '' bak; do
+        rm -f "$bak"
+        info "Removed: $bak"
+        ((removed++))
+      done < <(find "$skill_dir" -maxdepth 1 -name 'SKILL.md.bak.*' -print0 2>/dev/null)
+    done
+  done
+
+  if (( removed == 0 )); then
+    info "No backup files found"
+  else
+    info "Purged $removed backup file(s)"
+  fi
+}
+
 main() {
   echo -e "${BLUE}╔══════════════════════════════════╗${NC}"
-  echo -e "${BLUE}║${NC}   Agent Gates Uninstaller v1.0   ${BLUE}║${NC}"
+  echo -e "${BLUE}║${NC}   Agent Gates Uninstaller v1.1   ${BLUE}║${NC}"
   echo -e "${BLUE}╚══════════════════════════════════╝${NC}"
   echo ""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --keep-skills) KEEP_SKILLS=1; shift ;;
+      --purge-backups) PURGE_BACKUPS=1; shift ;;
+      -h|--help)
+        echo "Usage: uninstall.sh [--keep-skills] [--purge-backups]"
+        echo "  --keep-skills     Keep installed skills, remove only hooks"
+        echo "  --purge-backups   Also remove SKILL.md.bak.* files created during upgrades"
+        exit 0
+        ;;
       *) echo "Unknown option: $1"; exit 1 ;;
     esac
   done
@@ -89,6 +125,10 @@ main() {
   remove_hook_entry "$HOME/.claude/hooks.json" "OMC (Claude Code)"
   remove_hook_entry "$HOME/.config/opencode/hooks.json" "OMO (OpenCode)"
   remove_hook_entry "$HOME/.codex/hooks.json" "OMX (Codex)"
+
+  if [[ "$PURGE_BACKUPS" -eq 1 ]]; then
+    purge_backups
+  fi
 
   if [[ "$KEEP_SKILLS" -eq 0 ]]; then
     remove_skills
@@ -107,6 +147,9 @@ main() {
   section "Done!"
   echo ""
   echo "  agent-gates has been removed."
+  if [[ "$PURGE_BACKUPS" -eq 0 ]]; then
+    echo "  SKILL.md.bak.* files (if any) are preserved; pass --purge-backups to also remove them."
+  fi
   echo "  Project-level .agent/ directories are preserved (remove manually if needed)."
   echo ""
 }

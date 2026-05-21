@@ -2,7 +2,7 @@
 # agent-gates installer
 # Detects agent platforms, installs skills + registers platform hooks.
 # Usage: curl -fsSL https://raw.githubusercontent.com/mcdowell8023/agent-gates/main/install.sh | bash
-# Or: ./install.sh [--target DIR] [--skip-hooks]
+# Or: ./install.sh [--target DIR] [--skip-hooks] [--force | --upgrade]
 
 set -euo pipefail
 
@@ -17,8 +17,16 @@ if [[ "$INSTALL_DIR" == *" "* ]]; then
   exit 1
 fi
 SKILLS=(init-project-gates agent-workflow-rules agent-review-protocol)
+MEMORY_SKILL_CANDIDATES=(
+  "$HOME/.claude/skills"
+  "$HOME/.config/opencode/skills"
+  "$HOME/.codex/skills"
+  "$HOME/.cc-switch/skills"
+  "$HOME/.agents/skills"
+)
 SKIP_HOOKS=0
 FORCE=0
+BACKED_UP_SKILLS=()
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -30,6 +38,85 @@ info()  { echo -e "${GREEN}✓${NC} $1"; }
 warn()  { echo -e "${YELLOW}⚠${NC} $1"; }
 fail()  { echo -e "${RED}✗${NC} $1" >&2; exit 1; }
 section() { echo -e "\n${BLUE}━━━${NC} $1"; }
+
+# --- Hard dependency check ---
+# memory-reminder.mjs uses ES modules + node:fs; requires node >= 18.
+check_dependencies() {
+  if ! command -v node &>/dev/null; then
+    fail "node not found in PATH. Install Node.js ≥18 first: https://nodejs.org/"
+  fi
+
+  local node_major
+  node_major=$(node -v 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/')
+  if [[ -z "$node_major" || ! "$node_major" =~ ^[0-9]+$ ]]; then
+    warn "Unable to parse node version ($(node -v 2>/dev/null)) — continuing anyway"
+  elif (( node_major < 18 )); then
+    fail "node ≥18 required (found v${node_major}). memory-reminder.mjs uses ES modules."
+  else
+    info "node v${node_major} detected"
+  fi
+}
+
+# --- Detect install command for jq based on OS/package manager ---
+detect_jq_install_cmd() {
+  if command -v brew &>/dev/null; then
+    echo "brew install jq"
+  elif command -v apt-get &>/dev/null; then
+    echo "sudo apt-get install -y jq"
+  elif command -v dnf &>/dev/null; then
+    echo "sudo dnf install -y jq"
+  elif command -v yum &>/dev/null; then
+    echo "sudo yum install -y jq"
+  elif command -v pacman &>/dev/null; then
+    echo "sudo pacman -S --noconfirm jq"
+  elif command -v apk &>/dev/null; then
+    echo "sudo apk add jq"
+  elif command -v port &>/dev/null; then
+    echo "sudo port install jq"
+  else
+    echo ""
+  fi
+}
+
+# --- Soft dependency checks (warn but continue) ---
+# Prints platform-specific install commands when a soft dep is missing.
+# Never invokes sudo/brew/apt on its own — user controls system mutations.
+check_optional_deps() {
+  section "Checking optional dependencies"
+
+  if command -v jq &>/dev/null; then
+    info "jq detected ($(jq --version 2>/dev/null || echo 'version unknown'))"
+  else
+    warn "jq not found — hooks.json merging will fall back to manual instructions."
+    local jq_cmd
+    jq_cmd=$(detect_jq_install_cmd)
+    if [[ -n "$jq_cmd" ]]; then
+      echo "    To install jq: $jq_cmd"
+    else
+      echo "    See: https://stedolan.github.io/jq/download/"
+    fi
+  fi
+
+  local memory_found=""
+  for cand in "${MEMORY_SKILL_CANDIDATES[@]}"; do
+    [[ -d "$cand" ]] || continue
+    while IFS= read -r -d '' entry; do
+      memory_found="$entry"
+      break 2
+    done < <(find "$cand" -maxdepth 1 -mindepth 1 -type d -iname 'memory*' -print0 2>/dev/null)
+  done
+
+  if [[ -n "$memory_found" ]]; then
+    info "Memory skill detected: $memory_found"
+  else
+    warn "No memory* skill found in your agent skills directories."
+    echo "    memory-reminder.mjs will inject reminders, but the agent has no Memory"
+    echo "    skill to call. Install a memory-management skill in one of:"
+    for cand in "${MEMORY_SKILL_CANDIDATES[@]}"; do
+      echo "      - $cand/"
+    done
+  fi
+}
 
 # --- Version check ---
 check_version() {
@@ -50,7 +137,7 @@ check_version() {
   fi
 
   if [[ "$installed_version" == "$repo_version" ]]; then
-    info "Already at version $installed_version (use --force to reinstall)"
+    info "Already at version $installed_version (use --force / --upgrade to reinstall)"
     exit 0
   fi
 
@@ -110,6 +197,25 @@ fetch_repo() {
   [[ -d "$REPO_DIR/skills" ]] || fail "Invalid repo structure: skills/ not found"
 }
 
+# --- Backup user-modified SKILL.md before overwrite ---
+# Diffs src vs dst; if different, saves dst as SKILL.md.bak.<timestamp>.
+# Tracks backups in BACKED_UP_SKILLS for the end-of-run summary.
+backup_if_modified() {
+  local skill="$1"
+  local src_file="$2"
+  local dst_file="$3"
+  [[ -f "$dst_file" ]] || return 0
+  [[ -f "$src_file" ]] || return 0
+  if ! diff -q "$src_file" "$dst_file" &>/dev/null; then
+    local ts backup
+    ts=$(date +%Y%m%d-%H%M%S)
+    backup="${dst_file}.bak.${ts}"
+    cp "$dst_file" "$backup"
+    BACKED_UP_SKILLS+=("$skill: $backup")
+    warn "Backed up modified $(basename "$dst_file") → $backup"
+  fi
+}
+
 # --- Install skills ---
 install_skills() {
   section "Installing skills → $TARGET_DIR"
@@ -127,6 +233,7 @@ install_skills() {
     fi
 
     if [[ -d "$dst" ]]; then
+      backup_if_modified "$skill" "$src/SKILL.md" "$dst/SKILL.md"
       cp "$src/SKILL.md" "$dst/SKILL.md"
       if [[ -d "$src/templates" ]]; then
         mkdir -p "$dst/templates"
@@ -181,10 +288,6 @@ register_platform_hooks() {
 
   section "Registering platform hooks"
 
-  local hook_cmd="node $INSTALL_DIR/hooks/platform/memory-reminder.mjs"
-  local hook_entry="{\"type\":\"command\",\"command\":\"$hook_cmd\",\"timeout\":5}"
-  local post_tool_entry="{\"matcher\":\"TodoWrite|todowrite\",\"hooks\":[$hook_entry]}"
-
   # OMC: ~/.claude/hooks.json (if Claude Code installed)
   if [[ -d "$HOME/.claude" ]]; then
     register_hook_json "$HOME/.claude/hooks.json" "OMC (Claude Code)"
@@ -195,10 +298,8 @@ register_platform_hooks() {
   if [[ -d "$HOME/.config/opencode" ]]; then
     local omo_hooks="$HOME/.config/opencode/hooks.json"
     if [[ -f "$omo_hooks" ]]; then
-      # Override exists — register there too
       register_hook_json "$omo_hooks" "OMO (OpenCode override)"
     elif [[ ! -d "$HOME/.claude" ]]; then
-      # No OMC detected, OMO standalone — create OMO-specific hooks
       register_hook_json "$omo_hooks" "OMO (OpenCode)"
     fi
     # else: OMC hooks.json already handles OMO (shared path)
@@ -215,14 +316,12 @@ register_hook_json() {
   local platform="$2"
   local hook_cmd="node $INSTALL_DIR/hooks/platform/memory-reminder.mjs"
 
-  # Check if already registered (idempotent)
   if [[ -f "$hooks_file" ]] && grep -q "memory-reminder.mjs" "$hooks_file" 2>/dev/null; then
     info "$platform: already registered"
     return
   fi
 
   if [[ ! -f "$hooks_file" ]]; then
-    # Create new hooks.json
     cat > "$hooks_file" << EOF
 {
   "PostToolUse": [
@@ -241,7 +340,6 @@ register_hook_json() {
 EOF
     info "$platform: created $hooks_file"
   elif command -v jq &>/dev/null; then
-    # Idempotent merge via jq: append our PostToolUse entry without clobbering existing hooks
     jq --arg cmd "$hook_cmd" '
       .PostToolUse = ((.PostToolUse // []) + [{
         "matcher": "TodoWrite|todowrite",
@@ -250,10 +348,13 @@ EOF
     ' "$hooks_file" > "${hooks_file}.tmp" && mv "${hooks_file}.tmp" "$hooks_file"
     info "$platform: merged into existing $hooks_file"
   else
-    # No jq available — provide manual instructions
     warn "$platform: $hooks_file exists but jq not found for safe merge."
-    echo "    Install jq and re-run, or add manually:"
-    echo "    PostToolUse → matcher: \"TodoWrite|todowrite\" → command: \"$hook_cmd\""
+    local jq_cmd
+    jq_cmd=$(detect_jq_install_cmd)
+    [[ -n "$jq_cmd" ]] && echo "    Install jq with: $jq_cmd"
+    echo "    Or add manually under PostToolUse:"
+    echo "      matcher: \"TodoWrite|todowrite\""
+    echo "      command: \"$hook_cmd\""
     echo "    See: docs/platform-hooks.md"
   fi
 }
@@ -275,11 +376,21 @@ main() {
     case "$1" in
       --target) TARGET_DIR="$2"; shift 2 ;;
       --skip-hooks) SKIP_HOOKS=1; shift ;;
-      --force) FORCE=1; shift ;;
+      --force|--upgrade) FORCE=1; shift ;;
+      -h|--help)
+        echo "Usage: install.sh [--target DIR] [--skip-hooks] [--force | --upgrade]"
+        echo "  --target DIR    Override skills target directory"
+        echo "  --skip-hooks    Skip platform hook registration"
+        echo "  --force         Reinstall even if version matches"
+        echo "  --upgrade       Alias of --force"
+        exit 0
+        ;;
       *) fail "Unknown option: $1" ;;
     esac
   done
 
+  check_dependencies
+  check_optional_deps
   detect_platform
   fetch_repo
   check_version
@@ -299,10 +410,26 @@ main() {
   echo "           ├─ git/agent-quality-gate.sh"
   echo "           └─ platform/memory-reminder.mjs"
   echo ""
+
+  if [[ ${#BACKED_UP_SKILLS[@]} -gt 0 ]]; then
+    echo "  Backups of user-modified skill files:"
+    for entry in "${BACKED_UP_SKILLS[@]}"; do
+      echo "    - $entry"
+    done
+    echo "  Diff against the new SKILL.md to merge your changes back, then remove the .bak file."
+    echo "  Or run: ./uninstall.sh --purge-backups (only after merging — backups will be gone)."
+    echo ""
+  fi
+
   echo "  Next steps:"
   echo "    1. In any project: tell agent '初始化项目' or 'init project gates'"
   echo "    2. Agent sets up .agent/ + hooks + AGENTS.md"
   echo "    3. agent-workflow-rules auto-loads during development"
+  echo ""
+  echo "  Already-initialized projects (have a .agent/ dir):"
+  echo "    Re-run 'init project gates' in those repos to sync the latest"
+  echo "    agent-quality-gate.sh into .git/hooks/ — the per-project copy"
+  echo "    is NOT auto-upgraded."
   echo ""
 }
 

@@ -20,6 +20,18 @@ agent-gates/
 └── install.sh                       # Multi-platform installer
 ```
 
+## Prerequisites
+
+| Dependency | Required | Purpose |
+|------------|----------|---------|
+| Node.js ≥18 | Yes | Runs `memory-reminder.mjs` (ES modules + `node:fs`) |
+| `git` or `curl` | Yes | Installer uses one to fetch this repo |
+| `jq` | Recommended | Merges agent-gates entry into existing `hooks.json`; without it the installer falls back to printing manual instructions |
+| Memory-management skill (e.g. `memory`, `writer-memory`) | Recommended | `memory-reminder.mjs` injects a system-reminder to save state; without a Memory skill the reminder is informational only. Installer prints candidate skills dirs when missing. |
+| One agent platform (Claude Code / OpenCode / Codex / cc-switch) | Recommended | Installer auto-detects; falls back to `~/.claude/skills/` if none present |
+
+The install path must be space-free (`$HOME` must not contain spaces) — shell hooks cannot reliably escape such paths.
+
 ## Quick Install
 
 ```bash
@@ -106,13 +118,40 @@ The agent will:
 3. Generate AGENTS.md hierarchy (via deepinit)
 4. Inject tracking rules into project CLAUDE.md
 
-## Update
+## Upgrade
 
-Re-run installer to get latest skills + hooks:
+Re-run the installer; the same command handles first install and upgrade:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mcdowell8023/agent-gates/main/install.sh | bash
 ```
+
+What the installer does on upgrade:
+
+- Compares the installed `.version` against the repo's; **skips when they match** (use `--force` or `--upgrade` to re-install anyway).
+- **Backs up locally-modified `SKILL.md` files** as `SKILL.md.bak.<timestamp>` before overwriting, and lists them in the final summary.
+- **Idempotent hook registration**: existing `hooks.json` is merged via `jq` without duplicates. If `jq` is missing, the installer prints the command to install it and the manual JSON entry to add.
+
+### Upgrade limitations to know about
+
+- **Per-project hook is NOT auto-upgraded.** Each project's `.git/hooks/agent-quality-gate` is a one-time copy made by `init-project-gates`. After upgrading agent-gates globally, re-run `init project gates` in each initialized repo to sync the latest hook.
+- **Backups accumulate.** Each upgrade that detects user changes leaves a new `SKILL.md.bak.*` file. Run `./uninstall.sh --purge-backups` (combined with `--keep-skills` if you only want to clean backups) to remove them after merging your edits.
+- **OpenCode override mode.** If `~/.config/opencode/hooks.json` exists, the installer treats it as an override and merges there too. Without it, OMO falls back to `~/.claude/hooks.json`.
+- **No automatic skill migration.** If a future version renames or restructures a skill directory, you may need to manually clean up the old layout — the installer only updates known skill names.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `node not found` | Node.js missing or not in PATH | Install Node.js ≥18: https://nodejs.org/ |
+| `node ≥18 required (found vXX)` | Old Node version | Upgrade Node (e.g. `nvm install 20`, or your package manager) |
+| `jq not found for safe merge` | `jq` missing while `hooks.json` already exists | Run the install command the installer prints (`brew install jq` / `apt-get install jq` / etc.) and re-run |
+| `Install path contains spaces` | `$HOME` contains a space | Use a space-free home path; shell hooks cannot reliably escape it |
+| `No memory* skill found` warning | No Memory skill installed | Install a memory skill in any of the printed candidate dirs; without one the reminders fire but have no target skill to call |
+| Hook fires but nothing seems to happen | Memory skill missing, or agent ignored reminder | Verify Memory skill is installed; check agent platform actually executes `PostToolUse` hooks |
+| Skill behavior unchanged after upgrade | Per-project hook was not refreshed | In the affected repo: re-run `init project gates` |
+| `hooks.json` has duplicate entries | Manual edits combined with installer re-runs | `./uninstall.sh` then re-install for a clean state |
+| Need to roll back a skill change | Looking for the previous SKILL.md | Check `SKILL.md.bak.<timestamp>` in the same skill directory |
 
 ## Relationship Between Components
 

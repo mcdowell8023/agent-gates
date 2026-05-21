@@ -2,6 +2,20 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## [1.1.1] - 2025-05-21
+
+### Added
+- `install.sh`: hard `check_dependencies` for Node.js ≥18 (fails with install hint when missing)
+- `install.sh`: `check_optional_deps` — detects `jq` and Memory skill, prints platform-specific install commands when missing (does not auto-mutate system)
+- `install.sh`: backs up user-modified `SKILL.md` as `SKILL.md.bak.<timestamp>` before overwriting on upgrade; final summary lists all backups
+- `install.sh`: `--upgrade` alias for `--force`; `--help` flag with usage
+- `uninstall.sh`: `--purge-backups` to remove generated `SKILL.md.bak.*` files; `--help` flag
+- README: Prerequisites entry for Memory skill; new `Upgrade` section with limitations; new `Troubleshooting` table
+
+### Changed
+- Installer "Done" summary now lists backed-up skill files and a per-project hook upgrade reminder
+- `register_hook_json` fallback message now includes the platform-specific `jq` install command
+
 ## [1.1.0] - 2025-05-21
 
 ### Fixed
