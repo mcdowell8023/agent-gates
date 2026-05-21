@@ -76,12 +76,14 @@ cd agent-gates
 
 ## Supported Platforms
 
-| Platform | Skills Location | Hook Registration |
-|----------|----------------|-------------------|
-| Claude Code (OMC) | `~/.claude/skills/` | `~/.claude/hooks.json` |
-| OpenCode (OMO) | `~/.config/opencode/skills/` | `~/.claude/hooks.json` (shared) or `~/.config/opencode/hooks.json` (override) |
-| Codex (OMX) | `~/.codex/skills/` | `~/.codex/hooks.json` |
-| cc-switch | `~/.cc-switch/skills/` + symlinks | All of above |
+| Platform | Skills Location | Hook Registration | Schema |
+|----------|----------------|-------------------|--------|
+| Claude Code (OMC) | `~/.claude/skills/` | `~/.claude/settings.json` → `.hooks.PostToolUse[]` | requires existing `settings.json` (start Claude Code once first) |
+| OpenCode (OMO) | `~/.config/opencode/skills/` | manual — automated registration tracked for v1.2.0 | — |
+| Codex (OMX) | `~/.codex/skills/` | `~/.codex/hooks.json` → `.hooks.PostToolUse[]` | nested schema, installer creates file if missing |
+| cc-switch | `~/.cc-switch/skills/` + symlinks | combines OMC + OMX above | — |
+
+The PostToolUse matcher used by the installer is `TodoWrite|todowrite|TaskUpdate|TaskCreate` to cover both the legacy `TodoWrite` tool name and Claude Code's current `TaskUpdate` / `TaskCreate` tools.
 
 ## How It Works
 

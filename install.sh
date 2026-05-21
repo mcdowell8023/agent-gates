@@ -282,86 +282,103 @@ install_hook_files() {
   info "Installed: agent-quality-gate.sh"
 }
 
+# --- Hook configuration constants ---
+HOOK_MATCHER="TodoWrite|todowrite|TaskUpdate|TaskCreate"
+
 # --- Register platform hooks ---
+# All supported platforms use schema { "hooks": { "<Event>": [...] } }.
+# OMC reads from ~/.claude/settings.json, OMX from ~/.codex/hooks.json.
+# OMO has no documented per-user hook entrypoint — handled in v1.2.0+.
 register_platform_hooks() {
   [[ "$SKIP_HOOKS" -eq 1 ]] && { warn "Skipping platform hook registration (--skip-hooks)"; return; }
 
   section "Registering platform hooks"
 
-  # OMC: ~/.claude/hooks.json (if Claude Code installed)
+  # OMC: ~/.claude/settings.json (.hooks.PostToolUse)
   if [[ -d "$HOME/.claude" ]]; then
-    register_hook_json "$HOME/.claude/hooks.json" "OMC (Claude Code)"
-  fi
-
-  # OMO: OpenCode can read from ~/.claude/hooks.json (shared with OMC)
-  # OR from its own override path ~/.config/opencode/hooks.json
-  if [[ -d "$HOME/.config/opencode" ]]; then
-    local omo_hooks="$HOME/.config/opencode/hooks.json"
-    if [[ -f "$omo_hooks" ]]; then
-      register_hook_json "$omo_hooks" "OMO (OpenCode override)"
-    elif [[ ! -d "$HOME/.claude" ]]; then
-      register_hook_json "$omo_hooks" "OMO (OpenCode)"
+    if [[ -f "$HOME/.claude/settings.json" ]]; then
+      register_hook "$HOME/.claude/settings.json" "OMC (Claude Code)"
+    else
+      warn "OMC: ~/.claude/settings.json missing — start Claude Code once to initialize, then re-run."
     fi
-    # else: OMC hooks.json already handles OMO (shared path)
   fi
 
-  # OMX: ~/.codex/hooks.json (if Codex installed)
+  # OMO: per-user hook config not yet documented; print manual instructions.
+  if [[ -d "$HOME/.config/opencode" ]]; then
+    warn "OMO (OpenCode): automated hook registration not yet supported."
+    echo "    Track: https://github.com/mcdowell8023/agent-gates/issues"
+    echo "    Manual: add to OpenCode hook config under PostToolUse:"
+    echo "      matcher: \"$HOOK_MATCHER\""
+    echo "      command: \"node $INSTALL_DIR/hooks/platform/memory-reminder.mjs\""
+  fi
+
+  # OMX: ~/.codex/hooks.json (.hooks.PostToolUse, nested schema)
   if [[ -d "$HOME/.codex" ]]; then
-    register_hook_json "$HOME/.codex/hooks.json" "OMX (Codex)"
+    register_hook "$HOME/.codex/hooks.json" "OMX (Codex)"
   fi
 }
 
-register_hook_json() {
-  local hooks_file="$1"
+# --- Register hook into a Claude-style config file ---
+# Writes to .hooks.PostToolUse[] using jq. Idempotent. Never overwrites
+# unrelated top-level keys (model, permissions, theme, etc. in settings.json).
+register_hook() {
+  local config_file="$1"
   local platform="$2"
   local hook_cmd="node $INSTALL_DIR/hooks/platform/memory-reminder.mjs"
 
-  if [[ -f "$hooks_file" ]] && grep -q "memory-reminder.mjs" "$hooks_file" 2>/dev/null; then
+  if [[ -f "$config_file" ]] && grep -q "memory-reminder.mjs" "$config_file" 2>/dev/null; then
     info "$platform: already registered"
     return
   fi
 
-  if [[ ! -f "$hooks_file" ]]; then
-    cat > "$hooks_file" << EOF
+  if [[ ! -f "$config_file" ]]; then
+    cat > "$config_file" << EOF
 {
-  "PostToolUse": [
-    {
-      "matcher": "TodoWrite|todowrite",
-      "hooks": [
-        {
-          "type": "command",
-          "command": "$hook_cmd",
-          "timeout": 5
-        }
-      ]
-    }
-  ]
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "$HOOK_MATCHER",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$hook_cmd",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
 }
 EOF
-    info "$platform: created $hooks_file"
-  elif command -v jq &>/dev/null; then
-    if jq --arg cmd "$hook_cmd" '
-      .PostToolUse = ((.PostToolUse // []) + [{
-        "matcher": "TodoWrite|todowrite",
-        "hooks": [{"type": "command", "command": $cmd, "timeout": 5}]
-      }])
-    ' "$hooks_file" > "${hooks_file}.tmp"; then
-      mv "${hooks_file}.tmp" "$hooks_file"
-      info "$platform: merged into existing $hooks_file"
-    else
-      rm -f "${hooks_file}.tmp"
-      warn "$platform: jq failed to parse $hooks_file — file may be malformed."
-      echo "    Inspect or rename the file, then re-run the installer."
-    fi
-  else
-    warn "$platform: $hooks_file exists but jq not found for safe merge."
+    info "$platform: created $config_file"
+    return
+  fi
+
+  if ! command -v jq &>/dev/null; then
+    warn "$platform: $config_file exists but jq not found for safe merge."
     local jq_cmd
     jq_cmd=$(detect_jq_install_cmd)
     [[ -n "$jq_cmd" ]] && echo "    Install jq with: $jq_cmd"
-    echo "    Or add manually under PostToolUse:"
-    echo "      matcher: \"TodoWrite|todowrite\""
+    echo "    Or add manually under .hooks.PostToolUse:"
+    echo "      matcher: \"$HOOK_MATCHER\""
     echo "      command: \"$hook_cmd\""
     echo "    See: docs/platform-hooks.md"
+    return
+  fi
+
+  if jq --arg cmd "$hook_cmd" --arg m "$HOOK_MATCHER" '
+    .hooks = (.hooks // {}) |
+    .hooks.PostToolUse = ((.hooks.PostToolUse // []) + [{
+      "matcher": $m,
+      "hooks": [{"type": "command", "command": $cmd, "timeout": 5}]
+    }])
+  ' "$config_file" > "${config_file}.tmp"; then
+    mv "${config_file}.tmp" "$config_file"
+    info "$platform: merged into $config_file"
+  else
+    rm -f "${config_file}.tmp"
+    warn "$platform: jq failed to parse $config_file — file may be malformed."
+    echo "    Inspect or rename the file, then re-run the installer."
   fi
 }
 

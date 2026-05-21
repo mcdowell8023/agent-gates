@@ -28,36 +28,48 @@ SKILL_DIRS=(
 )
 
 remove_hook_entry() {
-  local hooks_file="$1"
+  local config_file="$1"
   local platform="$2"
 
-  [[ -f "$hooks_file" ]] || return
+  [[ -f "$config_file" ]] || return
 
-  if ! grep -q "memory-reminder.mjs" "$hooks_file" 2>/dev/null; then
+  if ! grep -q "memory-reminder.mjs" "$config_file" 2>/dev/null; then
     info "$platform: no agent-gates hook found"
     return
   fi
 
-  if command -v jq &>/dev/null; then
-    if jq '
-      .PostToolUse = [.PostToolUse[] | select(.hooks | all(.command | test("memory-reminder") | not))]
-      | if .PostToolUse | length == 0 then del(.PostToolUse) else . end
-    ' "$hooks_file" > "${hooks_file}.tmp"; then
-      mv "${hooks_file}.tmp" "$hooks_file"
-    else
-      rm -f "${hooks_file}.tmp"
-      warn "$platform: jq failed to parse $hooks_file — manually remove memory-reminder entry"
-      return
-    fi
+  if ! command -v jq &>/dev/null; then
+    warn "$platform: jq not found. Manually remove memory-reminder entry from $config_file"
+    return
+  fi
 
-    if jq -e 'keys | length == 0' "$hooks_file" &>/dev/null; then
-      rm -f "$hooks_file"
-      info "$platform: removed empty $hooks_file"
+  # Remove our hook from .hooks.PostToolUse (Claude-style nested schema).
+  # Drop the PostToolUse array entirely if it becomes empty after filter;
+  # drop .hooks entirely if no events remain. Never delete other top-level
+  # keys (settings.json may contain model/permissions/theme/etc.).
+  if jq '
+    if .hooks.PostToolUse then
+      .hooks.PostToolUse = [.hooks.PostToolUse[] | select(.hooks | all(.command | test("memory-reminder") | not))]
+      | if .hooks.PostToolUse | length == 0 then .hooks |= del(.PostToolUse) else . end
+      | if (.hooks // {}) == {} then del(.hooks) else . end
     else
-      info "$platform: removed hook entry from $hooks_file"
-    fi
+      .
+    end
+  ' "$config_file" > "${config_file}.tmp"; then
+    mv "${config_file}.tmp" "$config_file"
   else
-    warn "$platform: jq not found. Manually remove memory-reminder entry from $hooks_file"
+    rm -f "${config_file}.tmp"
+    warn "$platform: jq failed to parse $config_file — manually remove memory-reminder entry"
+    return
+  fi
+
+  # Only remove the file outright if it ended up completely empty (dedicated
+  # hooks.json case). Settings.json with other keys is preserved.
+  if jq -e 'keys | length == 0' "$config_file" &>/dev/null; then
+    rm -f "$config_file"
+    info "$platform: removed empty $config_file"
+  else
+    info "$platform: removed hook entry from $config_file"
   fi
 }
 
@@ -128,7 +140,8 @@ main() {
   done
 
   section "Removing platform hook registrations"
-  remove_hook_entry "$HOME/.claude/hooks.json" "OMC (Claude Code)"
+  remove_hook_entry "$HOME/.claude/settings.json" "OMC (Claude Code)"
+  remove_hook_entry "$HOME/.claude/hooks.json" "OMC (legacy hooks.json)"
   remove_hook_entry "$HOME/.config/opencode/hooks.json" "OMO (OpenCode)"
   remove_hook_entry "$HOME/.codex/hooks.json" "OMX (Codex)"
 
