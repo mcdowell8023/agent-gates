@@ -1,30 +1,31 @@
 #!/usr/bin/env bash
-# agent-toolkit installer
-# Detects agent platform and installs skills to the correct location.
-# Usage: curl -fsSL https://raw.githubusercontent.com/mcdowell8023/agent-toolkit/main/install.sh | bash
-# Or: ./install.sh [--target DIR]
+# agent-gates installer
+# Detects agent platforms, installs skills + registers platform hooks.
+# Usage: curl -fsSL https://raw.githubusercontent.com/mcdowell8023/agent-gates/main/install.sh | bash
+# Or: ./install.sh [--target DIR] [--skip-hooks]
 
 set -euo pipefail
 
-REPO_URL="https://github.com/mcdowell8023/agent-toolkit"
+REPO_URL="https://github.com/mcdowell8023/agent-gates"
 REPO_DIR=""
 TARGET_DIR=""
+INSTALL_DIR="$HOME/.agent-gates"
 SKILLS=(init-project-gates agent-workflow-rules agent-review-protocol)
+SKIP_HOOKS=0
 
-# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m'
 
 info()  { echo -e "${GREEN}✓${NC} $1"; }
 warn()  { echo -e "${YELLOW}⚠${NC} $1"; }
 fail()  { echo -e "${RED}✗${NC} $1" >&2; exit 1; }
+section() { echo -e "\n${BLUE}━━━${NC} $1"; }
 
 # --- Detect platform ---
 detect_platform() {
-  # Priority: explicit --target > cc-switch > Claude Code > OpenCode > Codex
-
   if [[ -n "$TARGET_DIR" ]]; then
     info "Using explicit target: $TARGET_DIR"
     return
@@ -54,7 +55,6 @@ detect_platform() {
     return
   fi
 
-  # Fallback: create Claude Code skills dir
   TARGET_DIR="$HOME/.claude/skills"
   warn "No agent platform detected. Using default: $TARGET_DIR"
   mkdir -p "$TARGET_DIR"
@@ -64,15 +64,14 @@ detect_platform() {
 fetch_repo() {
   local tmp_dir
   tmp_dir=$(mktemp -d)
-  REPO_DIR="$tmp_dir/agent-toolkit"
+  REPO_DIR="$tmp_dir/agent-gates"
 
   if command -v git &>/dev/null; then
     git clone --depth 1 "$REPO_URL.git" "$REPO_DIR" 2>/dev/null || \
       fail "Failed to clone $REPO_URL. Check network and permissions."
   else
-    # Fallback: download tarball
     curl -fsSL "$REPO_URL/archive/refs/heads/main.tar.gz" | tar -xz -C "$tmp_dir"
-    REPO_DIR="$tmp_dir/agent-toolkit-main"
+    REPO_DIR="$tmp_dir/agent-gates-main"
   fi
 
   [[ -d "$REPO_DIR/skills" ]] || fail "Invalid repo structure: skills/ not found"
@@ -80,6 +79,7 @@ fetch_repo() {
 
 # --- Install skills ---
 install_skills() {
+  section "Installing skills → $TARGET_DIR"
   local installed=0
   local skipped=0
 
@@ -94,9 +94,7 @@ install_skills() {
     fi
 
     if [[ -d "$dst" ]]; then
-      # Update: overwrite SKILL.md, preserve custom files
       cp "$src/SKILL.md" "$dst/SKILL.md"
-      # Copy templates if they exist
       if [[ -d "$src/templates" ]]; then
         mkdir -p "$dst/templates"
         cp -R "$src/templates/"* "$dst/templates/" 2>/dev/null || true
@@ -109,21 +107,13 @@ install_skills() {
     ((installed++))
   done
 
-  echo ""
-  info "Done! $installed skills installed/updated, $skipped skipped."
-  echo ""
-  echo "  Target: $TARGET_DIR"
-  echo ""
-  echo "  Skills installed:"
-  for skill in "${SKILLS[@]}"; do
-    [[ -d "$TARGET_DIR/$skill" ]] && echo "    - $skill"
-  done
+  info "$installed skills installed/updated, $skipped skipped"
 }
 
 # --- Symlink to other platforms (cc-switch mode) ---
 create_symlinks() {
-  # Only if installed to cc-switch, also symlink to other platforms
   if [[ "$TARGET_DIR" == "$HOME/.cc-switch/skills" ]]; then
+    section "Creating platform symlinks"
     local dirs=("$HOME/.claude/skills" "$HOME/.config/opencode/skills" "$HOME/.codex/skills")
     for dir in "${dirs[@]}"; do
       [[ -d "$dir" ]] || continue
@@ -132,9 +122,84 @@ create_symlinks() {
         local dst="$dir/$skill"
         [[ -d "$src" ]] || continue
         [[ -L "$dst" || ! -e "$dst" ]] && ln -sf "$src" "$dst" 2>/dev/null && \
-          info "Symlinked: $dst → $src"
+          info "Symlinked: $dst"
       done
     done
+  fi
+}
+
+# --- Install hooks to ~/.agent-gates ---
+install_hook_files() {
+  section "Installing hook files → $INSTALL_DIR"
+  mkdir -p "$INSTALL_DIR/hooks/platform" "$INSTALL_DIR/hooks/git"
+
+  cp "$REPO_DIR/hooks/platform/memory-reminder.mjs" "$INSTALL_DIR/hooks/platform/memory-reminder.mjs"
+  cp "$REPO_DIR/hooks/git/agent-quality-gate.sh" "$INSTALL_DIR/hooks/git/agent-quality-gate.sh"
+  chmod +x "$INSTALL_DIR/hooks/git/agent-quality-gate.sh"
+
+  info "Installed: memory-reminder.mjs"
+  info "Installed: agent-quality-gate.sh"
+}
+
+# --- Register platform hooks ---
+register_platform_hooks() {
+  [[ "$SKIP_HOOKS" -eq 1 ]] && { warn "Skipping platform hook registration (--skip-hooks)"; return; }
+
+  section "Registering platform hooks"
+
+  local hook_cmd="node $INSTALL_DIR/hooks/platform/memory-reminder.mjs"
+  local hook_entry="{\"type\":\"command\",\"command\":\"$hook_cmd\",\"timeout\":5}"
+  local post_tool_entry="{\"matcher\":\"TodoWrite|todowrite\",\"hooks\":[$hook_entry]}"
+
+  # OMC: ~/.claude/hooks.json (if Claude Code installed)
+  if [[ -d "$HOME/.claude" ]]; then
+    register_hook_json "$HOME/.claude/hooks.json" "OMC (Claude Code)"
+  fi
+
+  # OMO: ~/.claude/settings.json is shared with OMC hooks.json location
+  # OpenCode reads from the same ~/.claude/hooks.json when hooks: true
+
+  # OMX: ~/.codex/hooks.json (if Codex installed)
+  if [[ -d "$HOME/.codex" ]]; then
+    register_hook_json "$HOME/.codex/hooks.json" "OMX (Codex)"
+  fi
+}
+
+register_hook_json() {
+  local hooks_file="$1"
+  local platform="$2"
+  local hook_cmd="node $INSTALL_DIR/hooks/platform/memory-reminder.mjs"
+
+  # Check if already registered
+  if [[ -f "$hooks_file" ]] && grep -q "memory-reminder.mjs" "$hooks_file" 2>/dev/null; then
+    info "$platform: already registered"
+    return
+  fi
+
+  if [[ ! -f "$hooks_file" ]]; then
+    # Create new hooks.json
+    cat > "$hooks_file" << EOF
+{
+  "PostToolUse": [
+    {
+      "matcher": "TodoWrite|todowrite",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "$hook_cmd",
+          "timeout": 5
+        }
+      ]
+    }
+  ]
+}
+EOF
+    info "$platform: created $hooks_file"
+  else
+    # File exists but doesn't have our hook — warn user to merge manually
+    warn "$platform: $hooks_file exists. Add manually:"
+    echo "    PostToolUse → matcher: \"TodoWrite|todowrite\" → command: \"$hook_cmd\""
+    echo "    See: $INSTALL_DIR/../docs/platform-hooks.md"
   fi
 }
 
@@ -146,13 +211,15 @@ trap cleanup EXIT
 
 # --- Main ---
 main() {
-  echo "🛠  Agent Toolkit Installer"
+  echo -e "${BLUE}╔══════════════════════════════════╗${NC}"
+  echo -e "${BLUE}║${NC}    Agent Gates Installer v1.0    ${BLUE}║${NC}"
+  echo -e "${BLUE}╚══════════════════════════════════╝${NC}"
   echo ""
 
-  # Parse args
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --target) TARGET_DIR="$2"; shift 2 ;;
+      --skip-hooks) SKIP_HOOKS=1; shift ;;
       *) fail "Unknown option: $1" ;;
     esac
   done
@@ -161,12 +228,24 @@ main() {
   fetch_repo
   install_skills
   create_symlinks
+  install_hook_files
+  register_platform_hooks
 
+  section "Done!"
+  echo ""
+  echo "  Skills:  $TARGET_DIR/"
+  for skill in "${SKILLS[@]}"; do
+    [[ -d "$TARGET_DIR/$skill" ]] && echo "           └─ $skill"
+  done
+  echo ""
+  echo "  Hooks:   $INSTALL_DIR/hooks/"
+  echo "           ├─ git/agent-quality-gate.sh"
+  echo "           └─ platform/memory-reminder.mjs"
   echo ""
   echo "  Next steps:"
-  echo "    1. Open a project and tell your agent: '初始化项目' or 'init project gates'"
-  echo "    2. The agent will load init-project-gates and set up .agent/ + hooks"
-  echo "    3. agent-workflow-rules auto-loads when writing code (TDD, verification, etc.)"
+  echo "    1. In any project: tell agent '初始化项目' or 'init project gates'"
+  echo "    2. Agent sets up .agent/ + hooks + AGENTS.md"
+  echo "    3. agent-workflow-rules auto-loads during development"
   echo ""
 }
 
