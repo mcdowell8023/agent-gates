@@ -200,24 +200,160 @@ flowchart TB
     class L3A,L3B,L3C,L3D l3
 ```
 
-### agent-gates 在方案里的位置
+### 5.3 实施度盘点（v1.3.1 现状）
 
-| 层 | 方案设计 | agent-gates 当前实现 | 状态 |
+诚实交代：v1.3.1 只完成了设计的约 1/3，且方向有偏移。
+
+| 层 | 设计要求 | agent-gates v1.3.1 实际 | 状态 |
 |---|---|---|---|
-| L1 OpenSpec | spec-first 工作流 + `.opencode/skills/openspec-*` | 通过全局 `10-workflow.md` 路径 A 描述；本仓库**不安装** opsx | 全局规则已对齐，工具 standalone |
-| L2 BDD | `features/*.feature` Gherkin 验收 | 全局 `10-workflow.md` §BDD Gherkin 要求已声明；本仓库**未强制**生成 | 规范已落，未强制 |
-| L2 TDD | RED→GREEN→REFACTOR | `agent-workflow-rules` skill §标准 TDD 流程强制约束 | ✅ 已实现 |
-| L2 Three-Agent Review | 自评 + Spec + Quality 三角色 | `agent-review-protocol` skill 落地 | ✅ 已实现 |
-| L3 CHECK 1 OpenSpec | 检查 `openspec/changes/<name>/` 存在 | `agent-quality-gate.sh` v1.3 **未实现** | ⏳ 计划中 |
-| L3 CHECK 2 BDD | 检查 `features/*.feature` 存在 | 未实现 | ⏳ 计划中 |
-| L3 CHECK 3 测试对应 | 新增 src 必有对应 test 文件 | Gate 1 ✅ 已实现（多语言：ts/js/py/java/kt/go） | ✅ |
-| L3 CHECK 4 tests pass | 跑测试 | 设计文档明确不在 hook 里执行（CI 负责）；agent-gates 改用 **Gate 2 — Cross-Review 证据**作为替代质量门 | ✅ 已替换实现 |
-| L3 隐形依赖 | Memory persistence | `memory-reminder.mjs` PostToolUse hook（方案文档未提，agent-gates 自加） | ✅ 已实现（v1.2.1） |
-| L3 部署健康检查 | （方案未涵盖） | `doctor.sh`（v1.3.0 加入，v1.3.1 加强） | ✅ 已实现 |
+| L1 OpenSpec — `openspec init` 集成 | `install.sh --with-openspec` 调用 opsx，部署 `.opencode/skills/openspec-*` + `commands/opsx-*` | 完全没集成。`install.sh` grep 不到 `openspec` 任何关键字 | ❌ 0% |
+| L1 OpenSpec — 全局规则路径 A | `10-workflow.md` 区分团队项目 / 个人项目两条路径 | 全局 `10-workflow.md` 已写路径 A，但只是 prompt 约束 | ⚠️ 规则层落了，工具层 0 |
+| L2 BDD — `features/` 脚手架 | `init-project-gates` 加 `features/` 目录 + 多语言 step_definitions 模板 | `templates/` 下没有 features/；`skills/init-project-gates/templates/` 只有 PROGRESS.md | ❌ 0% |
+| L2 BDD — RED 阶段对齐 scenario | `agent-workflow-rules` SKILL.md 明确"RED 必须实现 scenario step definitions" | SKILL.md §2 第 75 行只有一句话提及，没具体模板、没 enforcement | ⚠️ 嘴上一句 |
+| L2 TDD — RED→GREEN→REFACTOR | 完整强制约束 + Iron Law + 例外授权机制 | `agent-workflow-rules` §2 完整实现 | ✅ 100% |
+| L2 Three-Agent Review | 设计只提 Oracle 审查一句 | `agent-review-protocol` 扩成 Implementer/Spec/Quality 三角色 + 严重性分级 + 防环规则 | ✅ 100%（超出设计） |
+| L3 CHECK 1 — OpenSpec change | 项目有 `openspec/` 时检查活跃 change | hook 没这分支 | ❌ 0% |
+| L3 CHECK 2 — .feature 存在 | 检测新增功能文件且无对应 `.feature` → FAIL | hook 没这分支 | ❌ 0% |
+| L3 CHECK 3 — 测试对应 | 新增 src 必有对应 test 文件 | Gate 1 ✅（多语言 ts/js/py/java/kt/go） | ✅ 100% |
+| L3 CHECK 4 — tests pass | 设计明确**不放 hook**，由 CI 负责 | hook 没跑测试（符合设计） | ✅ 设计本意 |
+| L3 自加 Gate 2 — Cross-Review 证据 | （设计没提） | `.agent/reviews/*.md` + VERDICT 行 + 4h 新鲜度 + post-review 改动量 | ⚡ 自加 |
+| L2 隐形 — Memory persistence | （设计完全没提） | `memory-reminder.mjs` PostToolUse hook + `agent-workflow-rules` §8 | ⚡ 自加（关键） |
+| 运维 — AGENT_MODE 设置 | installer 帮 agent 配 | install.sh 完全不配；只在 `init-project-gates` 的 CLAUDE.md 注入文本里**一句话**让 agent 自行 `export AGENT_MODE=1` | ⚠️ 文档级 |
+| 运维 — lefthook/husky 集成 | installer 用 lefthook.yml 或 .husky/pre-commit | install.sh 不调用任何 hook manager；`init-project-gates` SKILL.md 描述了 if-else 逻辑但要 agent 当时手动执行 | ⚠️ skill 描述级 |
+| 运维 — 部署健康检查 | （设计没提） | `doctor.sh` 11 项检查 + CI-friendly | ⚡ 自加 |
+| 运维 — 多平台 hook 注册 | 设计只提 lefthook/husky 一种 | OMC/OMO/OMX/cc-switch 跨 4 平台 PostToolUse hook 注册 | ⚡ 自加 |
+| 运维 — uninstall | （设计没提） | `uninstall.sh` + legacy schema sweep | ⚡ 自加 |
 
-### 跟 agent-superpowers 怎么比
+实施度按层估算：
 
-agent-superpowers 是 **L2 纪律规则的另一种交付形态**——它把规则做成一个 SKILL.md + 一段 AGENTS.md snippet，靠 agent 自觉遵守。agent-gates 与它**并列存在**，但解决的问题更进一步：
+```
+L1 OpenSpec 规划层：  ██░░░░░░░░░░░░░░░░░░  10%
+L2 BDD 实现层：       ██░░░░░░░░░░░░░░░░░░  10%
+L2 TDD + Review：     ████████████████████  100%（含超出设计的 Three-Agent Review）
+L2 Memory（自加）：   ████████████████████  100%
+L3 4 个 CHECK：       █████░░░░░░░░░░░░░░░  25%（只做了 CHECK 3）
+L3 Cross-Review Gate（自加）：████████████████████  100%
+运维基础设施（自加）：██████████████████░░  90%
+```
+
+### 5.4 A. 设计明确不做、agent-gates 强行加了的 — 方向审查
+
+#### A1. Gate 2 Cross-Review 证据检查
+
+**设计说**：CHECK 4 "tests pass" 不放 hook，因为执行测试太慢，应由 CI 或手动 test 负责。
+**agent-gates 做了**：Gate 2 检查 `.agent/reviews/<date>-<topic>.md` 存在 + 含 `VERDICT: PASS` 行 + 4 小时新鲜度 + post-review 改动 < 20 行。
+
+**方向审查**：
+
+| 维度 | 评估 |
+|---|---|
+| 跟设计是否冲突 | 不冲突。Cross-Review 不是 "tests pass" 替代品，它检查的是**另一件事**（审查证据是否存在），不是测试是否通过 |
+| 是否合理 | ✅ 合理。Agent 自评通过容易漏架构 / 安全问题，cross-review（用不同模型）能补这层。在无 CI 的个人项目尤其有价值 |
+| 是否应进设计文档 | ✅ 应该。建议加到 L3 作为 **CHECK 5**（与 CHECK 4 并列，CHECK 4 给 CI，CHECK 5 给 agent commit gate） |
+| 风险 | review 文件造假（agent 自己写一份 VERDICT: PASS 应付 hook）。当前 4 小时新鲜度 + post-review 改动量做了一定缓解，但仍可绕过 |
+
+**结论**：方向对，但**文档应明确这是 L3 自加的 CHECK 5，不是 CHECK 4 替代**。我之前把它写成"替代 CHECK 4"是错的。
+
+#### A2. CLAUDE.md 注入（强制 export AGENT_MODE=1 + 不许 --no-verify）
+
+**设计说**：AGENT_MODE 由全局 agent rule 规定，installer 不管。
+**agent-gates 做了**：`init-project-gates` 把这条规则注入到项目 CLAUDE.md，绑定到具体项目。
+
+**方向审查**：✅ 比设计更稳妥。设计依赖全局规则（不同 agent 可能没装），项目级 CLAUDE.md 注入是兜底。**建议保留，无需调整设计**。
+
+### 5.5 B. 设计完全没提、agent-gates 自己加的 — 可能是设计缺失
+
+#### B1. Memory persistence hook（`memory-reminder.mjs`）
+
+**设计说**：0 字。
+**agent-gates 做了**：PostToolUse hook，agent 每次标 todo completed 时注入 system-reminder 提醒存 memory，配合 `agent-workflow-rules` §8。
+
+**是否应反向写回设计**：
+
+| 维度 | 评估 |
+|---|---|
+| 真实问题 | ✅ 是。Agent session 上下文窗口有限，工作中断丢上下文是高频问题（v1.2.1 端到端验证过） |
+| 解决得对 | ✅ 是。Hook 在 tool 完成后注入 reminder，agent 必须当下处理；比单纯 prompt 约束有效 |
+| 跟 L1/L2/L3 框架的关系 | 它不是 commit 时的 gate（L3），也不是 spec 规划（L1）。属于 **L2 实现层** 的横切关注点 |
+| 设计文档应该补 | ✅ 强烈建议。原方案文档 `BDD-CLI-Gate-OpenSpec整合方案.md` 加 **§第四层 — Memory 持久化** 或在 L2 内加一节 "Session 持久化约束"，引用 `memory-reminder.mjs` 实现 |
+
+**建议**：本会话结束前在 Vault 中给原方案加一个 patch 段（"补遗：Memory 持久化"），把 hook 设计反向写回。
+
+#### B2. Three-Agent Review pipeline（`agent-review-protocol`）
+
+**设计说**：只在 "全局规则变更摘要" 提到 "审查阶段包含 BDD 审查"，没展开。
+**agent-gates 做了**：Implementer 自评 → Spec Reviewer（独立验证需求）→ Quality Reviewer（6 维度）+ 严重性分级（Critical/Important/Suggestion）+ 防环规则（2 轮 cap）。
+
+**是否反向写回设计**：
+
+| 维度 | 评估 |
+|---|---|
+| 真实问题 | ✅ 是。单 Oracle 审查容易自评不充分；分角色降低盲点 |
+| 解决得对 | ✅ 是。三角色 + 严重性 + 防环这套已经在多轮 release 中验证过有效 |
+| 跟 L1/L2/L3 关系 | 属于 **L2 实现层** 的子流程（实现完成后的审查环节） |
+| 设计文档应该补 | ✅ 建议。原方案在 "全局规则变更摘要" 第 5 条加细节，或单独加 §"L2.5 实现后审查管道" |
+
+#### B3. doctor.sh / uninstall.sh / 跨平台 hook 注册
+
+**设计说**：0 字。聚焦理论层，不涉及部署运维。
+**agent-gates 做了**：v1.3.x doctor 自检 + uninstall + 4 平台 hook 注册。
+
+**是否反向写回设计**：
+
+| 维度 | 评估 |
+|---|---|
+| 真实问题 | ✅ 是。原方案文档只写"装个 hook"，但实际部署涉及版本管理、多平台、升级路径、回滚。这些是落地必需 |
+| 跟 L1/L2/L3 关系 | **横切** L1/L2/L3，属于 "实施层" 而不是 "方案层" |
+| 设计文档应该补 | ✅ 建议在原方案末尾加 **附录 A "运维基础设施"**，说明：(1) installer 多平台兼容；(2) doctor 自检；(3) uninstall + legacy sweep；(4) 版本管理 |
+
+### 5.6 C. 没实现的部分 — 可落地实施计划
+
+按依赖关系排序，分 3 个 release：
+
+#### v1.4.0 — 文档与软约束补齐（无破坏性，先把规则写到位）
+
+| 任务 | 范围 | 工时估 | 验证 |
+|---|---|---|---|
+| C1. `agent-workflow-rules` SKILL.md §2 RED 阶段 BDD 对齐扩成完整子节 | 把现在的一句话扩成 §2.1，含 `.feature` 示例 + step definitions 模板路径 + scenario 引用要求 | 半天 | reviewer 二次审查，确认与设计 §第二层 BDD 规范一致 |
+| C2. `doctor.sh` 加 `check_openspec_install`（团队项目）+ `check_bdd_features_dir`（检测 features/） | doctor.sh 加两个 check 函数 + main 调度 | 半天 | tests/run_doctor.sh 加 fixture：项目有 openspec → PASS / 没有 → note skip；项目有 features/ → PASS / 没有 → WARN（不 FAIL，因为存量） |
+| C3. README + docs/platform-hooks.md 加 OpenSpec / BDD 章节，说明项目级用法 | 文档补齐 | 半天 | reviewer 跨文件一致性 |
+| C4. **反向更新 Vault `BDD-CLI-Gate-OpenSpec整合方案.md`**：加 §"L2.4 Memory 持久化" + §"L2.5 实现后审查管道" + 附录 A 运维基础设施 | 修原设计文档（通过 obsidian-cli 写回） | 1 天 | 用户审阅 |
+
+**v1.4.0 完成后实施度**：L1 10% / L2 60% / L3 25% / 运维 95% — 主要是规则层补齐
+
+#### v1.4.1 — L3 CHECK 1 落地（OpenSpec hard gate）
+
+| 任务 | 范围 | 工时估 | 验证 |
+|---|---|---|---|
+| C5. `agent-quality-gate.sh` 加 **CHECK 1**：项目有 `openspec/changes/` 时检查活跃 change 存在；trivial 变更跳过；存量项目默认 WARN | 在 hook 加分支：`[[ -d openspec/changes ]] && [[ ACTIVE_CHANGES -eq 0 ]] && warn/fail` | 半天 | tests/run_doctor.sh 加 fixture：项目有 openspec/changes/foo/ → PASS；只有 openspec/ 没活跃 change → WARN |
+| C6. `install.sh --with-openspec` 标志：检测 `openspec` CLI 存在 → 调用 `openspec init`；不存在则提示 `npm i -g @openspec/cli` | install.sh 加 `--with-openspec` 解析 + 子函数 | 1 天 | fresh HOME 测试：--with-openspec 装完 → openspec/ 目录在 / 检测不到 CLI → 友好提示 |
+| C7. `init-project-gates` SKILL.md 增加"如果项目准备走 OpenSpec → 提示用户先跑 `openspec init`"的判断 | skill 加分支 | 半天 | reviewer |
+
+**v1.4.1 完成后实施度**：L1 50% / L2 60% / L3 50% — OpenSpec 工具链打通
+
+#### v1.4.2 — L3 CHECK 2 + BDD 脚手架（BDD hard gate）
+
+| 任务 | 范围 | 工时估 | 验证 |
+|---|---|---|---|
+| C8. `agent-quality-gate.sh` 加 **CHECK 2**：检测 staged 文件含 src/ 新增非 test 文件且 `features/` 不存在或为空 → FAIL（团队项目）/ WARN（存量） | hook 加分支 | 1 天 | tests/run_doctor.sh 加：新增 src 但无 features → 期望 FAIL；新增 src 且 features 存在 → PASS |
+| C9. `init-project-gates` 加 `features/` 目录脚手架 + 多语言 step_definitions 模板（TypeScript / Python / Java） | skill 加 `templates/features/` + step definitions 多语言模板 | 1.5 天 | fresh HOME 跑 init-project-gates → features/ 目录 + 模板存在 |
+| C10. `doctor.sh` 加 `check_bdd_step_definitions`（团队项目内有 features/ 但无 step_definitions/ → WARN） | doctor 加 check | 0.5 天 | 同 C2 模式 |
+| C11. `agent-workflow-rules` SKILL.md 加示例 commit message 标注 "scenario: X" 引用方式 | 文档补 | 0.5 天 | reviewer |
+
+**v1.4.2 完成后实施度**：L1 50% / L2 90% / L3 90% — 跟设计基本对齐
+
+#### v1.5+ — 长期方向（不在本季度计划内，仅备忘）
+
+- CI 集成：在 `.github/workflows/agent-gates.yml` 模板中加 BDD 测试运行（CHECK 4 in CI）
+- OMO 自动 hook 注册（当前手动；等 OpenCode 公开 hook config 约定）
+- Trace logger 集成（已有 v1.2.x 实验，未产品化）
+- Multi-agent worktree orchestration 集成（与 Paseo / Codex 协同）
+
+---
+
+### 5.7 跟 agent-superpowers 怎么比
+
+agent-superpowers 是 **L2 纪律规则的另一种交付形态**——它把规则做成一个 SKILL.md + 一段 AGENTS.md snippet，靠 agent 自觉遵守。agent-gates 与它**并列存在**：
 
 | 维度 | agent-superpowers | agent-gates |
 |---|---|---|
@@ -225,25 +361,13 @@ agent-superpowers 是 **L2 纪律规则的另一种交付形态**——它把规
 | 强制层 | 仅 L2（提示词约束） | L2（skill 约束）+ L3（git pre-commit 硬阻断） |
 | 多 agent 平台 | 任意支持 SKILL.md 的 agent | OMC / OMO / OMX / cc-switch 都装，hook 统一注册 |
 | Memory 持久化 | 不管 | PostToolUse hook 主动注入 reminder |
-| 与 OpenSpec 协同 | 不挂钩 | gate 设计预留 OpenSpec / BDD 检查口（待实现） |
+| 与 OpenSpec 协同 | 不挂钩 | 当前未集成；v1.4.1 起补齐 |
 | 自检工具 | 无 | `doctor.sh` |
 
 **一句话总结**：
 - **OpenSpec** = L1 规划层（说要做什么、为什么、怎么验收）
 - **agent-superpowers** = L2 的纯 prompt 版本（轻量、靠 agent 自觉）
-- **agent-gates** = L2（skill 约束）+ L3（CLI gate 硬阻断）的工程化落地，是上面那份整合方案的执行端实现
-
-### 还没做的部分
-
-按整合方案设计，agent-gates 后续要补：
-
-1. `agent-quality-gate.sh` 加 **CHECK 1**：项目有 `openspec/` 时检查活跃 change 存在（无活跃 change + 非 trivial 变更 → WARN/FAIL）
-2. `agent-quality-gate.sh` 加 **CHECK 2**：检测到新增功能文件且无对应 `features/*.feature` → FAIL
-3. `init-project-gates` skill 加 `features/` 目录脚手架 + step_definitions 多语言模板
-4. `doctor.sh` 加 `check_openspec_install`（团队项目）和 `check_bdd_features_dir`
-5. `install.sh` 增加 `--with-openspec` 标志，自动调 `openspec init`
-
-这些是 v1.4+ 的方向。在那之前，全局 `10-workflow.md` 已经先把规则写好（路径 A / 团队项目），agent 在团队项目里**应当**按 OpenSpec 走，只是 agent-gates 的硬 gate 还没把这一层卡死。
+- **agent-gates** = L2（skill + memory hook）+ L3（CLI gate 硬阻断）+ 运维（doctor/uninstall/多平台）的工程化落地，目标是与原整合方案对齐，**但 v1.3.1 只完成约 1/3**，剩下按 §5.6 分 v1.4.0/1/2 三个 release 补齐
 
 ---
 
