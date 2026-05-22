@@ -78,14 +78,30 @@ The installer requires `~/.claude/settings.json` to exist (start Claude Code onc
 
 ### OMO (OpenCode)
 
-Automated registration is **not yet supported** (deferred to v1.3.0+). The installer prints manual instructions:
+File: `~/.config/opencode/hooks.json` → `.hooks.PostToolUse[]` (nested schema, same shape as OMC and OMX).
 
-```
-matcher: TodoWrite|todowrite|TaskUpdate|TaskCreate
-command: node ~/.agent-gates/hooks/platform/memory-reminder.mjs
+Automated registration is **not yet supported** — the installer detects `~/.config/opencode/` and prints the manual entry. Add it to `~/.config/opencode/hooks.json` under `.hooks.PostToolUse[]`:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "TodoWrite|todowrite|TaskUpdate|TaskCreate",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /Users/you/.agent-gates/hooks/platform/memory-reminder.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
 ```
 
-Add these to OpenCode's hook config; consult OpenCode docs for the exact file path.
+`doctor.sh` checks this exact path/schema via `check_omo_registration`; if it reports the OMO hook as missing, the fix is to add the JSON above manually.
 
 ### OMX (Codex)
 

@@ -79,7 +79,7 @@ cd agent-gates
 | Platform | Skills Location | Hook Registration | Schema |
 |----------|----------------|-------------------|--------|
 | Claude Code (OMC) | `~/.claude/skills/` | `~/.claude/settings.json` → `.hooks.PostToolUse[]` | requires existing `settings.json` (start Claude Code once first) |
-| OpenCode (OMO) | `~/.config/opencode/skills/` | manual — automated registration tracked for v1.2.0 | — |
+| OpenCode (OMO) | `~/.config/opencode/skills/` | manual — installer prints the entry to add to `~/.config/opencode/hooks.json` `.hooks.PostToolUse[]`; auto-registration tracked | nested schema (same shape as OMC/OMX) |
 | Codex (OMX) | `~/.codex/skills/` | `~/.codex/hooks.json` → `.hooks.PostToolUse[]` | nested schema, installer creates file if missing |
 | cc-switch | `~/.cc-switch/skills/` + symlinks | combines OMC + OMX above | — |
 
@@ -138,7 +138,7 @@ What the installer does on upgrade:
 
 - **Per-project hook is NOT auto-upgraded.** Each project's `.githooks/agent-quality-gate.sh` (with `pre-commit` symlinked to it) is a one-time copy made by `init-project-gates`. After upgrading agent-gates globally, re-run `init project gates` in each initialized repo to sync the latest hook.
 - **Backups accumulate.** Each upgrade that detects user changes leaves a new `SKILL.md.bak.*` file. Run `./uninstall.sh --purge-backups` (combined with `--keep-skills` if you only want to clean backups) to remove them after merging your edits.
-- **OpenCode override mode.** If `~/.config/opencode/hooks.json` exists, the installer treats it as an override and merges there too. Without it, OMO falls back to `~/.claude/hooks.json`.
+- **OMO hook registration is manual.** When the installer detects `~/.config/opencode/`, it prints the JSON entry to add under `~/.config/opencode/hooks.json` `.hooks.PostToolUse[]`. `doctor.sh` checks the same path/schema; if it reports the OMO hook as missing, add the entry by hand (see `docs/platform-hooks.md` → OMO for the full JSON shape).
 - **No automatic skill migration.** If a future version renames or restructures a skill directory, you may need to manually clean up the old layout — the installer only updates known skill names.
 
 ## Doctor
@@ -155,16 +155,17 @@ Sample output:
 ✓ node v26.0.0
 ✓ jq jq-1.8.1
 ✓ Memory skill detected: ~/.cc-switch/skills/memory-1.0.2
-✓ installed version: 1.3.0
-✓ up to date with remote (1.3.0)
+✓ installed version: 1.3.1
+✓ up to date with remote (1.3.1)
 ✓ memory-reminder.mjs present
 ✓ agent-quality-gate.sh present (executable)
 ✓ OMC settings.json hook registered (matcher contains TaskUpdate)
+✓ OMO hooks.json hook registered
 ✓ OMX hooks.json hook registered
 ✓ hook output schema valid (hookEventName=PostToolUse, reminder included)
 ✓ no memory-reminder hook errors in last-7d transcripts
 
-10 pass · 0 warn · 0 fail
+11 pass · 0 warn · 0 fail
 ```
 
 Exit code is **0 if no FAIL** (WARN allowed), **1 if any FAIL**, so the script is CI-friendly:

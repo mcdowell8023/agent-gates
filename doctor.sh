@@ -156,7 +156,32 @@ check_omc_registration() {
   if [[ "$matcher" == *"TaskUpdate"* ]]; then
     pass "OMC settings.json hook registered (matcher contains TaskUpdate)"
   else
-    warn "OMC matcher \"$matcher\" lacks TaskUpdate — Claude Code current tool name won't trigger; re-run install.sh"
+    fail "OMC matcher \"$matcher\" lacks TaskUpdate — Claude Code current tool name won't trigger; re-run install.sh"
+  fi
+}
+
+check_omo_registration() {
+  if [[ ! -d "$HOME/.config/opencode" ]]; then
+    note "OMO (OpenCode) not installed, skipping"
+    return
+  fi
+  local h="$HOME/.config/opencode/hooks.json"
+  # OMO auto-registration is not implemented yet — install.sh prints manual
+  # instructions when it detects ~/.config/opencode. doctor reports presence,
+  # but the fix path is manual, not `install.sh --force`.
+  if [[ ! -f "$h" ]]; then
+    warn "OMO hooks.json missing at $h — OMO auto-registration not yet supported; add the entry manually (see install.sh OMO output / docs/platform-hooks.md)"
+    return
+  fi
+  if ! command -v jq &>/dev/null; then
+    warn "cannot inspect $h without jq"
+    return
+  fi
+  if jq -e '.hooks.PostToolUse[]?.hooks[]? | select(.command | test("memory-reminder"))' \
+       "$h" &>/dev/null; then
+    pass "OMO hooks.json hook registered"
+  else
+    warn "OMO hook NOT registered in $h — add manually (see install.sh OMO output / docs/platform-hooks.md)"
   fi
 }
 
@@ -212,11 +237,20 @@ check_transcript_errors() {
     note "$proj_dir missing — no transcripts to inspect"
     return
   fi
-  local count
-  count=$(find "$proj_dir" -name "*.jsonl" -mtime -7 -print0 2>/dev/null \
-         | xargs -0 grep -l "hook_non_blocking_error" 2>/dev/null \
-         | xargs grep -l "memory-reminder" 2>/dev/null \
-         | wc -l | tr -d ' ')
+  # Iterate with a while-read loop instead of `find | xargs | xargs` to avoid
+  # two long-standing gotchas:
+  #   1) BSD `xargs` (macOS) on empty stdin invokes the child with no args and
+  #      blocks reading from stdin — looks like a hang.
+  #   2) `set -o pipefail` + grep-returns-1-on-no-match would make the count
+  #      assignment fail and (under `set -e`) abort the whole script silently.
+  local count=0 f
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    if grep -q "hook_non_blocking_error" "$f" 2>/dev/null \
+       && grep -q "memory-reminder" "$f" 2>/dev/null; then
+      count=$((count + 1))
+    fi
+  done < <(find "$proj_dir" -name "*.jsonl" -mtime -7 2>/dev/null)
   if [[ "$count" == "0" ]]; then
     pass "no memory-reminder hook errors in last-7d transcripts"
   else
@@ -254,6 +288,7 @@ main() {
   check_version_remote
   check_hook_files
   check_omc_registration
+  check_omo_registration
   check_omx_registration
   check_hook_output_schema
   check_transcript_errors

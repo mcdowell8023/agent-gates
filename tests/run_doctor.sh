@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# Tests for doctor.sh — three P0 fixes (v1.3.1).
+# Strategy: source doctor.sh under a mocked $HOME and INSTALL_DIR, invoke
+# individual check_* functions, assert PASS/WARN/FAIL array contents.
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DOCTOR="$SCRIPT_DIR/../doctor.sh"
+PASS_COUNT=0
+FAIL_COUNT=0
+
+# Each test runs in a subshell with its own mocked HOME + INSTALL_DIR.
+# Override functions we don't want to actually execute so we can call main()
+# or individual checks in isolation.
+
+setup_mock_home() {
+  MOCK_HOME=$(mktemp -d)
+  export HOME="$MOCK_HOME"
+  export INSTALL_DIR="$MOCK_HOME/.agent-gates"
+  mkdir -p "$INSTALL_DIR/hooks/platform" "$INSTALL_DIR/hooks/git"
+  echo "1.3.1" > "$INSTALL_DIR/.version"
+  echo '#!/usr/bin/env node' > "$INSTALL_DIR/hooks/platform/memory-reminder.mjs"
+  echo '#!/usr/bin/env bash' > "$INSTALL_DIR/hooks/git/agent-quality-gate.sh"
+  chmod +x "$INSTALL_DIR/hooks/git/agent-quality-gate.sh"
+}
+
+teardown_mock_home() {
+  [[ -n "${MOCK_HOME:-}" && -d "$MOCK_HOME" ]] && rm -rf "$MOCK_HOME"
+}
+
+# Source doctor.sh without running main() — we define check functions only.
+# doctor.sh runs `main "$@"` at the end; we bypass by sourcing in a way that
+# defines functions but skips the trailing main call. Easiest: extract via
+# stripping `main "$@"` line.
+source_doctor_no_main() {
+  local tmp
+  tmp=$(mktemp)
+  # Strip the final `main "$@"` invocation, keep all function defs.
+  sed '/^main "\$@"$/d' "$DOCTOR" > "$tmp"
+  # shellcheck disable=SC1090
+  source "$tmp"
+  rm -f "$tmp"
+}
+
+assert() {
+  local name="$1"
+  local cond="$2"
+  if [[ "$cond" == "true" ]]; then
+    echo "  ✓ $name"
+    PASS_COUNT=$((PASS_COUNT + 1))
+  else
+    echo "  ✗ $name"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+}
+
+# --- P0-1: check_omo_registration must exist and detect OMO hooks.json ---
+test_p0_1_omo_check_exists() {
+  echo "P0-1: check_omo_registration exists and works"
+  (
+    setup_mock_home
+    mkdir -p "$HOME/.config/opencode"
+    cat > "$HOME/.config/opencode/hooks.json" << 'EOF'
+{
+  "hooks": {
+    "PostToolUse": [
+      {"matcher": "TaskUpdate", "hooks": [{"type": "command", "command": "node memory-reminder.mjs"}]}
+    ]
+  }
+}
+EOF
+    source_doctor_no_main
+    if ! declare -F check_omo_registration >/dev/null; then
+      echo "  RED: check_omo_registration function missing"
+      teardown_mock_home
+      exit 1
+    fi
+    PASS=(); WARN=(); FAIL=()
+    QUIET=1
+    check_omo_registration
+    local found=false
+    for x in "${PASS[@]:-}"; do
+      [[ "$x" == *"OMO"* ]] && found=true
+    done
+    if [[ "$found" == "true" ]]; then
+      teardown_mock_home
+      exit 0
+    else
+      echo "  RED: expected PASS containing OMO, got PASS=(${PASS[*]:-}) WARN=(${WARN[*]:-}) FAIL=(${FAIL[*]:-})"
+      teardown_mock_home
+      exit 1
+    fi
+  )
+  local rc=$?
+  assert "P0-1 OMO check present and detects valid hook" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+}
+
+test_p0_1_omo_missing_hook() {
+  echo "P0-1b: check_omo_registration warns when hook missing"
+  (
+    setup_mock_home
+    mkdir -p "$HOME/.config/opencode"
+    echo '{"hooks":{}}' > "$HOME/.config/opencode/hooks.json"
+    source_doctor_no_main
+    if ! declare -F check_omo_registration >/dev/null; then
+      teardown_mock_home; exit 1
+    fi
+    PASS=(); WARN=(); FAIL=()
+    QUIET=1
+    check_omo_registration
+    # Should be WARN (not registered) or FAIL — either is correct, but not PASS
+    local pass_count=${#PASS[@]}
+    if [[ $pass_count -eq 0 ]]; then
+      teardown_mock_home; exit 0
+    else
+      echo "  expected no PASS, got PASS=(${PASS[*]})"
+      teardown_mock_home; exit 1
+    fi
+  )
+  local rc=$?
+  assert "P0-1b OMO check warns/fails when hook missing" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+}
+
+# --- P0-2: OMC matcher-mismatch must FAIL, not WARN ---
+test_p0_2_matcher_mismatch_is_fail() {
+  echo "P0-2: OMC matcher without TaskUpdate must FAIL (not WARN)"
+  (
+    setup_mock_home
+    mkdir -p "$HOME/.claude"
+    cat > "$HOME/.claude/settings.json" << 'EOF'
+{
+  "hooks": {
+    "PostToolUse": [
+      {"matcher": "TodoWrite", "hooks": [{"type": "command", "command": "node memory-reminder.mjs"}]}
+    ]
+  }
+}
+EOF
+    source_doctor_no_main
+    PASS=(); WARN=(); FAIL=()
+    QUIET=1
+    check_omc_registration
+    local in_fail=false
+    for x in "${FAIL[@]:-}"; do
+      [[ "$x" == *"matcher"* || "$x" == *"TaskUpdate"* ]] && in_fail=true
+    done
+    if [[ "$in_fail" == "true" ]]; then
+      teardown_mock_home; exit 0
+    else
+      echo "  RED: expected FAIL with matcher message; PASS=(${PASS[*]:-}) WARN=(${WARN[*]:-}) FAIL=(${FAIL[*]:-})"
+      teardown_mock_home; exit 1
+    fi
+  )
+  local rc=$?
+  assert "P0-2 OMC matcher mismatch goes to FAIL" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+}
+
+# --- P0-3: check_transcript_errors must not hang on empty/no-match input ---
+test_p0_3_no_hang_on_empty() {
+  echo "P0-3: check_transcript_errors completes within 5s on empty transcripts"
+  (
+    setup_mock_home
+    mkdir -p "$HOME/.claude/projects/sample"
+    # Create jsonl with no hook_non_blocking_error matches.
+    echo '{"type":"user","content":"hello"}' > "$HOME/.claude/projects/sample/sess.jsonl"
+    source_doctor_no_main
+    PASS=(); WARN=(); FAIL=()
+    QUIET=1
+    # Wall-clock timer: run in foreground, fail if it takes > 5s.
+    SECONDS=0
+    check_transcript_errors &>/dev/null
+    elapsed=$SECONDS
+    teardown_mock_home
+    if (( elapsed < 5 )); then
+      exit 0
+    else
+      echo "  RED: check_transcript_errors took ${elapsed}s (hang suspected)"
+      exit 1
+    fi
+  )
+  local rc=$?
+  assert "P0-3 no hang on empty transcript set" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+}
+
+# Workaround: doctor.sh check_transcript_errors function we'll test directly.
+# Need an alternate runner that captures the pipeline within the subshell.
+# Embed it inline so we can timeout-wrap without process group quirks.
+
+test_p0_3_no_hang_direct() {
+  echo "P0-3b: direct pipeline test for hang on no hook_non_blocking_error matches"
+  local tmp
+  tmp=$(mktemp -d)
+  mkdir -p "$tmp/projects/sample"
+  echo '{"type":"user"}' > "$tmp/projects/sample/a.jsonl"
+  # Reproduce the original buggy pipeline; should hang without -r on second xargs.
+  # Use a subshell + kill to detect hang.
+  (
+    find "$tmp/projects" -name "*.jsonl" -mtime -7 -print0 2>/dev/null \
+      | xargs -0 grep -l "hook_non_blocking_error" 2>/dev/null \
+      | xargs grep -l "memory-reminder" 2>/dev/null \
+      | wc -l
+  ) &
+  pid=$!
+  sleep 3
+  if kill -0 $pid 2>/dev/null; then
+    kill -9 $pid 2>/dev/null
+    echo "  CONFIRMED: original pipeline hangs (P0-3 reproducible)"
+    rm -rf "$tmp"
+    # This is informational — the real assert is the function-level test above.
+  fi
+  rm -rf "$tmp"
+}
+
+echo "Running doctor.sh tests..."
+echo ""
+test_p0_1_omo_check_exists
+test_p0_1_omo_missing_hook
+test_p0_2_matcher_mismatch_is_fail
+test_p0_3_no_hang_on_empty
+test_p0_3_no_hang_direct
+
+echo ""
+echo "Results: $PASS_COUNT passed, $FAIL_COUNT failed"
+[[ $FAIL_COUNT -gt 0 ]] && exit 1
+exit 0

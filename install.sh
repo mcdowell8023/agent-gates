@@ -309,13 +309,14 @@ register_platform_hooks() {
     fi
   fi
 
-  # OMO: per-user hook config not yet documented; print manual instructions.
+  # OMO: ~/.config/opencode/hooks.json (.hooks.PostToolUse, nested schema).
+  # Auto-registration not yet implemented — print explicit manual entry.
   if [[ -d "$HOME/.config/opencode" ]]; then
     warn "OMO (OpenCode): automated hook registration not yet supported."
-    echo "    Track: https://github.com/mcdowell8023/agent-gates/issues"
-    echo "    Manual: add to OpenCode hook config under PostToolUse:"
+    echo "    Add manually to ~/.config/opencode/hooks.json under .hooks.PostToolUse[]:"
     echo "      matcher: \"$HOOK_MATCHER\""
     echo "      command: \"node $INSTALL_DIR/hooks/platform/memory-reminder.mjs\""
+    echo "    See docs/platform-hooks.md → OMO section for the full JSON shape."
   fi
 
   # OMX: ~/.codex/hooks.json (.hooks.PostToolUse, nested schema)
