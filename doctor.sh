@@ -97,8 +97,11 @@ check_version_remote() {
     warn "curl not in PATH — skipping remote version check"
     return
   fi
-  local remote
-  remote=$(curl -fsSL --max-time 5 "$REPO_URL/raw/main/.version" 2>/dev/null | tr -d '[:space:]')
+  # macOS bash 3.2: `set -e` is NOT suppressed by `local` assignment from a
+  # command substitution, so a failed curl would abort the whole script and
+  # hide all prior check results. The trailing `|| true` ensures graceful WARN.
+  local remote=""
+  remote=$(curl -fsSL --max-time 5 "$REPO_URL/raw/main/.version" 2>/dev/null | tr -d '[:space:]' || true)
   if [[ -z "$remote" ]]; then
     warn "could not fetch remote .version (offline or repo unreachable)"
     return
