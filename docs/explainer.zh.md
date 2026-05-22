@@ -310,16 +310,24 @@ L3 Cross-Review Gate（自加）：███████████████
 
 按依赖关系排序，分 3 个 release：
 
-#### v1.4.0 — 文档与软约束补齐（无破坏性，先把规则写到位）
+> **基准变化（2026-05-22 起）**：`agent-workflow-rules` SKILL.md 成为**工作流规则的权威源**，全局 `~/.claude/rules/global/10-workflow.md` 退化为同步镜像。新增 / 修改规则**必须先改 skill**，再同步全局。这是为了让 agent 在没有全局规则时也能基于 skill 独立工作，并消除"两份不一致"的风险。
+
+#### v1.3.2（本次 release，已完成）— skill 升级为规则基准
+
+| 任务 | 范围 | 状态 |
+|---|---|---|
+| C0. 把 10-workflow.md 内容落进 SKILL.md | `agent-workflow-rules` 16 节版本：新增 §1 意图识别、§3 Path A/B 路由、§5 OpenSpec Workflow、§6 BDD Gherkin、§8 CLI Pre-commit Gate；TDD §4 加 RED 阶段 BDD 对齐子节；anti-pattern §15 加 Path A / OpenSpec 检查 | ✅ 完成 |
+
+#### v1.4.0 — 文档与软约束补齐（无破坏性）
 
 | 任务 | 范围 | 工时估 | 验证 |
 |---|---|---|---|
-| C1. `agent-workflow-rules` SKILL.md §2 RED 阶段 BDD 对齐扩成完整子节 | 把现在的一句话扩成 §2.1，含 `.feature` 示例 + step definitions 模板路径 + scenario 引用要求 | 半天 | reviewer 二次审查，确认与设计 §第二层 BDD 规范一致 |
-| C2. `doctor.sh` 加 `check_openspec_install`（团队项目）+ `check_bdd_features_dir`（检测 features/） | doctor.sh 加两个 check 函数 + main 调度 | 半天 | tests/run_doctor.sh 加 fixture：项目有 openspec → PASS / 没有 → note skip；项目有 features/ → PASS / 没有 → WARN（不 FAIL，因为存量） |
-| C3. README + docs/platform-hooks.md 加 OpenSpec / BDD 章节，说明项目级用法 | 文档补齐 | 半天 | reviewer 跨文件一致性 |
-| C4. **反向更新 Vault `BDD-CLI-Gate-OpenSpec整合方案.md`**：加 §"L2.4 Memory 持久化" + §"L2.5 实现后审查管道" + 附录 A 运维基础设施 | 修原设计文档（通过 obsidian-cli 写回） | 1 天 | 用户审阅 |
+| C1. `doctor.sh` 加 `check_openspec_install`（团队项目）+ `check_bdd_features_dir`（检测 features/） | doctor.sh 加两个 check 函数 + main 调度 | 半天 | tests/run_doctor.sh 加 fixture：项目有 openspec → PASS / 没有 → note skip；项目有 features/ → PASS / 没有 → WARN（不 FAIL，因为存量） |
+| C2. README + docs/platform-hooks.md 加 OpenSpec / BDD 章节，说明项目级用法 | 文档补齐 | 半天 | reviewer 跨文件一致性 |
+| C3. **反向更新 Vault `BDD-CLI-Gate-OpenSpec整合方案.md`**：加 §"L2.4 Memory 持久化" + §"L2.5 实现后审查管道" + 附录 A 运维基础设施 | 修原设计文档（通过 obsidian-cli 写回） | 1 天 | 用户审阅 |
+| C4. 全局 `10-workflow.md` 同步 skill 内容（精简为 skill 概要 + 引用 skill 路径） | 同步镜像 | 半天 | diff skill ↔ 10-workflow 一致 |
 
-**v1.4.0 完成后实施度**：L1 10% / L2 60% / L3 25% / 运维 95% — 主要是规则层补齐
+**v1.4.0 完成后实施度**：L1 10% / L2 70% / L3 25% / 运维 95% — 规则层 + 文档层补齐
 
 #### v1.4.1 — L3 CHECK 1 落地（OpenSpec hard gate）
 

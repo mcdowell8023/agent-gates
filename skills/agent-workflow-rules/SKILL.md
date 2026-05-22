@@ -1,26 +1,43 @@
 ---
 name: agent-workflow-rules
-description: "Runtime discipline rules for agent-assisted development: TDD enforcement, plan review gates, verification-before-completion, anti-over-engineering, and systematic debugging. Load this skill in any project where agents write code. Triggers: 'workflow rules', 'TDD', 'plan review', '工作流规则', '开发纪律', 'agent discipline', 'quality workflow'."
+description: "Canonical runtime workflow for agent-assisted development: intent recognition, Path-A (OpenSpec) vs Path-B routing, TDD, BDD scenario alignment, plan review, verification, anti-over-engineering, cross-review enforcement, memory persistence, and CLI pre-commit gate semantics. Load this skill in any project where agents write code. Triggers: 'workflow rules', 'TDD', 'BDD', 'OpenSpec', 'plan review', 'cli gate', 'AGENT_MODE', '工作流规则', '开发纪律', '团队项目', 'agent discipline', 'quality workflow'."
 ---
 
 # Agent Workflow Rules
 
-Runtime development discipline for AI coding agents. This skill governs HOW the agent works within a project — enforcing test-driven development, plan review before execution, evidence-based verification, and minimal implementation.
+Runtime development discipline for AI coding agents. This skill governs HOW the agent works within a project — intent recognition, coding flow routing (team/OpenSpec vs individual), test-driven development with BDD scenario alignment, plan review before execution, evidence-based verification, minimal implementation, cross-review, memory persistence, and CLI pre-commit gate semantics.
 
-**Precedence**: When loaded alongside `10-workflow.md` (global rules), this skill supplements and extends it. On conflict, the **stricter rule** wins. This skill adds §7.1 cross-review enforcement; §8 Memory Persistence specializes the global session-persistence rule for use with the `memory-reminder` hook; §9–§11 (Progress Tracking, Anti-Pattern Self-Check, Completion Definition) are additions not present in `10-workflow.md`.
+**Authority**: This skill is the **canonical source** of agent workflow rules. The global `~/.claude/rules/global/10-workflow.md` mirrors these sections for agents that don't load skills directly. **On conflict, this skill wins.** When updating a rule, edit the skill first and only sync the global file second.
 
 **Companion skills:**
-- `init-project-gates` — one-time project setup (hook, AGENTS.md, PROGRESS.md)
-- `agent-review-protocol` — code review quality (Three-Agent Review, cross-check)
+- `init-project-gates` — one-time project setup (`.agent/`, AGENTS.md, pre-commit hook)
+- `agent-review-protocol` — Three-Agent Review pipeline + cross-check tooling
 
 ---
 
-## 1. Skill Gate (Mandatory Checkpoint)
+## 1. Intent Recognition (Re-Evaluate Every User Message)
+
+Re-evaluate user intent from the **current** message each turn. Do NOT auto-inherit "implementation mode" from prior turns.
+
+| Phrase | True intent | Default behavior |
+| --- | --- | --- |
+| "Explain X" / "How does Y work" | Understand / research | Search → synthesize answer |
+| "Implement X" / "Add Y" / "Create Z" | Implement | Plan → execute → verify |
+| "Look at X" / "Investigate Y" | Investigate | Explore → report findings |
+| "What do you think of X" | Evaluate | Analyze → recommend → wait for confirmation |
+| "X is broken" / "Y errors" | Fix | Diagnose → minimal fix |
+| "Refactor" / "Optimize" / "Clean up" | Open-ended change | First assess codebase → propose plan |
+
+Only when the current message explicitly requests implementation/modification AND scope is concrete, start coding. If still gathering context or evaluating, do NOT create implementation todos.
+
+---
+
+## 2. Skill Gate (Mandatory Checkpoint)
 
 After identifying user intent but BEFORE starting work, scan installed skills and load those matching the task.
 
 ```text
-Intent identified → 【Skill Gate: scan → load】 → Start work
+Intent identified → 【Skill Gate: scan → load】 → Path A/B routing → start work
 ```
 
 ### Enforcement Tiers
@@ -35,18 +52,19 @@ Intent identified → 【Skill Gate: scan → load】 → Start work
 
 | Trigger | Must do |
 | --- | --- |
-| Writing production code (feature / bugfix / refactor) | Load TDD skill or follow §TDD Flow below |
-| Creative work (new feature, new component, behavior change) | Explore requirements first (brainstorming / design phase) |
-| Multi-step plan ready for execution | **Oracle reviews plan** (see §Plan Review Gate) |
-| About to claim "done" / "fixed" / "passing" | Follow §Verification Gate |
+| Writing production code (feature / bugfix / refactor) | Follow §4 TDD Flow |
+| Creative work (new feature, new component, behavior change) | Explore requirements first (brainstorming or §5 OpenSpec `opsx:explore`) |
+| Non-trivial change in a team project (has OpenSpec) | Confirm OpenSpec change + `.feature` exist (§5, §6) |
+| Multi-step plan ready for execution | **Plan review** (§7) |
+| About to claim "done" / "fixed" / "passing" | Follow §9 Verification Gate |
 
 ### 🟡 Strong Defaults
 
 | Trigger | Should do |
 | --- | --- |
 | Multi-step implementation | Write plan before coding |
-| Bug / test failure / unexpected behavior | Systematic debugging (§Debugging) |
-| Implementation complete, ready to deliver | Request code review |
+| Bug / test failure / unexpected behavior | Systematic debugging (§11) |
+| Implementation complete, ready to deliver | Request code review (§12 cross-review) |
 
 ### Trivial Criteria (May Skip 🟡 and 🟢)
 
@@ -63,16 +81,69 @@ If task grows beyond initial classification (trivial → multi-file, or bugfix �
 
 ---
 
-## 2. Standard TDD Flow (⛔ Hard Constraint)
+## 3. Coding Flow Routing — Path A vs Path B
+
+Non-trivial coding tasks branch by project type:
+
+### Path A — Team Project (has OpenSpec)
+
+Project has `.opencode/skills/openspec-propose/` or `.claude/skills/openspec-propose/`:
+
+```text
+opsx:explore → opsx:propose (含 .feature) → 🔴 plan-review → opsx:apply (BDD-TDD)
+  → spec-review → quality-review → CLI gate → opsx:archive → complete
+```
+
+Stages:
+
+- **opsx:explore** (§5.1): replaces `brainstorming`; deep requirement / approach exploration. 🔴 hard gate satisfied.
+- **opsx:propose** (§5.2): generates `proposal.md` + `specs.md` (must reference `features/*.feature`) + `design.md` + `tasks.md` (each step references a scenario). Replaces `writing-plans`.
+- **🔴 plan-review** (§7): Oracle review including `.feature` reasonableness.
+- **opsx:apply** (§5.3): execute `tasks.md` step by step, each tied to a scenario. §4 TDD remains required (NOT replaced by opsx:apply).
+- **spec-review / quality-review** (§12): Three-Agent Review pipeline.
+- **CLI gate** (§8): pre-commit hook auto-checks (`AGENT_MODE=1` only).
+- **opsx:archive** (§5.4): archive the change. Complements §9 Verification.
+
+### Path A — Skill Gate Mapping
+
+| Path A stage | Replaces this gate | Status |
+| --- | --- | --- |
+| `opsx:explore` | `brainstorming` 🔴 | Satisfies hard gate |
+| `opsx:propose` | `writing-plans` 🟡 | Satisfies strong default |
+| `opsx:apply` | **Does NOT replace** §4 TDD 🔴 | TDD still required |
+| CLI gate + `opsx:archive` | Complements §9 Verification 🔴 | Both run |
+
+### Path B — Individual / No-OpenSpec Project
+
+```text
+brainstorming → plan → 🔴 plan-review → implement → spec-review → quality-review
+  → verify → complete
+```
+
+Inherits the existing flow (`brainstorming` + `writing-plans` + §4 TDD + §9 Verification).
+
+### Path Detection
+
+On project open, the agent checks:
+
+- File `.opencode/skills/openspec-propose/SKILL.md` exists → Path A
+- File `.claude/skills/openspec-propose/SKILL.md` exists → Path A
+- Otherwise → Path B
+
+Both paths share the same plan review gate (§7) and TDD flow (§4).
+
+---
+
+## 4. Standard TDD Flow (⛔ Hard Constraint)
 
 All code development — new features, bug fixes, refactoring, behavior changes — MUST follow RED → GREEN → REFACTOR. No exceptions without explicit user authorization.
 
-### Three Phases
+### 4.1 Three Phases
 
 1. **RED**: Write a test for the target behavior. Run it. **Watch it fail.**
    - Failure must be "target doesn't exist / behaves wrong" — not syntax/import errors.
    - Do NOT proceed until you see failure evidence.
-   - For team projects with BDD: acceptance tests must implement `.feature` scenario step definitions.
+   - **Path A (team project)**: acceptance tests MUST implement step definitions for the corresponding `.feature` scenario (§6). Don't soften scenario `Then` conditions.
 
 2. **GREEN**: Write the **minimum** implementation to make that test pass.
    - Only code that turns the current red test green. Nothing else.
@@ -82,7 +153,7 @@ All code development — new features, bug fixes, refactoring, behavior changes 
    - Run tests after every refactor. Stay green.
    - Do NOT introduce untested behavior during refactor.
 
-### Iron Law
+### 4.2 Iron Law
 
 > **No production code without a failing test first.**
 
@@ -90,7 +161,7 @@ All code development — new features, bug fixes, refactoring, behavior changes 
 - Code written without a prior red phase is considered invalid draft.
 - Bug fixes also follow TDD: write a failing test that reproduces the bug, then fix.
 
-### Evidence Requirements
+### 4.3 Evidence Requirements
 
 | Phase | Required evidence |
 | --- | --- |
@@ -100,7 +171,7 @@ All code development — new features, bug fixes, refactoring, behavior changes 
 
 **No evidence = phase not complete. Do not advance.**
 
-### Authorized Exceptions (User Must Grant Per-Use)
+### 4.4 Authorized Exceptions (User Must Grant Per-Use)
 
 - Exploratory scripts (throwaway / spike)
 - One-time data migration / ops scripts
@@ -113,37 +184,135 @@ Authorization must be:
 - Scoped to specific files/range (no extension to adjacent code)
 - Recorded in session (user message + affected paths)
 
+### 4.5 Anti-TDD Signals (Stop Immediately If Any)
+
+- Implementation written but `tests/` has NO failing record for it
+- "Get it working first, test later"
+- Validating via manual curl / UI clicks instead of automated test
+- Subagent delivered implementation without matching tests
+- Tests written but never seen to fail before passing
+
 ---
 
-## 3. Plan Review Gate (🔴 Hard Constraint)
+## 5. OpenSpec Workflow (Path A only)
 
-**Multi-step implementation plans must be reviewed BEFORE execution begins.**
+When the project has OpenSpec installed (`.opencode/skills/openspec-propose/` or `.claude/skills/openspec-propose/`), non-trivial coding tasks MUST use this flow.
 
-### Triggers (any one)
+### 5.1 Four Phases
+
+| Phase | Command | Artifact | Note |
+| --- | --- | --- | --- |
+| Exploration | `opsx:explore` | Thought notes | Replaces `brainstorming` |
+| Proposal | `opsx:propose` | proposal + specs + design + tasks | Replaces `writing-plans` |
+| Apply | `opsx:apply` | Code + tests | Replaces `executing-plans` |
+| Archive | `opsx:archive` | Archived change | Marks change complete |
+
+### 5.2 `specs.md` MUST Reference BDD
+
+`opsx:propose` generated `specs.md` includes an acceptance criteria section referencing `features/*.feature` files:
+
+```markdown
+## 验收标准
+
+BDD scenarios defined in:
+- `features/<feature-name>.feature`
+
+Each scenario must have a corresponding passing automated test in implementation.
+```
+
+### 5.3 `tasks.md` MUST Reference Scenarios
+
+Each task step must cite its associated scenario:
+
+```markdown
+- [ ] 实现用户注册接口 → `features/user-registration.feature` Scenario: 使用有效邮箱注册成功
+```
+
+### 5.4 Archive
+
+After tasks complete + verification passes + CLI gate passes, run `opsx:archive` to mark the change done and move it to the archive.
+
+---
+
+## 6. BDD Gherkin Requirements (Path A; Recommended for Path B)
+
+### 6.1 File Location
+
+```
+project-root/features/<feature-name>.feature
+```
+
+Project may override (e.g. `test/features/`) but team must be consistent.
+
+### 6.2 Relationship to TDD
+
+- `.feature` defines **acceptance criteria** (WHAT to verify)
+- TDD RED implements **step definitions** (HOW to verify)
+- Scenario `Then` / `那么` = test `expect` assertion. No softening allowed.
+
+### 6.3 Test Layering
+
+- **Acceptance tests**: MUST align with `.feature` scenarios, implementing step definitions
+- **Unit / regression tests**: may exist independently, but must trace back to a scenario-covered functional module
+- "Random tests with no functional traceability" are NOT allowed
+
+### 6.4 Per-Stack Frameworks
+
+| Stack | BDD framework |
+| --- | --- |
+| Node.js / TypeScript | `@cucumber/cucumber` + vitest / jest |
+| Java / Spring Boot | Cucumber-JVM + JUnit 5 |
+| Python | `pytest-bdd` or `behave` |
+| Frontend E2E | Playwright + `playwright-bdd` |
+
+### 6.5 Gherkin Example
+
+```gherkin
+功能: 用户注册
+
+  场景: 使用有效邮箱注册成功
+    假如 一个未注册的邮箱 "new@example.com"
+    而且 一个符合规则的密码 "Abc123!@#"
+    当 用户提交注册请求
+    那么 系统返回 201 状态码
+    而且 响应体包含用户 ID
+    而且 数据库中存在该用户记录
+```
+
+Both Chinese (`功能/场景/假如/当/那么`) and English (`Feature/Scenario/Given/When/Then`) keywords are supported. Pick one per team.
+
+---
+
+## 7. Plan Review Gate (🔴 Hard Constraint)
+
+**Multi-step implementation plans MUST be reviewed BEFORE execution begins.**
+
+### 7.1 Triggers (any one)
 
 - Plan modifies 2+ files
 - Plan has 3+ atomic steps
 - Plan introduces new dependencies, architecture patterns, or external interfaces
 
-### Review Flow
+### 7.2 Review Flow
 
 1. Submit plan to Oracle (or senior reviewer) with these dimensions:
-   - **Goal alignment**: Does plan accurately address the user's original request?
-   - **Technical approach**: Are architecture/dependency choices reasonable?
-   - **Step completeness**: Missing steps? Correct dependency order?
-   - **Risk identification**: Breaking changes? Performance? Security?
-   - **TDD annotation**: Are code steps correctly marked RED/GREEN/REFACTOR?
+   - **Goal alignment**: addresses user's original request?
+   - **Technical approach**: architecture/dependency choices reasonable?
+   - **Step completeness**: missing steps? dependency order correct?
+   - **Risk identification**: breaking changes? performance? security?
+   - **TDD annotation**: code steps correctly marked RED/GREEN/REFACTOR?
+   - **BDD alignment (Path A)**: `.feature` reasonably covers core scenarios?
 
 2. PASS → proceed to implementation.
 3. Suggestions/issues → revise plan → resubmit.
 4. **Never bypass review and start coding.**
 
-### Exemptions
+### 7.3 Exemptions
 
 - Task meets Trivial criteria (≤1 file, ≤10 lines, no new exports)
 - Emergency hotfix with explicit user authorization (must review retroactively)
 
-### Review Prompt Template
+### 7.4 Review Prompt Template
 
 ```text
 Review this implementation plan. Evaluate:
@@ -152,6 +321,7 @@ Review this implementation plan. Evaluate:
 3. Step completeness and ordering
 4. Risks (breaking changes, security, performance)
 5. TDD phase annotations correctness
+6. BDD .feature coverage of core scenarios (Path A only)
 
 Return PASS or specific revision suggestions.
 
@@ -161,7 +331,51 @@ Return PASS or specific revision suggestions.
 
 ---
 
-## 4. Verification Gate (Complete Before Any "Done" Claim)
+## 8. CLI Pre-Commit Gate (Physical Enforcement)
+
+Per-project `.githooks/agent-quality-gate.sh` (installed by `init-project-gates`) physically enforces gates at commit time.
+
+### 8.1 Activation
+
+Only fires when `AGENT_MODE=1` env var is set. **Human developers pass through freely.**
+
+Before any agent `git commit`, the agent MUST `export AGENT_MODE=1`. The Skill assumes this is set; if missing, the gate silently allows everything — a security failure mode for accidental commits.
+
+### 8.2 Trivial Exemption
+
+The gate skips when ALL of:
+- No new source files (excluding tests)
+- ≤ 15 added lines (cached diff total)
+- ≤ 2 changed files
+
+### 8.3 Checks
+
+| # | Check | v1.3.1 status | Path | Comment |
+| --- | --- | --- | --- | --- |
+| 1 | OpenSpec change exists | ⏳ planned v1.4.1 | Path A only | `openspec/changes/<name>/` must be present |
+| 2 | `.feature` exists | ⏳ planned v1.4.2 | Path A (and recommended Path B) | New functional source requires matching `features/*.feature` |
+| 3 | Source has corresponding test | ✅ implemented | Both | Multi-language: ts/tsx/js/jsx/py/java/kt/go |
+| 4 | Tests pass | by CI, NOT in hook | Both | Design decision: tests run by CI, not pre-commit |
+| 5 | Cross-review evidence | ✅ implemented | Both | `.agent/reviews/*.md` with `VERDICT: PASS` |
+
+### 8.4 CHECK 5 — Cross-Review Trigger Thresholds
+
+The hook requires `.agent/reviews/<date>-<topic>.md` (with explicit `VERDICT: PASS` line, ≤ 4h old, ≤ 20 lines post-review change) when:
+
+- `LOGIC_FILES > 1 AND diff > 50 lines`, OR
+- `single_file > 150 lines`
+
+Excludes `.lock`, `.md`, `.json`, `.yaml`, `.yml`, `generated/`, `migrations/`, `.d.ts`, test files.
+
+### 8.5 Bypass Rules
+
+- `--no-verify` is **forbidden** unless user explicitly authorizes emergency bypass
+- `SKIP_REVIEW=1` env var skips CHECK 5 only (still other gates) — emergency hotfix path
+- Merge commits and first commit of a new project auto-skip CHECK 5
+
+---
+
+## 9. Verification Gate (Complete Before Any "Done" Claim)
 
 **Evidence before claims. No fresh verification evidence = no completion claim.**
 
@@ -175,7 +389,7 @@ Return PASS or specific revision suggestions.
 5. ONLY THEN: Make done/passing/fixed claim.
 ```
 
-### Evidence Requirements
+### 9.1 Evidence Requirements
 
 | Claim | Required evidence |
 | --- | --- |
@@ -190,7 +404,7 @@ Return PASS or specific revision suggestions.
 
 ---
 
-## 5. Anti-Over-Engineering (Always Active During Implementation)
+## 10. Anti-Over-Engineering (Always Active During Implementation)
 
 Do what's asked. Nothing more, nothing less.
 
@@ -202,11 +416,11 @@ Do what's asked. Nothing more, nothing less.
 - **Edit existing files over creating new ones.**
 - **When blocked, consider alternatives or ask.** Don't brute-force.
 
-> Note: Design/brainstorming phases are exempt. This rule constrains IMPLEMENTATION behavior only.
+> Note: Design / brainstorming / `opsx:explore` phases are exempt. This rule constrains IMPLEMENTATION behavior only.
 
 ---
 
-## 6. Systematic Debugging
+## 11. Systematic Debugging
 
 When encountering bugs, test failures, or unexpected behavior: investigate root cause FIRST. No random changes.
 
@@ -224,7 +438,7 @@ When encountering bugs, test failures, or unexpected behavior: investigate root 
 
 ---
 
-## 7. Plan & Todo Management
+## 12. Plan & Todo Management
 
 - Multi-step tasks MUST have todos created BEFORE starting execution.
 - Todos must be executable atomic steps with real-time status updates.
@@ -232,7 +446,7 @@ When encountering bugs, test failures, or unexpected behavior: investigate root 
 - Mark complete IMMEDIATELY after finishing (never batch).
 - While user is still providing context → do NOT create implementation todos or touch code.
 
-### 7.1 Mandatory Cross-Review Todo (⛔ 硬性约束)
+### 12.1 Mandatory Cross-Review Todo (⛔ Hard Constraint)
 
 When the task involves **>1 non-test logic file AND >50 total changed lines**, OR **>150 changed lines in a single logic file** (excluding `.lock`, `.md`, `.json`, `.yaml`, `.test.`, `.spec.`, `generated/`, `migrations/`), the agent MUST:
 
@@ -244,7 +458,7 @@ When the task involves **>1 non-test logic file AND >50 total changed lines**, O
 
 **Anti-loop (⛔)**: Cross-review follows the same 2-round cap as Three-Agent Pipeline (§4 of `agent-review-protocol`). After 2 rounds of fix→re-review still unresolved, escalate to user. Do NOT continue indefinitely.
 
-**Physical enforcement**: `agent-quality-gate.sh` v1.3+ validates:
+**Physical enforcement**: §8 CLI gate (`agent-quality-gate.sh` v1.3+) validates:
 - Has `.agent/` but no `reviews/` → blocks
 - Has `reviews/` but no file within 4h → blocks
 - Review file lacks `VERDICT: PASS` line → blocks
@@ -258,11 +472,11 @@ When the task involves **>1 non-test logic file AND >50 total changed lines**, O
 
 ---
 
-## 8. Memory Persistence (⛔ Hard Constraint)
+## 13. Memory Persistence (⛔ Hard Constraint)
 
-Session work MUST be persisted via a Memory skill so future sessions can resume context. This **complements** §9 Progress Tracking: Memory is semantic recall (skill-level), `.agent/PROGRESS.md` is file-level state.
+Session work MUST be persisted via a Memory skill so future sessions can resume context. This **complements** §14 Progress Tracking: Memory is semantic recall (skill-level), `.agent/PROGRESS.md` is file-level state.
 
-### When to save
+### 13.1 When to save
 
 Persistence is **not** a final wrap-up action. Save throughout the session:
 
@@ -274,11 +488,11 @@ Persistence is **not** a final wrap-up action. Save throughout the session:
 
 Do NOT batch saves to the end of the session — save right after each unit of work.
 
-### Acting on the `memory-reminder` hook
+### 13.2 Acting on the `memory-reminder` hook
 
 When agent-gates is installed, `memory-reminder.mjs` injects a system-reminder marked `[AGENT-GATES: Memory Persistence Reminder]` after each todo is marked completed (matcher: `TodoWrite|todowrite|TaskUpdate|TaskCreate`). **Treat it as a mandatory check** — confirm you have persisted, or persist now. Do NOT respond with "I will save it later" — save before continuing to the next action.
 
-### What to record
+### 13.3 What to record
 
 | Field | Description |
 | --- | --- |
@@ -288,23 +502,23 @@ When agent-gates is installed, `memory-reminder.mjs` injects a system-reminder m
 | Files & branches | Critical paths, branch names |
 | Next step | Where to pick up on resume |
 
-### What NOT to save
+### 13.4 What NOT to save
 
 - Full code dumps or long log excerpts → use summaries + pointers (file path, line, function name)
 - Ephemeral chat context already in conversation history
 - Information derivable from `git log` / file reads — let the next session recover by reading the repo
 
-### Loading prior memory on session start
+### 13.5 Loading prior memory on session start
 
 On **new session start**, read prior memory (Memory skill recall, `.agent/PROGRESS.md`, project notes under `memory/`) BEFORE acting. The agent must restore context, not start fresh and guess.
 
-### When no Memory skill is installed
+### 13.6 When no Memory skill is installed
 
-The `memory-reminder` hook still fires but has no target skill to call → the reminder is informational only. Use `.agent/PROGRESS.md` + `.agent/memory/` (gitignored, see §9) as the persistence layer instead.
+The `memory-reminder` hook still fires but has no target skill to call → the reminder is informational only. Use `.agent/PROGRESS.md` + `.agent/memory/` (gitignored, see §14) as the persistence layer instead.
 
 ---
 
-## 9. Progress Tracking (Multi-Day Work)
+## 14. Progress Tracking (Multi-Day Work)
 
 If the project has `.agent/PROGRESS.md`:
 
@@ -327,7 +541,7 @@ All agent working artifacts live in `.agent/`:
 
 ---
 
-## 10. Anti-Pattern Self-Check
+## 15. Anti-Pattern Self-Check
 
 Stop immediately if any of these are true:
 
@@ -339,8 +553,11 @@ Stop immediately if any of these are true:
 - Multi-file change about to commit but no `.agent/reviews/` evidence → STOP
 - Doing things beyond what was asked (adding features, refactoring unrelated code) → STOP
 - Same fix failed 3 times → STOP, question architecture
+- Path A team project but no OpenSpec change record → STOP
+- Path A team project writing acceptance tests without `.feature` scenarios → STOP
+- `AGENT_MODE=1` not exported before commit → STOP
 
-### Rationalization Quick-Check
+### 15.1 Rationalization Quick-Check
 
 | Excuse | Reality |
 | --- | --- |
@@ -355,7 +572,7 @@ Stop immediately if any of these are true:
 
 ---
 
-## 11. Completion Definition
+## 16. Completion Definition
 
 Task is complete ONLY when ALL are true:
 
@@ -365,3 +582,5 @@ Task is complete ONLY when ALL are true:
 - [ ] Required tests/build/lint ran with results shown
 - [ ] Cross-check completed (different model/agent verified)
 - [ ] PROGRESS.md updated (if exists)
+- [ ] Path A team project: OpenSpec `opsx:archive` executed (if applicable)
+- [ ] Memory persisted via §13 Memory Persistence
