@@ -114,9 +114,12 @@ ${REMINDER_ZH}
 ${REMINDER_EN}
 </system-reminder>`;
 
-  // Emit hook output per OMC/OMO/OMX protocol
+  // Emit hook output per Claude Code PostToolUse schema.
+  // `hookEventName` is REQUIRED — Claude Code validates against it and
+  // emits a non_blocking_error attachment when missing (reminder silently dropped).
   const output = {
     hookSpecificOutput: {
+      hookEventName: 'PostToolUse',
       additionalContext: reminder
     }
   };
