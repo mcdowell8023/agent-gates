@@ -2,6 +2,8 @@
 
 Runtime quality gates for AI coding agents. One install gives your team TDD enforcement, cross-review evidence checks, memory persistence reminders, and progress tracking — across Claude Code, OpenCode, and Codex.
 
+> 📖 **中文整体说明**（问题、架构、与 agent-superpowers / OpenSpec 的关系、使用方式、含 mermaid 图）：[docs/explainer.zh.md](./docs/explainer.zh.md)
+
 ## Architecture
 
 ```
