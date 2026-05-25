@@ -258,6 +258,42 @@ check_transcript_errors() {
   fi
 }
 
+check_openspec_install() {
+  # Project-level check: detect OpenSpec presence in current working directory.
+  # Skipped when cwd is not a git repo.
+  # Detect git repo by directory marker (avoids depending on git binary,
+  # which on macOS may fail when Xcode license is unaccepted).
+  if [[ ! -d .git ]] && ! [[ -f .git ]]; then
+    note "current directory is not a git repo — skipping project-level checks"
+    return
+  fi
+  if [[ -d ".opencode/skills/openspec-propose" ]] \
+     || [[ -d ".claude/skills/openspec-propose" ]] \
+     || [[ -d "openspec/changes" ]]; then
+    pass "OpenSpec installed in current project (Path A applies)"
+  else
+    note "OpenSpec not installed in current project (Path B; install via opsx for team projects)"
+  fi
+}
+
+check_bdd_features_dir() {
+  # Project-level check: detect features/ directory + .feature files.
+  if [[ ! -d .git ]] && ! [[ -f .git ]]; then
+    return  # already noted in check_openspec_install
+  fi
+  if [[ -d "features" ]]; then
+    local count
+    count=$(find features -maxdepth 2 -name '*.feature' 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$count" -gt 0 ]]; then
+      pass "BDD features/ has $count .feature file(s)"
+    else
+      warn "features/ exists but no .feature files — Path A requires BDD scenarios"
+    fi
+  else
+    note "no features/ directory — BDD not yet adopted in this project"
+  fi
+}
+
 # --- Main ---
 main() {
   while [[ $# -gt 0 ]]; do
@@ -277,7 +313,7 @@ main() {
   done
 
   echo -e "${BLUE}╔══════════════════════════════════╗${NC}"
-  echo -e "${BLUE}║${NC}     Agent Gates Doctor v1.3      ${BLUE}║${NC}"
+  echo -e "${BLUE}║${NC}     Agent Gates Doctor v1.4      ${BLUE}║${NC}"
   echo -e "${BLUE}╚══════════════════════════════════╝${NC}"
   echo ""
 
@@ -292,6 +328,8 @@ main() {
   check_omx_registration
   check_hook_output_schema
   check_transcript_errors
+  check_openspec_install
+  check_bdd_features_dir
 
   echo ""
   if (( ${#PASS[@]} > 0 )); then

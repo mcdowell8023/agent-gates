@@ -147,8 +147,16 @@ flowchart LR
 | `jq` | 推荐 | 安全 merge `hooks.json` / `settings.json`；缺了改走手动 |
 | Memory 类 skill（`memory` / `writer-memory` 等） | 推荐 | hook 提醒 agent 存档，没装也能跑但 reminder 只有信息意义 |
 | 至少一个 agent 平台 | 推荐 | OMC / OMO / OMX / cc-switch；install.sh 自动检测 |
+| `agent-superpowers` skill 套件 | 推荐（Path B）；`agent-workflow-rules` Skill Gate 硬触发时必需 | 提供 `test-driven-development` / `brainstorming` / `verification-before-completion` / `opsx:explore` |
+| OpenSpec CLI | Path A（团队项目）必需 | 驱动 `opsx:explore` / `opsx:propose` / `opsx:apply` / `opsx:archive`；`doctor.sh check_openspec_install` 报告是否走 Path A |
 
 > ⚠️ 注意：`$HOME` 路径**不能含空格**——shell hook 无法可靠转义。
+>
+> ⚠️ `agent-superpowers` 与 OpenSpec CLI **不会被自动安装**（红线：禁止未经确认执行破坏性命令）。手动安装：
+> - `agent-superpowers`：参照 <https://github.com/obra/superpowers> 把对应 skill 拷到 agent 平台 skills 目录
+> - OpenSpec CLI：`npm install -g @openspec/cli`（仓库：<https://github.com/Fission-AI/OpenSpec>）
+>
+> 如果都没装，agent-gates 仍能跑 —— 默认走 Path B（仅 TDD，无 OpenSpec / BDD），`doctor.sh` 把缺失项报告为 `note`（不适用），不是 `FAIL`。
 
 ---
 
@@ -318,16 +326,20 @@ L3 Cross-Review Gate（自加）：███████████████
 |---|---|---|
 | C0. 把 10-workflow.md 内容落进 SKILL.md | `agent-workflow-rules` 16 节版本：新增 §1 意图识别、§3 Path A/B 路由、§5 OpenSpec Workflow、§6 BDD Gherkin、§8 CLI Pre-commit Gate；TDD §4 加 RED 阶段 BDD 对齐子节；anti-pattern §15 加 Path A / OpenSpec 检查 | ✅ 完成 |
 
-#### v1.4.0 — 文档与软约束补齐（无破坏性）
+#### v1.4.0 — 文档与软约束补齐（无破坏性）✅ 已交付（2026-05-22）
 
-| 任务 | 范围 | 工时估 | 验证 |
-|---|---|---|---|
-| C1. `doctor.sh` 加 `check_openspec_install`（团队项目）+ `check_bdd_features_dir`（检测 features/） | doctor.sh 加两个 check 函数 + main 调度 | 半天 | tests/run_doctor.sh 加 fixture：项目有 openspec → PASS / 没有 → note skip；项目有 features/ → PASS / 没有 → WARN（不 FAIL，因为存量） |
-| C2. README + docs/platform-hooks.md 加 OpenSpec / BDD 章节，说明项目级用法 | 文档补齐 | 半天 | reviewer 跨文件一致性 |
-| C3. **反向更新 Vault `BDD-CLI-Gate-OpenSpec整合方案.md`**：加 §"L2.4 Memory 持久化" + §"L2.5 实现后审查管道" + 附录 A 运维基础设施 | 修原设计文档（通过 obsidian-cli 写回） | 1 天 | 用户审阅 |
-| C4. 全局 `10-workflow.md` 同步 skill 内容（精简为 skill 概要 + 引用 skill 路径） | 同步镜像 | 半天 | diff skill ↔ 10-workflow 一致 |
+| 任务 | 范围 | 状态 |
+|---|---|---|
+| C1. `doctor.sh` 加 `check_openspec_install`（团队项目）+ `check_bdd_features_dir`（检测 features/） | doctor.sh 新增两个 check 函数 + main 调度 + `tests/run_doctor.sh` 5 个新用例 | ✅ 已交付；`bash tests/run_doctor.sh` 9/9 通过 |
+| C2. README + docs/platform-hooks.md 加 OpenSpec / BDD 章节，说明项目级用法 | README 新增 "Workflow Paths: A vs B" 章节；`docs/platform-hooks.md` 加 "Project-level checks (v1.4)" 附录 | ✅ 已交付 |
+| C3. **反向更新 Vault `BDD-CLI-Gate-OpenSpec整合方案.md`**：加 §"L2.4 Memory 持久化" + §"L2.5 实现后审查管道" + 附录 A 运维基础设施 | 修原设计文档（通过 obsidian-cli 写回） | ⏳ 待处理（agent-gates 仓库外 Vault 文档，作为 follow-up 单独跟进，不阻塞 v1.4.0 ship） |
+| C4. 全局 `10-workflow.md` 同步 skill 内容（精简为 skill 概要 + 引用 skill 路径） | `~/.claude/rules/global/10-workflow.md` 改为 ~85 行入口，指向 `agent-workflow-rules` SKILL.md 为权威源，冲突时 skill 赢 | ✅ 已交付 |
 
-**v1.4.0 完成后实施度**：L1 10% / L2 70% / L3 25% / 运维 95% — 规则层 + 文档层补齐
+**v1.4.0 已交付实施度**：L1 10% / L2 70% / L3 25% / 运维 95% — 规则层 + 文档层补齐（v1.4.1 起继续推 L3 hard gate）
+
+**已知限制**（同步至 [CHANGELOG.md](../CHANGELOG.md) v1.4.0 Known limitations）：
+- `doctor.sh` 暂不检测上游 `agent-superpowers` skill（`test-driven-development` / `brainstorming` / `verification-before-completion` / `opsx:explore`）。Skill Gate 把它们当硬触发，但安装与否目前由用户负责。`check_superpowers_install` 与 `check_openspec_install` 同形态，规划进 v1.5。
+- `install.sh` 不自动安装上游 skill 与 OpenSpec CLI（红线：禁止未经确认执行破坏性命令）；缺失时只打印候选路径，不替用户改系统。
 
 #### v1.4.1 — L3 CHECK 1 落地（OpenSpec hard gate）
 
@@ -407,24 +419,28 @@ cd agent-gates && ./install.sh
 ~/.agent-gates/doctor.sh
 ```
 
-输出示例：
+输出示例（理想 Path A：装了 OpenSpec、≥1 个 `.feature`、transcript 无 hook 错误）：
 
 ```
 ✓ node v26.0.0
 ✓ jq jq-1.8.1
 ✓ Memory skill detected: ~/.cc-switch/skills/memory-1.0.2
-✓ installed version: 1.3.1
-✓ up to date with remote (1.3.1)
+✓ installed version: 1.4.0
+✓ up to date with remote (1.4.0)
 ✓ memory-reminder.mjs present
 ✓ agent-quality-gate.sh present (executable)
 ✓ OMC settings.json hook registered (matcher contains TaskUpdate)
 ✓ OMO hooks.json hook registered
 ✓ OMX hooks.json hook registered
-✓ hook output schema valid
+✓ hook output schema valid (hookEventName=PostToolUse, reminder included)
 ✓ no memory-reminder hook errors in last-7d transcripts
+✓ OpenSpec installed in current project (Path A applies)
+✓ BDD features/ has 3 .feature file(s)
 
-11 pass · 0 warn · 0 fail
+13 pass · 0 warn · 0 fail
 ```
+
+默认 Path B 项目（无 OpenSpec、无 `features/`）下，最后两项变 `note`（不适用 / 未配置）而不是 PASS，所以典型输出是 **11 PASS + 2 note**，不是 13 PASS。`note` 表示"不适用"，不是"坏了"。
 
 退出码：**0 = 无 FAIL（允许 WARN）；1 = 有 FAIL**——CI 友好。
 标志：`--quiet`（只显示汇总）/ `--no-network`（离线模式）/ `--help`。
@@ -481,7 +497,7 @@ sequenceDiagram
 
 ```
 ~/.agent-gates/                          # 全局安装位置
-├── .version                             # 1.3.1
+├── .version                             # 1.4.0
 ├── doctor.sh                            # 体检工具
 └── hooks/
     ├── platform/memory-reminder.mjs     # PostToolUse hook
@@ -525,7 +541,7 @@ sequenceDiagram
 ## 9. 资源
 
 - GitHub: <https://github.com/mcdowell8023/agent-gates>
-- 当前版本：v1.3.1（2026-05-22）
+- 当前版本：v1.4.0（2026-05-22）
 - 许可：MIT
 - 平台 hook 协议详解：[docs/platform-hooks.md](./platform-hooks.md)
 - 体检工具：`~/.agent-gates/doctor.sh --help`

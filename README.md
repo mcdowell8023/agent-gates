@@ -31,8 +31,21 @@ agent-gates/
 | `jq` | Recommended | Merges agent-gates entry into existing `hooks.json`; without it the installer falls back to printing manual instructions |
 | Memory-management skill (e.g. `memory`, `writer-memory`) | Recommended | `memory-reminder.mjs` injects a system-reminder to save state; without a Memory skill the reminder is informational only. Installer prints candidate skills dirs when missing. |
 | One agent platform (Claude Code / OpenCode / Codex / cc-switch) | Recommended | Installer auto-detects; falls back to `~/.claude/skills/` if none present |
+| `agent-superpowers` skill suite | Recommended (Path B); required when `agent-workflow-rules` Skill Gate triggers fire | Provides `test-driven-development`, `brainstorming`, `verification-before-completion`, `opsx:explore`; see Upstream skill dependencies below |
+| OpenSpec CLI | Required for Path A (team project) | Drives `opsx:explore` / `opsx:propose` / `opsx:apply` / `opsx:archive`; `doctor.sh check_openspec_install` reports whether Path A applies |
 
 The install path must be space-free (`$HOME` must not contain spaces) — shell hooks cannot reliably escape such paths.
+
+### Upstream skill dependencies (not auto-installed)
+
+`agent-gates` deliberately does **not** auto-install upstream skills or the OpenSpec CLI — per the project's destructive-command red line, third-party tooling must be installed by the user after review:
+
+| Dependency | Install command | Source |
+|---|---|---|
+| `agent-superpowers` skill suite | follow the upstream README to copy `test-driven-development`, `brainstorming`, `verification-before-completion`, `opsx:explore` into your agent skills dir | <https://github.com/obra/superpowers> |
+| OpenSpec CLI | `npm install -g @openspec/cli` | <https://github.com/Fission-AI/OpenSpec> |
+
+If none of these are installed, agent-gates still runs — Path B (TDD only, no OpenSpec / no BDD) is the default. `doctor.sh` reports their absence as informational `note`, not `FAIL`.
 
 ## Quick Install
 
@@ -108,6 +121,23 @@ When an agent marks a todo as completed, the platform hook injects a system remi
 - Anti-loop: max 2 fix attempts before escalation
 - Verification-before-completion: evidence before claims
 
+### Workflow Paths: A (OpenSpec) vs B (no OpenSpec)
+
+Agent Gates supports two workflow paths, auto-detected per project:
+
+| | Path A (team project) | Path B (individual / no OpenSpec) |
+|---|---|---|
+| Trigger | `.opencode/skills/openspec-propose/` or `.claude/skills/openspec-propose/` or `openspec/changes/` present | Otherwise |
+| Planning | `opsx:explore` → `opsx:propose` (generates `proposal.md` + `specs.md` + `tasks.md`) | `brainstorming` skill → `writing-plans` skill |
+| Acceptance | `features/*.feature` (Gherkin) referenced from `specs.md`; each `tasks.md` step links a scenario | Plan steps tagged RED / GREEN / REFACTOR |
+| Implementation | `opsx:apply` (BDD-TDD: step-defs first) | `test-driven-development` skill |
+| Pre-commit gate | 4-CHECK (OpenSpec change + `.feature` + test correspondence + test pass) under `AGENT_MODE=1` | Test correspondence + cross-review evidence under `AGENT_MODE=1` |
+| Review | Spec Reviewer → Quality Reviewer → CLI gate → `opsx:archive` | Cross-review evidence in `.agent/reviews/` |
+
+Both paths share the same `agent-workflow-rules` skill as the canonical source of TDD, plan-review, verification, and anti-loop rules. Path A layers OpenSpec (L1 requirements) and BDD (L2 acceptance) on top; Path B uses TDD alone.
+
+`doctor.sh` reports which path applies for the current working directory (`check_openspec_install` + `check_bdd_features_dir`).
+
 ## Usage
 
 After installation, in any project:
@@ -151,14 +181,14 @@ After install, run `~/.agent-gates/doctor.sh` (or `./doctor.sh` from the repo) t
 ~/.agent-gates/doctor.sh
 ```
 
-Sample output:
+Sample output (ideal Path A: OpenSpec installed + ≥1 `.feature` + clean transcripts):
 
 ```
 ✓ node v26.0.0
 ✓ jq jq-1.8.1
 ✓ Memory skill detected: ~/.cc-switch/skills/memory-1.0.2
-✓ installed version: 1.3.1
-✓ up to date with remote (1.3.1)
+✓ installed version: 1.4.0
+✓ up to date with remote (1.4.0)
 ✓ memory-reminder.mjs present
 ✓ agent-quality-gate.sh present (executable)
 ✓ OMC settings.json hook registered (matcher contains TaskUpdate)
@@ -166,9 +196,13 @@ Sample output:
 ✓ OMX hooks.json hook registered
 ✓ hook output schema valid (hookEventName=PostToolUse, reminder included)
 ✓ no memory-reminder hook errors in last-7d transcripts
+✓ OpenSpec installed in current project (Path A applies)
+✓ BDD features/ has 3 .feature file(s)
 
-11 pass · 0 warn · 0 fail
+13 pass · 0 warn · 0 fail
 ```
+
+In a default Path B project (no OpenSpec, no `features/`) the last two lines become informational `note`s instead of PASS, so the typical output is **11 PASS + 2 note** (not 13 PASS). `note` means "not applicable / not configured", not "broken".
 
 Exit code is **0 if no FAIL** (WARN allowed), **1 if any FAIL**, so the script is CI-friendly:
 

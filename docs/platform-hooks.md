@@ -171,6 +171,15 @@ Expected output:
 
 For end-to-end verification, after running `install.sh`, **start a fresh agent session** and mark a todo completed — the system-reminder should appear in the next interaction.
 
+## Project-level checks (v1.4)
+
+`doctor.sh` (v1.4+) additionally inspects the **current working directory** for:
+
+- `check_openspec_install` — detects `.opencode/skills/openspec-propose/`, `.claude/skills/openspec-propose/`, or `openspec/changes/` and reports which workflow path applies (A vs B).
+- `check_bdd_features_dir` — counts `features/*.feature` files and WARNs if `features/` exists but is empty.
+
+These checks are unrelated to the platform hook registration above. They run only when the cwd is a git repo and skip silently otherwise. See the README "Workflow Paths: A (OpenSpec) vs B (no OpenSpec)" section for the routing rationale.
+
 ## Removing the hook
 
 `uninstall.sh` cleans both the current schema (`.hooks.PostToolUse`) and the legacy v1.0.0–v1.1.1 schema (root `.PostToolUse` in `~/.claude/hooks.json`). Other top-level keys in `settings.json` are preserved; pure dedicated `hooks.json` files become empty and are removed.

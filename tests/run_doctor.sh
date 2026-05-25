@@ -212,6 +212,137 @@ test_p0_3_no_hang_direct() {
   rm -rf "$tmp"
 }
 
+# --- v1.4: check_openspec_install ---
+test_v14_openspec_detected() {
+  echo "v1.4: check_openspec_install detects openspec/changes/"
+  (
+    setup_mock_home
+    tmp_repo=$(mktemp -d)
+    cd "$tmp_repo"
+    mkdir .git  # marker only — doctor uses [[ -d .git ]], no git binary needed
+    mkdir -p openspec/changes/foo
+    source_doctor_no_main
+    if ! declare -F check_openspec_install >/dev/null; then
+      echo "  RED: check_openspec_install function missing"
+      teardown_mock_home; rm -rf "$tmp_repo"; exit 1
+    fi
+    PASS=(); WARN=(); FAIL=()
+    QUIET=1
+    check_openspec_install
+    local found=false
+    for x in "${PASS[@]:-}"; do
+      [[ "$x" == *"OpenSpec"* ]] && found=true
+    done
+    teardown_mock_home; rm -rf "$tmp_repo"
+    [[ "$found" == "true" ]] && exit 0 || exit 1
+  )
+  local rc=$?
+  assert "v1.4 check_openspec_install detects openspec/changes/" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+}
+
+test_v14_openspec_absent() {
+  echo "v1.4: check_openspec_install notes when project has no OpenSpec"
+  (
+    setup_mock_home
+    tmp_repo=$(mktemp -d)
+    cd "$tmp_repo"
+    mkdir .git  # marker only — doctor uses [[ -d .git ]], no git binary needed
+    source_doctor_no_main
+    PASS=(); WARN=(); FAIL=()
+    QUIET=0  # we want to verify note (which prints to stdout)
+    note_output=$(check_openspec_install 2>&1)
+    teardown_mock_home; rm -rf "$tmp_repo"
+    if [[ "$note_output" == *"OpenSpec not installed"* ]]; then
+      exit 0
+    else
+      echo "  RED: expected 'OpenSpec not installed' note, got: $note_output"
+      exit 1
+    fi
+  )
+  local rc=$?
+  assert "v1.4 check_openspec_install notes absence" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+}
+
+# --- v1.4: check_bdd_features_dir ---
+test_v14_bdd_features_present() {
+  echo "v1.4: check_bdd_features_dir detects .feature files"
+  (
+    setup_mock_home
+    tmp_repo=$(mktemp -d)
+    cd "$tmp_repo"
+    mkdir .git  # marker only — doctor uses [[ -d .git ]], no git binary needed
+    mkdir -p features
+    cat > features/sample.feature << 'EOF'
+Feature: Sample
+  Scenario: Hello
+    Given a user
+    When they greet
+    Then output is "hi"
+EOF
+    source_doctor_no_main
+    if ! declare -F check_bdd_features_dir >/dev/null; then
+      echo "  RED: check_bdd_features_dir function missing"
+      teardown_mock_home; rm -rf "$tmp_repo"; exit 1
+    fi
+    PASS=(); WARN=(); FAIL=()
+    QUIET=1
+    check_bdd_features_dir
+    local found=false
+    for x in "${PASS[@]:-}"; do
+      [[ "$x" == *"BDD"* || "$x" == *".feature"* ]] && found=true
+    done
+    teardown_mock_home; rm -rf "$tmp_repo"
+    [[ "$found" == "true" ]] && exit 0 || exit 1
+  )
+  local rc=$?
+  assert "v1.4 check_bdd_features_dir detects .feature" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+}
+
+test_v14_bdd_features_empty() {
+  echo "v1.4: check_bdd_features_dir WARNs when features/ exists but no .feature"
+  (
+    setup_mock_home
+    tmp_repo=$(mktemp -d)
+    cd "$tmp_repo"
+    mkdir .git  # marker only — doctor uses [[ -d .git ]], no git binary needed
+    mkdir -p features  # empty
+    source_doctor_no_main
+    PASS=(); WARN=(); FAIL=()
+    QUIET=1
+    check_bdd_features_dir
+    local has_warn=false
+    for x in "${WARN[@]:-}"; do
+      [[ "$x" == *"no .feature"* ]] && has_warn=true
+    done
+    teardown_mock_home; rm -rf "$tmp_repo"
+    [[ "$has_warn" == "true" ]] && exit 0 || exit 1
+  )
+  local rc=$?
+  assert "v1.4 check_bdd_features_dir WARNs on empty features/" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+}
+
+test_v14_not_git_repo_skip() {
+  echo "v1.4: project-level checks skip outside git repo"
+  (
+    setup_mock_home
+    tmp_dir=$(mktemp -d)
+    cd "$tmp_dir"  # NOT a git repo
+    source_doctor_no_main
+    PASS=(); WARN=(); FAIL=()
+    QUIET=0
+    note_output=$(check_openspec_install 2>&1)
+    teardown_mock_home; rm -rf "$tmp_dir"
+    if [[ "$note_output" == *"not a git repo"* ]]; then
+      exit 0
+    else
+      echo "  RED: expected 'not a git repo' note, got: $note_output"
+      exit 1
+    fi
+  )
+  local rc=$?
+  assert "v1.4 project-level checks skip when not in git repo" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+}
+
 echo "Running doctor.sh tests..."
 echo ""
 test_p0_1_omo_check_exists
@@ -219,6 +350,11 @@ test_p0_1_omo_missing_hook
 test_p0_2_matcher_mismatch_is_fail
 test_p0_3_no_hang_on_empty
 test_p0_3_no_hang_direct
+test_v14_openspec_detected
+test_v14_openspec_absent
+test_v14_bdd_features_present
+test_v14_bdd_features_empty
+test_v14_not_git_repo_skip
 
 echo ""
 echo "Results: $PASS_COUNT passed, $FAIL_COUNT failed"
