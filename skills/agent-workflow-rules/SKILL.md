@@ -281,6 +281,53 @@ Project may override (e.g. `test/features/`) but team must be consistent.
 
 Both Chinese (`功能/场景/假如/当/那么`) and English (`Feature/Scenario/Given/When/Then`) keywords are supported. Pick one per team.
 
+### 6.6 Step Definitions Directory Structure
+
+```
+project-root/
+├── features/
+│   ├── user-registration.feature
+│   ├── login.feature
+│   └── step_definitions/
+│       ├── user-registration.steps.ts   (or .py / .java)
+│       └── login.steps.ts
+└── src/
+    └── ...
+```
+
+Step definition files live alongside `.feature` files in `features/step_definitions/`. Each `.feature` file should have a corresponding step definition file.
+
+| Stack | Step definition naming | Location |
+| --- | --- | --- |
+| Node.js / TypeScript | `<feature>.steps.ts` | `features/step_definitions/` |
+| Python | `<feature>_steps.py` | `features/step_definitions/` |
+| Java | `<Feature>Steps.java` | `features/step_definitions/` (or `src/test/java/steps/`) |
+
+### 6.7 Scenario Reference in TDD RED Phase
+
+When writing a TDD RED test for a Path A project, the test MUST trace to a `.feature` scenario:
+
+1. **Identify the scenario**: find the `.feature` scenario this code change satisfies.
+2. **Implement step definitions**: the RED test implements `Given/When/Then` steps from that scenario.
+3. **Reference in commit**: the commit message cites the scenario (see §6.8).
+
+If no scenario exists for the behavior being implemented, write the `.feature` scenario FIRST, then proceed with RED.
+
+### 6.8 Commit Message Scenario Reference
+
+Path A commits that implement a scenario SHOULD reference it:
+
+```
+feat(auth): 实现邮箱注册接口
+
+Scenario: features/user-registration.feature — 使用有效邮箱注册成功
+TDD: RED→GREEN 完成，step definitions 全部通过
+```
+
+Format: `Scenario: <file-path> — <scenario-name>`
+
+This is a SHOULD (recommended), not a MUST. Omitting it does not block the commit gate, but including it improves traceability.
+
 ---
 
 ## 7. Plan Review Gate (🔴 Hard Constraint)

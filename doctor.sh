@@ -150,9 +150,9 @@ check_omc_registration() {
     return
   fi
   local matcher
-  matcher=$(jq -r '.hooks.PostToolUse[]
+  matcher=$(jq -r '[.hooks.PostToolUse[]
                      | select(.hooks[].command | test("memory-reminder"))
-                     | .matcher // ""' "$s" | head -1)
+                     | .matcher // ""] | first' "$s")
   if [[ "$matcher" == *"TaskUpdate"* ]]; then
     pass "OMC settings.json hook registered (matcher contains TaskUpdate)"
   else
@@ -283,7 +283,7 @@ check_bdd_features_dir() {
   fi
   if [[ -d "features" ]]; then
     local count
-    count=$(find features -maxdepth 2 -name '*.feature' 2>/dev/null | wc -l | tr -d ' ')
+    count=$(find features -maxdepth 2 -type f -name '*.feature' 2>/dev/null | wc -l | tr -d ' ')
     if [[ "$count" -gt 0 ]]; then
       pass "BDD features/ has $count .feature file(s)"
     else
@@ -291,6 +291,28 @@ check_bdd_features_dir() {
     fi
   else
     note "no features/ directory — BDD not yet adopted in this project"
+  fi
+}
+
+check_bdd_step_definitions() {
+  if [[ ! -d .git ]] && ! [[ -f .git ]]; then
+    return
+  fi
+  [[ -d "features" ]] || return 0
+  local feature_count
+  feature_count=$(find features -maxdepth 2 -name '*.feature' 2>/dev/null | wc -l | tr -d ' ')
+  [[ "$feature_count" -gt 0 ]] || return 0
+
+  if [[ -d "features/step_definitions" ]]; then
+    local sd_count
+    sd_count=$(find features/step_definitions -type f \( -name '*.ts' -o -name '*.js' -o -name '*.py' -o -name '*.java' -o -name '*.rb' \) 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$sd_count" -gt 0 ]]; then
+      pass "BDD step_definitions/ has $sd_count step file(s)"
+    else
+      warn "features/step_definitions/ exists but no step definition files found"
+    fi
+  else
+    warn "features/ has .feature files but no step_definitions/ directory — step definitions needed to run BDD tests"
   fi
 }
 
@@ -313,7 +335,7 @@ main() {
   done
 
   echo -e "${BLUE}╔══════════════════════════════════╗${NC}"
-  echo -e "${BLUE}║${NC}     Agent Gates Doctor v1.4      ${BLUE}║${NC}"
+  echo -e "${BLUE}║${NC}     Agent Gates Doctor v1.5      ${BLUE}║${NC}"
   echo -e "${BLUE}╚══════════════════════════════════╝${NC}"
   echo ""
 
@@ -330,6 +352,7 @@ main() {
   check_transcript_errors
   check_openspec_install
   check_bdd_features_dir
+  check_bdd_step_definitions
 
   echo ""
   if (( ${#PASS[@]} > 0 )); then

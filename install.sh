@@ -26,6 +26,7 @@ MEMORY_SKILL_CANDIDATES=(
 )
 SKIP_HOOKS=0
 FORCE=0
+WITH_OPENSPEC=0
 BACKED_UP_SKILLS=()
 
 RED='\033[0;31m'
@@ -116,6 +117,20 @@ check_optional_deps() {
       echo "      - $cand/"
     done
   fi
+}
+
+# --- OpenSpec CLI check (--with-openspec) ---
+check_openspec() {
+  if ! command -v openspec &>/dev/null; then
+    warn "openspec CLI not found on PATH."
+    echo "    Install: npm install -g @openspec/cli"
+    echo "    Source:  https://github.com/Fission-AI/OpenSpec"
+    return 1
+  fi
+  local ver
+  ver=$(openspec --version 2>/dev/null || echo "unknown")
+  info "openspec CLI detected ($ver)"
+  return 0
 }
 
 # --- Version check ---
@@ -403,7 +418,7 @@ trap cleanup EXIT
 # --- Main ---
 main() {
   echo -e "${BLUE}╔══════════════════════════════════╗${NC}"
-  echo -e "${BLUE}║${NC}    Agent Gates Installer v1.1    ${BLUE}║${NC}"
+  echo -e "${BLUE}║${NC}    Agent Gates Installer v1.5    ${BLUE}║${NC}"
   echo -e "${BLUE}╚══════════════════════════════════╝${NC}"
   echo ""
 
@@ -412,12 +427,14 @@ main() {
       --target) TARGET_DIR="$2"; shift 2 ;;
       --skip-hooks) SKIP_HOOKS=1; shift ;;
       --force|--upgrade) FORCE=1; shift ;;
+      --with-openspec) WITH_OPENSPEC=1; shift ;;
       -h|--help)
-        echo "Usage: install.sh [--target DIR] [--skip-hooks] [--force | --upgrade]"
-        echo "  --target DIR    Override skills target directory"
-        echo "  --skip-hooks    Skip platform hook registration"
-        echo "  --force         Reinstall even if version matches"
-        echo "  --upgrade       Alias of --force"
+        echo "Usage: install.sh [--target DIR] [--skip-hooks] [--force | --upgrade] [--with-openspec]"
+        echo "  --target DIR       Override skills target directory"
+        echo "  --skip-hooks       Skip platform hook registration"
+        echo "  --force            Reinstall even if version matches"
+        echo "  --upgrade          Alias of --force"
+        echo "  --with-openspec    Check for OpenSpec CLI availability"
         exit 0
         ;;
       *) fail "Unknown option: $1" ;;
@@ -426,6 +443,7 @@ main() {
 
   check_dependencies
   check_optional_deps
+  [[ "$WITH_OPENSPEC" -eq 1 ]] && { check_openspec || true; }
   detect_platform
   fetch_repo
   check_version

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Agent Quality Gate v1.3
+# Agent Quality Gate v1.5
 # Only fires when AGENT_MODE=1; human developers pass through.
-# Version: 1.3.0
+# Version: 1.5.0
 # Source: https://github.com/mcdowell8023/agent-gates
 
 set -euo pipefail
@@ -24,7 +24,15 @@ if [[ -z "$NEW_SOURCE" && "$DIFF_LINES" -le 15 && "$CHANGED_COUNT" -le 2 ]]; the
   exit 0
 fi
 
-echo "🔍 Agent Quality Gate v1.3 ($CHANGED_COUNT files, +${DIFF_LINES} lines)"
+echo "🔍 Agent Quality Gate v1.5 ($CHANGED_COUNT files, +${DIFF_LINES} lines)"
+
+# === Path detection: A (OpenSpec) vs B ===
+IS_PATH_A=0
+if [[ -d openspec/changes ]] \
+   || [[ -d .opencode/skills/openspec-propose ]] \
+   || [[ -d .claude/skills/openspec-propose ]]; then
+  IS_PATH_A=1
+fi
 
 # === Gate 1: Test file correspondence ===
 while IFS= read -r f; do
@@ -48,6 +56,27 @@ while IFS= read -r f; do
 done < <(git diff --cached --name-only --diff-filter=ACMR \
   | grep -E '\.(ts|tsx|js|jsx|py|java|kt|go)$' \
   | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.|\.d\.ts$|\.setup\.|config)')
+
+# === CHECK 1: OpenSpec active change (Path A only) ===
+if [[ "$IS_PATH_A" -eq 1 && -d openspec/changes ]]; then
+  ACTIVE_CHANGES=$(find openspec/changes/ -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null || true)
+  if [[ -z "$ACTIVE_CHANGES" ]]; then
+    fail "Path A project has openspec/changes/ but no active change directory"
+    echo "   Fix: Run opsx:propose to create a change, or mkdir openspec/changes/<name>/"
+  fi
+fi
+
+# === CHECK 2: BDD .feature exists (Path A required; Path B skipped) ===
+if [[ "$IS_PATH_A" -eq 1 && -n "$NEW_SOURCE" ]]; then
+  FEATURE_COUNT=0
+  if [[ -d features ]]; then
+    FEATURE_COUNT=$(find features -maxdepth 2 -type f -name '*.feature' 2>/dev/null | wc -l | tr -d ' ')
+  fi
+  if [[ "$FEATURE_COUNT" -eq 0 ]]; then
+    fail "Path A project has new source files but no features/*.feature scenarios"
+    echo "   Fix: Create BDD scenarios in features/<name>.feature before committing"
+  fi
+fi
 
 # === Gate 2: Cross-review evidence ===
 # Count non-test logic files (test files excluded from trigger count)

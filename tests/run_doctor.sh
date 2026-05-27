@@ -343,6 +343,100 @@ test_v14_not_git_repo_skip() {
   assert "v1.4 project-level checks skip when not in git repo" "$([[ $rc -eq 0 ]] && echo true || echo false)"
 }
 
+# --- v1.5: check_bdd_step_definitions ---
+test_v15_step_defs_present() {
+  echo "v1.5: check_bdd_step_definitions detects step_definitions/"
+  (
+    setup_mock_home
+    tmp_repo=$(mktemp -d)
+    cd "$tmp_repo"
+    mkdir .git
+    mkdir -p features/step_definitions
+    echo "import { Given } from '@cucumber/cucumber';" > features/step_definitions/login.steps.ts
+    cat > features/login.feature << 'EOF'
+Feature: Login
+  Scenario: Valid
+    Given a user
+    Then success
+EOF
+    source_doctor_no_main
+    if ! declare -F check_bdd_step_definitions >/dev/null; then
+      echo "  RED: check_bdd_step_definitions function missing"
+      teardown_mock_home; rm -rf "$tmp_repo"; exit 1
+    fi
+    PASS=(); WARN=(); FAIL=()
+    QUIET=1
+    check_bdd_step_definitions
+    local found=false
+    for x in "${PASS[@]:-}"; do
+      [[ "$x" == *"step"* || "$x" == *"Step"* ]] && found=true
+    done
+    teardown_mock_home; rm -rf "$tmp_repo"
+    [[ "$found" == "true" ]] && exit 0 || exit 1
+  )
+  local rc=$?
+  assert "v1.5 check_bdd_step_definitions detects step_definitions/" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+}
+
+test_v15_step_defs_missing() {
+  echo "v1.5: check_bdd_step_definitions WARNs when features/ has no step_definitions/"
+  (
+    setup_mock_home
+    tmp_repo=$(mktemp -d)
+    cd "$tmp_repo"
+    mkdir .git
+    mkdir -p features
+    cat > features/login.feature << 'EOF'
+Feature: Login
+  Scenario: Valid
+    Given a user
+    Then success
+EOF
+    source_doctor_no_main
+    if ! declare -F check_bdd_step_definitions >/dev/null; then
+      echo "  RED: check_bdd_step_definitions function missing"
+      teardown_mock_home; rm -rf "$tmp_repo"; exit 1
+    fi
+    PASS=(); WARN=(); FAIL=()
+    QUIET=1
+    check_bdd_step_definitions
+    local has_warn=false
+    for x in "${WARN[@]:-}"; do
+      [[ "$x" == *"step_definitions"* ]] && has_warn=true
+    done
+    teardown_mock_home; rm -rf "$tmp_repo"
+    [[ "$has_warn" == "true" ]] && exit 0 || exit 1
+  )
+  local rc=$?
+  assert "v1.5 check_bdd_step_definitions WARNs when missing" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+}
+
+test_v15_step_defs_skip_no_features() {
+  echo "v1.5: check_bdd_step_definitions skips when no features/"
+  (
+    setup_mock_home
+    tmp_repo=$(mktemp -d)
+    cd "$tmp_repo"
+    mkdir .git
+    source_doctor_no_main
+    if ! declare -F check_bdd_step_definitions >/dev/null; then
+      echo "  RED: check_bdd_step_definitions function missing"
+      teardown_mock_home; rm -rf "$tmp_repo"; exit 1
+    fi
+    PASS=(); WARN=(); FAIL=()
+    QUIET=1
+    check_bdd_step_definitions
+    local has_any=false
+    for x in "${PASS[@]:-}"; do [[ -n "$x" ]] && has_any=true; done
+    for x in "${WARN[@]:-}"; do [[ -n "$x" ]] && has_any=true; done
+    for x in "${FAIL[@]:-}"; do [[ -n "$x" ]] && has_any=true; done
+    teardown_mock_home; rm -rf "$tmp_repo"
+    [[ "$has_any" == "false" ]] && exit 0 || exit 1
+  )
+  local rc=$?
+  assert "v1.5 check_bdd_step_definitions skips when no features/" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+}
+
 echo "Running doctor.sh tests..."
 echo ""
 test_p0_1_omo_check_exists
@@ -355,6 +449,9 @@ test_v14_openspec_absent
 test_v14_bdd_features_present
 test_v14_bdd_features_empty
 test_v14_not_git_repo_skip
+test_v15_step_defs_present
+test_v15_step_defs_missing
+test_v15_step_defs_skip_no_features
 
 echo ""
 echo "Results: $PASS_COUNT passed, $FAIL_COUNT failed"

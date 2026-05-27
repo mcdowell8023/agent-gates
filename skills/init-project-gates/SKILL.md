@@ -16,13 +16,12 @@ One-command setup for agent-assisted development in any project:
 ### Quality Gate Details
 
 - Only fires for agent sessions (`AGENT_MODE=1`) — humans pass through freely
+- CHECK 1 (Path A): OpenSpec active change directory must exist
+- CHECK 2 (Path A): New source files require `features/*.feature` scenarios
 - Gate 1: Checks that every new/modified source file has a corresponding test file
-- Gate 2: Checks for cross-review evidence (`.agent/reviews/*.md` within 2h) on multi-file logic commits
+- Gate 2: Checks for cross-review evidence (`.agent/reviews/*.md` within 4h) on multi-file logic commits
 - Skips trivial changes (no new source files + ≤15 added lines + ≤2 files)
 - Composes with existing husky/lefthook if present
-
-**Phase 1** (current): Test file correspondence + cross-review evidence.
-Future phases add BDD `.feature` checks and OpenSpec change record checks.
 
 ### AGENTS.md Details
 
@@ -201,6 +200,40 @@ Then generate `.agent/PROGRESS.md` from the bundled template (`templates/PROGRES
 - **Single mode**: Note ".agent/PROGRESS.md 已存在，已跳过"
 - **Batch mode**: Auto-skip
 
+### Step 5b: BDD Scaffolding (Path A projects)
+
+Detect OpenSpec presence:
+
+```
+if [ -d .opencode/skills/openspec-propose ] || \
+   [ -d .claude/skills/openspec-propose ] || \
+   [ -d openspec/changes ]; then
+  # Path A — scaffold BDD
+fi
+```
+
+**If Path A detected AND `features/` does NOT exist:**
+
+```
+检测到 OpenSpec（Path A 项目），正在创建 BDD 脚手架...
+```
+
+1. Copy `templates/features/` from agent-gates repo to project root:
+   ```
+   features/
+   ├── example.feature
+   └── step_definitions/
+       ├── example.steps.ts    (Node.js/TypeScript)
+       ├── example_steps.py    (Python)
+       └── ExampleSteps.java   (Java)
+   ```
+2. Keep only the template matching the project's stack (detect from `package.json` → `.ts`, `requirements.txt` / `pyproject.toml` → `.py`, `pom.xml` / `build.gradle` → `.java`). Remove others.
+3. If stack is ambiguous, keep all templates and note "请删除不需要的模板".
+
+**If `features/` already exists:** skip, note "features/ 已存在，已跳过".
+
+**If NOT Path A:** skip silently (Path B does not require BDD scaffolding).
+
 ### Step 6: Generate AGENTS.md Hierarchy (deepinit)
 
 Check if root `AGENTS.md` already exists in the project:
@@ -265,133 +298,14 @@ AGENTS.md:
 
 The following is the complete hook script to write to `.githooks/agent-quality-gate.sh`:
 
-```bash
-#!/usr/bin/env bash
-# Agent Quality Gate v1.3
-# Only fires when AGENT_MODE=1; human developers pass through.
-# Version: 1.3.0
+The hook script is maintained in `hooks/git/agent-quality-gate.sh` (v1.5). Copy the latest version from the installed agent-gates repo at `~/.agent-gates/hooks/git/agent-quality-gate.sh`, or from the repo source at `hooks/git/agent-quality-gate.sh`.
 
-set -euo pipefail
-
-[[ "${AGENT_MODE:-0}" != "1" ]] && exit 0
-
-git rev-parse MERGE_HEAD &>/dev/null 2>&1 && exit 0
-
-FAILED=0
-fail() { echo "❌ GATE: $1"; FAILED=1; }
-
-DIFF_LINES=$(git diff --cached --stat | tail -1 | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo "0")
-CHANGED_COUNT=$(git diff --cached --name-only --diff-filter=ACMR | wc -l | tr -d ' ')
-
-NEW_SOURCE=$(git diff --cached --diff-filter=A --name-only \
-  | grep -E '\.(ts|tsx|js|jsx|py|java|kt|go)$' \
-  | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.|\.setup\.)' || true)
-
-if [[ -z "$NEW_SOURCE" && "$DIFF_LINES" -le 15 && "$CHANGED_COUNT" -le 2 ]]; then
-  exit 0
-fi
-
-echo "🔍 Agent Quality Gate v1.3 ($CHANGED_COUNT files, +${DIFF_LINES} lines)"
-
-# === Gate 1: Test file correspondence ===
-while IFS= read -r f; do
-  [[ -z "$f" ]] && continue
-  case "$f" in
-    *.ts|*.tsx|*.js|*.jsx)
-      t1="${f%.*}.test.${f##*.}"; t2="${f%.*}.spec.${f##*.}" ;;
-    *.py)
-      dir=$(dirname "$f"); base=$(basename "$f" .py)
-      t1="${dir}/test_${base}.py"; t2="${dir}/${base}_test.py" ;;
-    *.java|*.kt)
-      t1=$(echo "$f" | sed 's|/main/|/test/|;s|\.\(java\|kt\)$|Test.\1|'); t2="" ;;
-    *.go)
-      t1="${f%.go}_test.go"; t2="" ;;
-    *) continue ;;
-  esac
-
-  if [[ ! -f "$t1" ]] && [[ -z "$t2" || ! -f "$t2" ]]; then
-    fail "No test for: $f → expected: $t1"
-  fi
-done < <(git diff --cached --name-only --diff-filter=ACMR \
-  | grep -E '\.(ts|tsx|js|jsx|py|java|kt|go)$' \
-  | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.|\.d\.ts$|\.setup\.|config)')
-
-# === Gate 2: Cross-review evidence ===
-# Count non-test logic files (test files excluded from trigger count)
-LOGIC_FILES=0
-while IFS= read -r f; do
-  [[ -z "$f" ]] && continue
-  LOGIC_FILES=$((LOGIC_FILES + 1))
-done < <(git diff --cached --name-only --diff-filter=ACMR \
-  | grep -vE '(\.(lock|md|json|yaml|yml)$|generated/|migrations/|\.d\.ts$)' \
-  | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.)')
-
-# Single-file high-change threshold
-MAX_SINGLE_FILE_LINES=0
-while IFS= read -r f; do
-  [[ -z "$f" ]] && continue
-  flines=$(git diff --cached -- "$f" | grep -c '^+[^+]' 2>/dev/null || echo "0")
-  [[ "$flines" -gt "$MAX_SINGLE_FILE_LINES" ]] && MAX_SINGLE_FILE_LINES="$flines"
-done < <(git diff --cached --name-only --diff-filter=ACMR \
-  | grep -vE '(\.(lock|md|json|yaml|yml)$|generated/|migrations/|\.d\.ts$)' \
-  | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.)')
-
-# Trigger: (multi-file AND substantial change) OR single-file massive change
-NEEDS_REVIEW=0
-[[ "$LOGIC_FILES" -gt 1 && "$DIFF_LINES" -gt 50 ]] && NEEDS_REVIEW=1
-[[ "$MAX_SINGLE_FILE_LINES" -gt 150 ]] && NEEDS_REVIEW=1
-
-if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
-  if [[ -d .agent && ! -d .agent/reviews ]]; then
-    fail "Project has .agent/ but missing .agent/reviews/ directory"
-    echo "   Fix: mkdir -p .agent/reviews"
-  elif [[ -d .agent/reviews ]]; then
-    REVIEW_FILE=$(find .agent/reviews/ -name "*.md" -mmin -240 2>/dev/null | sort -r | head -1)
-    if [[ -z "$REVIEW_FILE" ]]; then
-      fail "Cross-review evidence missing or stale (>4h old)"
-      echo "   Fix: Run cross-review, save to .agent/reviews/$(date +%Y-%m-%d)-<topic>.md"
-      echo "   File MUST end with: VERDICT: PASS (or VERDICT: ISSUES)"
-    else
-      # Verdict validation: require explicit VERDICT line
-      if ! grep -qiE '^VERDICT:\s*(PASS|APPROVED)' "$REVIEW_FILE"; then
-        if grep -qiE '^VERDICT:\s*(ISSUES|FAIL|REJECT)' "$REVIEW_FILE"; then
-          fail "Review verdict is ISSUES/FAIL — resolve before committing"
-        else
-          fail "Review file missing explicit verdict line: $REVIEW_FILE"
-          echo "   Fix: Add 'VERDICT: PASS' or 'VERDICT: ISSUES' at the end of review file."
-        fi
-      else
-        # Freshness gate: skip if post-review changes are minor (<20 lines)
-        REVIEW_MTIME=$(stat -f %m "$REVIEW_FILE" 2>/dev/null || stat -c %Y "$REVIEW_FILE" 2>/dev/null || echo "0")
-        POST_REVIEW_LINES=0
-        while IFS= read -r sf; do
-          [[ -z "$sf" || ! -f "$sf" ]] && continue
-          SF_MTIME=$(stat -f %m "$sf" 2>/dev/null || stat -c %Y "$sf" 2>/dev/null || echo "0")
-          if [[ "$SF_MTIME" -gt "$REVIEW_MTIME" ]]; then
-            sf_lines=$(git diff --cached -- "$sf" | grep -c '^+[^+]' 2>/dev/null || echo "0")
-            POST_REVIEW_LINES=$((POST_REVIEW_LINES + sf_lines))
-          fi
-        done < <(git diff --cached --name-only --diff-filter=ACMR \
-          | grep -vE '(\.(lock|md|json|yaml|yml)$|generated/|migrations/|\.d\.ts$)')
-        if [[ "$POST_REVIEW_LINES" -gt 20 ]]; then
-          fail "Significant changes ($POST_REVIEW_LINES lines) made AFTER review — re-review required"
-          echo "   Fix: Re-run cross-review covering your latest changes."
-        fi
-      fi
-    fi
-  elif [[ ! -d .agent ]]; then
-    echo "⚠️  No .agent/ directory — cross-review check skipped (run init-project-gates)."
-  fi
-fi
-
-if [[ "$FAILED" -eq 1 ]]; then
-  echo ""
-  echo "❌ Agent Quality Gate FAILED."
-  exit 1
-fi
-
-echo "✅ Agent Quality Gate PASSED"
-```
+The v1.5 gate includes:
+- **Path detection**: auto-detects Path A (OpenSpec) vs Path B
+- **CHECK 1** (Path A): `openspec/changes/` must have an active change directory
+- **CHECK 2** (Path A): new source files require `features/*.feature` scenarios
+- **Gate 1**: test file correspondence (all paths)
+- **Gate 2**: cross-review evidence (all paths, threshold-triggered)
 
 ## Idempotency
 

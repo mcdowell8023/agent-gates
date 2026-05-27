@@ -109,6 +109,10 @@ The PostToolUse matcher used by the installer is `TodoWrite|todowrite|TaskUpdate
 
 The pre-commit hook ONLY fires for agent sessions (`AGENT_MODE=1`). Human developers pass through freely.
 
+**CHECK 1 — OpenSpec Change** (Path A only): `openspec/changes/` must contain an active change directory.
+
+**CHECK 2 — BDD Scenarios** (Path A only): New source files require at least one `features/*.feature` file.
+
 **Gate 1 — Test Correspondence**: Every new source file must have a corresponding test file.
 
 **Gate 2 — Cross-Review Evidence**: When commits exceed threshold (`LOGIC_FILES > 1 AND DIFF > 50` OR `SINGLE_FILE > 150 lines`), requires a review file in `.agent/reviews/` with `VERDICT: PASS`.
@@ -154,6 +158,67 @@ The agent will:
 2. Install pre-commit quality gate hook
 3. Generate AGENTS.md hierarchy (via deepinit)
 4. Inject tracking rules into project CLAUDE.md
+5. **(Path A)** Scaffold `features/` + `step_definitions/` with starter templates
+
+## BDD Quick Start (Path A)
+
+If your project uses OpenSpec (`openspec/changes/` exists), the quality gate enforces BDD scenarios:
+
+1. **Create a `.feature` file** in `features/`:
+   ```gherkin
+   Feature: User registration
+
+     Scenario: Register with valid email
+       Given an unregistered email "new@example.com"
+       When the user submits a registration request
+       Then the system returns 201
+       And the response contains a user ID
+   ```
+
+2. **Write step definitions** in `features/step_definitions/`:
+   ```typescript
+   // features/step_definitions/user-registration.steps.ts
+   import { Given, When, Then } from "@cucumber/cucumber";
+
+   Given("an unregistered email {string}", function (email: string) {
+     this.email = email;
+   });
+
+   When("the user submits a registration request", async function () {
+     this.response = await register(this.email);
+   });
+
+   Then("the system returns {int}", function (status: number) {
+     expect(this.response.status).toBe(status);
+   });
+   ```
+
+3. **Commit with `AGENT_MODE=1`** — the gate validates:
+   - CHECK 1: active `openspec/changes/<name>/` directory exists
+   - CHECK 2: at least one `features/*.feature` file exists when adding source files
+   - Gate 1: test file correspondence (unchanged)
+   - Gate 2: cross-review evidence (unchanged)
+
+Templates for TypeScript, Python, and Java are bundled in `templates/features/`.
+
+## OpenSpec Integration
+
+When installing with `--with-openspec`, the installer checks for the OpenSpec CLI:
+
+```bash
+./install.sh --with-openspec
+```
+
+This verifies `openspec` is available on PATH and reports install instructions if missing. The OpenSpec CLI itself is not auto-installed (per the destructive-command red line).
+
+Once OpenSpec is set up in your project, the workflow becomes:
+
+```
+opsx:explore → opsx:propose (generates specs + .feature) → plan-review
+  → opsx:apply (BDD-TDD: step-defs first) → cross-review → opsx:archive
+```
+
+See `agent-workflow-rules` §3 (Path A) and §5 (OpenSpec Workflow) for the full flow.
 
 ## Upgrade
 
@@ -201,11 +266,12 @@ Sample output (ideal Path A: OpenSpec installed + ≥1 `.feature` + clean transc
 ✓ no memory-reminder hook errors in last-7d transcripts
 ✓ OpenSpec installed in current project (Path A applies)
 ✓ BDD features/ has 3 .feature file(s)
+✓ BDD step_definitions/ has 3 step file(s)
 
-13 pass · 0 warn · 0 fail
+14 pass · 0 warn · 0 fail
 ```
 
-In a default Path B project (no OpenSpec, no `features/`) the last two lines become informational `note`s instead of PASS, so the typical output is **11 PASS + 2 note** (not 13 PASS). `note` means "not applicable / not configured", not "broken".
+In a default Path B project (no OpenSpec, no `features/`) the last three lines become informational `note`s instead of PASS, so the typical output is **11 PASS + 3 note** (not 14 PASS). `note` means "not applicable / not configured", not "broken".
 
 Exit code is **0 if no FAIL** (WARN allowed), **1 if any FAIL**, so the script is CI-friendly:
 
