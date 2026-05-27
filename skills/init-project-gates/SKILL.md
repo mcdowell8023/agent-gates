@@ -254,7 +254,58 @@ Invoke the `deepinit` skill workflow:
   - If user says no → skip this step
 - **Batch mode**: Auto-skip (don't prompt for each project, just note "已跳过" in summary)
 
-### Step 7: Report Results
+### Step 7 (Optional): CodeGraph Auto-Init Hook
+
+If `codegraph` is installed globally (`command -v codegraph` succeeds), offer the user a one-time shell hook that automatically initializes CodeGraph indexes when entering new git repos:
+
+```
+检测到 CodeGraph 已安装。要启用 cd 自动初始化 CodeGraph 索引吗？
+
+开启后，cd 进入项目目录（如 ~/Projects/ 下的 git 仓库）时，
+会自动后台运行 `codegraph init -i`（静默、不阻塞 shell）。
+
+已有 .codegraph/ 的项目会跳过。可随时关闭。
+
+启用？(y/N)
+```
+
+If user says yes:
+
+1. Check that the hook script exists at `~/.agent-gates/hooks/shell/codegraph-chpwd.zsh` (deployed by `install.sh`). If not, print the manual install command and skip.
+
+2. Add source line to `~/.zshrc` (idempotent — check for marker `# agent-gates: codegraph auto-init` before appending):
+```bash
+# agent-gates: codegraph auto-init
+[[ -f "$HOME/.agent-gates/hooks/shell/codegraph-chpwd.zsh" ]] && source "$HOME/.agent-gates/hooks/shell/codegraph-chpwd.zsh"
+```
+
+3. Add the opt-in env var to `~/.zshrc` if not already present:
+```bash
+export AGENT_GATES_CODEGRAPH_AUTO_INIT=1
+export AGENT_GATES_CODEGRAPH_DIRS="$HOME/Projects:$HOME/wb/projects"
+```
+
+4. Report:
+```
+CodeGraph auto-init hook:
+  Script: ~/.agent-gates/hooks/shell/codegraph-chpwd.zsh
+  Registered in: ~/.zshrc
+  Allowed dirs: ~/Projects:~/wb/projects
+  To disable: unset AGENT_GATES_CODEGRAPH_AUTO_INIT (or remove from ~/.zshrc)
+  To change dirs: export AGENT_GATES_CODEGRAPH_DIRS="dir1:dir2"
+```
+
+If `codegraph` is not installed, or user says no — skip silently.
+
+The hook script (`codegraph-chpwd.zsh`) implements these safety guards:
+- **Opt-in**: only runs when `AGENT_GATES_CODEGRAPH_AUTO_INIT=1`
+- **Directory allowlist**: only triggers under `AGENT_GATES_CODEGRAPH_DIRS` (colon-separated, default `~/Projects:~/wb/projects`)
+- **Git repo check**: `[[ -d .git || -f .git ]]` (supports worktrees)
+- **Skip if indexed**: `.codegraph/` already exists → no-op
+- **Lock file**: prevents duplicate `codegraph init` if already in progress
+- **Background**: runs `codegraph init -i` with `& disown`, never blocks the shell
+
+### Step 8: Report Results
 
 **Single project report:**
 ```
@@ -273,6 +324,9 @@ Quality Gate:
 AGENTS.md:
   状态: [已生成 N 个文件 / 已更新 / 已跳过]
   根文件: ./AGENTS.md
+
+CodeGraph:
+  状态: [已启用 auto-init / 已跳过 / codegraph 未安装]
 
 使用方式：
   - Agent 正常 commit 即可，hook 自动检查

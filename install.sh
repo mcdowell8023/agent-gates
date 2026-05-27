@@ -27,6 +27,7 @@ MEMORY_SKILL_CANDIDATES=(
 SKIP_HOOKS=0
 FORCE=0
 WITH_OPENSPEC=0
+CODEGRAPH_HOOK=0
 BACKED_UP_SKILLS=()
 
 RED='\033[0;31m'
@@ -301,6 +302,12 @@ install_hook_files() {
     chmod +x "$INSTALL_DIR/doctor.sh"
     info "Installed: doctor.sh"
   fi
+
+  if [[ -f "$REPO_DIR/hooks/shell/codegraph-chpwd.zsh" ]]; then
+    mkdir -p "$INSTALL_DIR/hooks/shell"
+    cp "$REPO_DIR/hooks/shell/codegraph-chpwd.zsh" "$INSTALL_DIR/hooks/shell/codegraph-chpwd.zsh"
+    info "Installed: codegraph-chpwd.zsh (opt-in; see --codegraph-hook)"
+  fi
 }
 
 # --- Hook configuration constants ---
@@ -409,6 +416,34 @@ EOF
   fi
 }
 
+# --- CodeGraph chpwd hook registration ---
+register_codegraph_hook() {
+  local hook_src="$INSTALL_DIR/hooks/shell/codegraph-chpwd.zsh"
+  if [[ ! -f "$hook_src" ]]; then
+    warn "codegraph-chpwd.zsh not found at $hook_src — skipping"
+    return
+  fi
+
+  local zshrc="$HOME/.zshrc"
+  local marker="# agent-gates: codegraph auto-init"
+  local source_line="$marker"$'\n'"[[ -f \"$hook_src\" ]] && source \"$hook_src\""
+
+  if grep -qF "$marker" "$zshrc" 2>/dev/null; then
+    info "CodeGraph chpwd hook already registered in ~/.zshrc"
+  else
+    section "Registering CodeGraph chpwd hook"
+    {
+      echo ""
+      echo "$source_line"
+      echo "export AGENT_GATES_CODEGRAPH_AUTO_INIT=1"
+      echo "export AGENT_GATES_CODEGRAPH_DIRS=\"\$HOME/Projects:\$HOME/wb/projects\""
+    } >> "$zshrc"
+    info "Added source + env vars to ~/.zshrc"
+    info "Allowed dirs: ~/Projects:~/wb/projects (edit AGENT_GATES_CODEGRAPH_DIRS to change)"
+    info "To disable: unset AGENT_GATES_CODEGRAPH_AUTO_INIT (or remove block from ~/.zshrc)"
+  fi
+}
+
 # --- Cleanup ---
 cleanup() {
   [[ -n "$REPO_DIR" ]] && rm -rf "$(dirname "$REPO_DIR")" 2>/dev/null || true
@@ -428,13 +463,15 @@ main() {
       --skip-hooks) SKIP_HOOKS=1; shift ;;
       --force|--upgrade) FORCE=1; shift ;;
       --with-openspec) WITH_OPENSPEC=1; shift ;;
+      --codegraph-hook) CODEGRAPH_HOOK=1; shift ;;
       -h|--help)
-        echo "Usage: install.sh [--target DIR] [--skip-hooks] [--force | --upgrade] [--with-openspec]"
+        echo "Usage: install.sh [--target DIR] [--skip-hooks] [--force | --upgrade] [--with-openspec] [--codegraph-hook]"
         echo "  --target DIR       Override skills target directory"
         echo "  --skip-hooks       Skip platform hook registration"
         echo "  --force            Reinstall even if version matches"
         echo "  --upgrade          Alias of --force"
         echo "  --with-openspec    Check for OpenSpec CLI availability"
+        echo "  --codegraph-hook   Register CodeGraph auto-init chpwd hook in ~/.zshrc"
         exit 0
         ;;
       *) fail "Unknown option: $1" ;;
@@ -451,6 +488,7 @@ main() {
   create_symlinks
   install_hook_files
   register_platform_hooks
+  [[ "$CODEGRAPH_HOOK" -eq 1 ]] && register_codegraph_hook
 
   section "Done!"
   echo ""
