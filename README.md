@@ -94,11 +94,14 @@ cd agent-gates
 | Platform | Skills Location | Hook Registration | Schema |
 |----------|----------------|-------------------|--------|
 | Claude Code (OMC) | `~/.claude/skills/` | `~/.claude/settings.json` → `.hooks.PostToolUse[]` | requires existing `settings.json` (start Claude Code once first) |
-| OpenCode (OMO) | `~/.config/opencode/skills/` | manual — installer prints the entry to add to `~/.config/opencode/hooks.json` `.hooks.PostToolUse[]`; auto-registration tracked | nested schema (same shape as OMC/OMX) |
+| Claude Code + OMO | `~/.config/opencode/skills/` (priority), `~/.claude/skills/` (fallback) | covered by OMC registration above — OMO reads `~/.claude/settings.json` PostToolUse hooks when running on Claude Code | same as OMC |
+| OpenCode (OMO native) | `~/.config/opencode/skills/` | manual — installer prints the entry to add to `~/.config/opencode/hooks.json` `.hooks.PostToolUse[]`; auto-registration tracked | nested schema (same shape as OMC/OMX) |
 | Codex (OMX) | `~/.codex/skills/` | `~/.codex/hooks.json` → `.hooks.PostToolUse[]` | nested schema, installer creates file if missing |
 | cc-switch | `~/.cc-switch/skills/` + symlinks | combines OMC + OMX above | — |
 
 The PostToolUse matcher used by the installer is `TodoWrite|todowrite|TaskUpdate|TaskCreate` to cover both the legacy `TodoWrite` tool name and Claude Code's current `TaskUpdate` / `TaskCreate` tools.
+
+> **OMO on Claude Code**: [oh-my-openagent](https://github.com/Yeachan-Heo/oh-my-claudecode) (OMO) is cross-platform — it runs on Claude Code, OpenCode, Codex, and more. When OMO runs on Claude Code, it reads `~/.claude/settings.json` for PostToolUse hooks, so agent-gates' existing OMC registration already covers this scenario. OMO's own lifecycle hooks coexist with Claude Code native hooks. Skills are resolved dual-source: `~/.config/opencode/skills/` first, then `~/.claude/skills/`.
 
 ## How It Works
 
@@ -170,7 +173,7 @@ What the installer does on upgrade:
 
 - **Per-project hook is NOT auto-upgraded.** Each project's `.githooks/agent-quality-gate.sh` (with `pre-commit` symlinked to it) is a one-time copy made by `init-project-gates`. After upgrading agent-gates globally, re-run `init project gates` in each initialized repo to sync the latest hook.
 - **Backups accumulate.** Each upgrade that detects user changes leaves a new `SKILL.md.bak.*` file. Run `./uninstall.sh --purge-backups` (combined with `--keep-skills` if you only want to clean backups) to remove them after merging your edits.
-- **OMO hook registration is manual.** When the installer detects `~/.config/opencode/`, it prints the JSON entry to add under `~/.config/opencode/hooks.json` `.hooks.PostToolUse[]`. `doctor.sh` checks the same path/schema; if it reports the OMO hook as missing, add the entry by hand (see `docs/platform-hooks.md` → OMO for the full JSON shape).
+- **OMO native (OpenCode) hook registration is manual.** When the installer detects `~/.config/opencode/`, it prints the JSON entry to add under `~/.config/opencode/hooks.json` `.hooks.PostToolUse[]`. `doctor.sh` checks the same path/schema; if it reports the OMO hook as missing, add the entry by hand (see `docs/platform-hooks.md` → OMO for the full JSON shape). Note: if you run OMO on Claude Code (not on OpenCode), the OMC `settings.json` registration already covers you — no manual step needed.
 - **No automatic skill migration.** If a future version renames or restructures a skill directory, you may need to manually clean up the old layout — the installer only updates known skill names.
 
 ## Doctor

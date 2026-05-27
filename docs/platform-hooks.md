@@ -76,7 +76,13 @@ The installer requires `~/.claude/settings.json` to exist (start Claude Code onc
 
 > Claude Code reads `settings.json` at startup. After installing or upgrading, **start a new Claude Code session** for the hook to activate.
 
-### OMO (OpenCode)
+### OMO on Claude Code
+
+[oh-my-openagent](https://github.com/Yeachan-Heo/oh-my-claudecode) (OMO) is a cross-platform orchestration layer that runs on Claude Code, OpenCode, Codex, and more. When OMO runs on Claude Code, it reads `~/.claude/settings.json` for PostToolUse hooks — the same file as OMC above. **No additional registration is needed.** The OMC entry already covers OMO-on-Claude-Code users.
+
+OMO's own lifecycle hooks coexist with Claude Code native hooks. Skills are resolved dual-source: `~/.config/opencode/skills/` first, then `~/.claude/skills/`.
+
+### OMO native (OpenCode)
 
 File: `~/.config/opencode/hooks.json` → `.hooks.PostToolUse[]` (nested schema, same shape as OMC and OMX).
 
