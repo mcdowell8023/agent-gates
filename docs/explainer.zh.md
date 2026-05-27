@@ -46,7 +46,7 @@ flowchart TB
 
     subgraph platforms["支持的 agent 平台"]
         P1[Claude Code OMC]
-        P2[OpenCode OMO]
+        P2[OpenCode OMO<br/>也兼容 Claude Code]
         P3[Codex OMX]
         P4[cc-switch<br/>三家共用]
     end
@@ -111,7 +111,7 @@ sequenceDiagram
     Note over Session: 下次会话启动可恢复上下文
 ```
 
-**关键点**：hook 是平台原生 PostToolUse 事件（OMC 在 `~/.claude/settings.json` 注册、OMX 在 `~/.codex/hooks.json` 注册），agent 没法绕过。validator 拒绝输出 schema 不合规的 hook 响应——v1.2.1 修过这个静默 fail 的 bug。
+**关键点**：hook 是平台原生 PostToolUse 事件（OMC 在 `~/.claude/settings.json` 注册、OMX 在 `~/.codex/hooks.json` 注册、OMO 原生在 `~/.config/opencode/hooks.json` 注册），agent 没法绕过。[oh-my-openagent](https://github.com/Yeachan-Heo/oh-my-claudecode)（OMO）是跨平台编排层，在 Claude Code 上运行时直接读取 `~/.claude/settings.json` 的 PostToolUse hook，因此 OMC 注册同时覆盖了 OMO-on-Claude-Code 场景。validator 拒绝输出 schema 不合规的 hook 响应——v1.2.1 修过这个静默 fail 的 bug。
 
 ### 支柱三：git pre-commit gate 守 commit 质量
 
@@ -146,7 +146,7 @@ flowchart LR
 | `bash` | **必需** | install.sh / doctor.sh / agent-quality-gate.sh |
 | `jq` | 推荐 | 安全 merge `hooks.json` / `settings.json`；缺了改走手动 |
 | Memory 类 skill（`memory` / `writer-memory` 等） | 推荐 | hook 提醒 agent 存档，没装也能跑但 reminder 只有信息意义 |
-| 至少一个 agent 平台 | 推荐 | OMC / OMO / OMX / cc-switch；install.sh 自动检测 |
+| 至少一个 agent 平台 | 推荐 | OMC / OMO / OMX / cc-switch；install.sh 自动检测。OMO 跨平台兼容 Claude Code / OpenCode / Codex 等，在 Claude Code 上运行时复用 OMC 的 `settings.json` hook 注册 |
 | `agent-superpowers` skill 套件 | 推荐（Path B）；`agent-workflow-rules` Skill Gate 硬触发时必需 | 提供 `test-driven-development` / `brainstorming` / `verification-before-completion` / `opsx:explore` |
 | OpenSpec CLI | Path A（团队项目）必需 | 驱动 `opsx:explore` / `opsx:propose` / `opsx:apply` / `opsx:archive`；`doctor.sh check_openspec_install` 报告是否走 Path A |
 
@@ -364,8 +364,10 @@ L3 Cross-Review Gate（自加）：███████████████
 
 #### v1.5+ — 长期方向（不在本季度计划内，仅备忘）
 
+- `doctor.sh` 加 `check_superpowers_install`：检测 `test-driven-development` / `brainstorming` / `verification-before-completion` / `opsx:explore` 是否安装，与 `check_openspec_install` 同形态（需 TDD）
 - CI 集成：在 `.github/workflows/agent-gates.yml` 模板中加 BDD 测试运行（CHECK 4 in CI）
-- OMO 自动 hook 注册（当前手动；等 OpenCode 公开 hook config 约定）
+- OMO 原生（OpenCode）自动 hook 注册（当前手动打印 JSON 指引）。注：OMO-on-Claude-Code 场景已被 OMC `settings.json` 注册覆盖（2026-05-26 确认），无需额外适配
+- OMO skill 双源解析适配调研：OMO 在 Claude Code 上优先读 `~/.config/opencode/skills/`，其次 `~/.claude/skills/`；`install.sh` 当前只写一个目录，考虑双写或 symlink
 - Trace logger 集成（已有 v1.2.x 实验，未产品化）
 - Multi-agent worktree orchestration 集成（与 Paseo / Codex 协同）
 
