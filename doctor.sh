@@ -389,8 +389,21 @@ main() {
     esac
   done
 
+  # v1.5.3: dynamic banner version (read from .version, auto-centered)
+  local ver title inner_width=34 total_pad lpad rpad
+  if [[ -f "$INSTALL_DIR/.version" ]]; then
+    ver=$(tr -d '[:space:]' < "$INSTALL_DIR/.version")
+  else
+    ver="?"
+  fi
+  title="Agent Gates Doctor v${ver}"
+  total_pad=$(( inner_width - ${#title} ))
+  if (( total_pad < 0 )); then total_pad=0; fi
+  lpad=$(( total_pad / 2 ))
+  rpad=$(( total_pad - lpad ))
+
   echo -e "${BLUE}╔══════════════════════════════════╗${NC}"
-  echo -e "${BLUE}║${NC}     Agent Gates Doctor v1.5      ${BLUE}║${NC}"
+  printf "${BLUE}║${NC}%${lpad}s%s%${rpad}s${BLUE}║${NC}\n" "" "$title" ""
   echo -e "${BLUE}╚══════════════════════════════════╝${NC}"
   echo ""
 
