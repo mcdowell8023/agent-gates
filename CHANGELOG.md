@@ -2,6 +2,17 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## [1.5.3] - 2026-05-28
+
+### Fixed
+- **`doctor.sh` banner 动态版本号** — 之前 hardcode `Agent Gates Doctor v1.5`，v1.5.1 / v1.5.2 升级后 banner 不变，给用户造成"装的版本是不是没生效"的错觉。改为从 `~/.agent-gates/.version` 动态读取并居中对齐（自动 padding，支持任意长度版本号如 `v1.5.3` / `v2.0.0-beta` / `v10.0.0` 都不破坏 box 框线）。
+- `.version` 缺失时 banner 显示 `Agent Gates Doctor v?`（不再误报）。
+
+### Notes
+- 纯 cosmetic patch，零功能变更。
+- 所有测试不受影响（doctor 内部 check_* 函数行为不变）。
+- v1.5.4 计划：Memory skill 内置（fork `clawic/skills/skills/memory/` 到 `agent-gates/skills/memory/`，避免 install 时网络依赖）。
+
 ## [1.5.2] - 2026-05-28
 
 ### Added (依赖自动安装)
