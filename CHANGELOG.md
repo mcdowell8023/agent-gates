@@ -2,6 +2,16 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## [1.5.5] - 2026-05-28
+
+### Fixed (E2E 测试发现的两个小改进)
+- **`hooks/git/agent-quality-gate.sh` trivial skip 加 info 输出** — 之前 trivial 改动直接 `exit 0` 静默，用户看 commit 输出不知道 gate 是否运行过。现在输出 `✅ Agent Quality Gate: trivial change skipped (N file(s), +N lines)` 让用户明确知道 gate 工作了并决定跳过。
+- **`doctor.sh check_hook_output_schema` 使用 `|| return 0`** — 之前 `[[ -f "$mjs" ]] || return` 在 `set -e` + 残缺 mock 环境下会触发隐式 return 非 0 让脚本中止，summary 不输出。改为显式 `return 0` 保证 graceful skip。仅 mock / 残缺安装场景触发，实际用户安装无感知。
+
+### Notes
+- 两项均为 E2E 测试发现的非阻塞改进（v1.5.4 全部 79/79 测试通过，但这两项 UX/健壮性可以更好）
+- 测试: 60 unit + 19 E2E = 79 pass / 0 fail（无回归）
+
 ## [1.5.4] - 2026-05-28
 
 ### Changed (Memory skill 从 sparse-clone 改为内置)

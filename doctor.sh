@@ -263,16 +263,18 @@ check_omx_registration() {
 }
 
 check_hook_output_schema() {
+  # v1.5.5: explicit `return 0` to avoid set -e aborting when mjs missing
+  # (preserves graceful skip in incomplete mock environments)
   local mjs="$INSTALL_DIR/hooks/platform/memory-reminder.mjs"
-  [[ -f "$mjs" ]] || return  # already FAILed in check_hook_files
-  command -v node &>/dev/null || return
-  command -v jq &>/dev/null || { warn "cannot validate hook output schema without jq"; return; }
+  [[ -f "$mjs" ]] || return 0  # already FAILed in check_hook_files
+  command -v node &>/dev/null || return 0
+  command -v jq &>/dev/null || { warn "cannot validate hook output schema without jq"; return 0; }
 
   local out event reminder
   out=$(echo '{"tool_name":"TaskUpdate","tool_input":{"todos":[{"status":"completed"}]}}' \
         | node "$mjs" 2>/dev/null) || {
     fail "memory-reminder.mjs crashed when invoked"
-    return
+    return 0
   }
   event=$(echo "$out" | jq -r '.hookSpecificOutput.hookEventName // ""' 2>/dev/null)
   reminder=$(echo "$out" | jq -r '(.hookSpecificOutput.additionalContext // "") | contains("AGENT-GATES")' 2>/dev/null)

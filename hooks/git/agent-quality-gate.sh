@@ -21,6 +21,8 @@ NEW_SOURCE=$(git diff --cached --diff-filter=A --name-only \
   | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.|\.setup\.)' || true)
 
 if [[ -z "$NEW_SOURCE" && "$DIFF_LINES" -le 15 && "$CHANGED_COUNT" -le 2 ]]; then
+  # v1.5.5: print info so user knows the gate ran and decided to skip
+  echo "✅ Agent Quality Gate: trivial change skipped ($CHANGED_COUNT file(s), +${DIFF_LINES} lines)"
   exit 0
 fi
 
