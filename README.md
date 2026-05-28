@@ -1,5 +1,7 @@
 # Agent Gates
 
+[English](./README.md) | [中文](./README.zh-CN.md)
+
 Runtime quality gates for AI coding agents. One install gives your team TDD enforcement, cross-review evidence checks, memory persistence reminders, and progress tracking — across Claude Code, OpenCode, and Codex.
 
 > 📖 **中文整体说明**（问题、架构、与 agent-superpowers / OpenSpec 的关系、使用方式、含 mermaid 图）：[docs/explainer.zh.md](./docs/explainer.zh.md)
@@ -22,44 +24,109 @@ agent-gates/
 └── install.sh                       # Multi-platform installer
 ```
 
-## Prerequisites
+## Prerequisites（用户需要预先安装）
 
-| Dependency | Required | Purpose |
-|------------|----------|---------|
-| Node.js ≥18 | Yes | Runs `memory-reminder.mjs` (ES modules + `node:fs`) |
-| `git` or `curl` | Yes | Installer uses one to fetch this repo |
-| `jq` | Recommended | Merges agent-gates entry into existing `hooks.json`; without it the installer falls back to printing manual instructions |
-| Memory-management skill (e.g. `memory`, `writer-memory`) | Recommended | `memory-reminder.mjs` injects a system-reminder to save state; without a Memory skill the reminder is informational only. Installer prints candidate skills dirs when missing. |
-| One agent platform (Claude Code / OpenCode / Codex / cc-switch) | Recommended | Installer auto-detects; falls back to `~/.claude/skills/` if none present |
-| `agent-superpowers` skill suite | Recommended (Path B); required when `agent-workflow-rules` Skill Gate triggers fire | Provides `test-driven-development`, `brainstorming`, `verification-before-completion`, `opsx:explore`; see Upstream skill dependencies below |
-| OpenSpec CLI | Required for Path A (team project) | Drives `opsx:explore` / `opsx:propose` / `opsx:apply` / `opsx:archive`; `doctor.sh check_openspec_install` reports whether Path A applies |
+Things you must install **before** running `./install.sh`:
 
-The install path must be space-free (`$HOME` must not contain spaces) — shell hooks cannot reliably escape such paths.
+| Tool | Required / Optional | Purpose |
+|------|---------------------|---------|
+| Node.js ≥ 18 | **Required** | Runs `memory-reminder.mjs` (ES modules + `node:fs`) |
+| `git` or `curl` | **Required** | Installer fetches this repo; auto-install of upstream skills uses `git clone` |
+| `jq` | Strongly recommended | Merges agent-gates entries into platform `hooks.json`; without it the installer prints manual JSON instructions |
+| At least one agent platform | Recommended | Claude Code / OpenCode / Codex / cc-switch — installer auto-detects and falls back to `~/.claude/skills/` if none present |
+| `npm` (ships with Node.js) | Optional | Only needed if you want the installer to auto-install the OpenSpec CLI |
 
-### Default install behavior (v1.5.2)
+**Install path constraint**: `$HOME` must not contain spaces — shell hooks cannot reliably escape such paths.
 
-Starting in v1.5.2, `./install.sh` automatically installs upstream skill dependencies so the box-fresh experience matches the workflow rules:
+## Auto-Installed Dependencies（agent-gates 默认帮你装，v1.5.2+）
 
-| Dependency | v1.5.2 behavior | Source |
-|---|---|---|
-| Memory skill | **Auto-installed** — sparse-clone of `clawic/skills` (MIT). Skipped if already present. | <https://github.com/clawic/skills> |
-| `agent-superpowers` 14-skill suite (`test-driven-development`, `brainstorming`, `verification-before-completion`, `writing-plans`, `executing-plans`, …) | **Auto-installed** — full clone copied into the platform skills dir. Skipped if the 5 core hardcore skills are already present. | <https://github.com/obra/superpowers> |
-| OpenSpec CLI | **Interactive prompt (y/N)** — installer runs `npm install -g @openspec/cli` only after explicit consent. Non-interactive shells default to N. | <https://github.com/Fission-AI/OpenSpec> |
+Running `./install.sh` automatically performs the following (each step is skipped if already present):
 
-Use `./install.sh --skip-deps` to opt out (CI environments, advanced users managing their own skill installs). Without these dependencies agent-gates still runs — Path B (TDD only, no OpenSpec / no BDD) is the default and `doctor.sh` reports missing pieces as informational `note`, not `FAIL`.
+| Dependency | Default behavior | Source | Why it matters |
+|---|---|---|---|
+| **agent-gates own 4 skills**<br>`agent-workflow-rules` / `init-project-gates` / `agent-review-protocol` / `init-deep-fallback` (new in v1.5.2) | Copied into the detected platform skills directory | This repo | Core workflow rules |
+| **Memory skill** | Sparse-clone of the `skills/memory/` subdirectory from `clawic/skills` | [clawic/skills](https://github.com/clawic/skills) (MIT) | `memory-reminder.mjs` hook prompts the agent to call this skill for session persistence |
+| **agent-superpowers 14-skill suite**<br>(test-driven-development / brainstorming / verification-before-completion / writing-plans / executing-plans + 9 supporting skills) | Full clone of the upstream repo into the platform skills dir | [obra/superpowers](https://github.com/obra/superpowers) | `agent-workflow-rules` TDD / plan / review / debug rules depend on these upstream skills |
+| **OpenSpec CLI** (optional) | **Interactive y/N prompt, defaults to N**; runs `npm install -g @openspec/cli` only on explicit consent | [@openspec/cli](https://www.npmjs.com/package/@openspec/cli) | Required for Path A (OpenSpec-driven team projects) |
+| **Platform hook registration** | Writes PostToolUse entries into `~/.claude/settings.json` / `~/.config/opencode/hooks.json` / `~/.codex/hooks.json` for any **detected** platform | install.sh built-in | `memory-reminder.mjs` fires when a todo completes |
 
-## Quick Install
+**Opt-out**: `./install.sh --skip-deps` skips all external dependencies — agent-gates' own skills and platform hooks still install. Without these dependencies agent-gates still runs — Path B (TDD only, no OpenSpec / no BDD) is the default and `doctor.sh` reports missing pieces as informational `note`, not `FAIL`.
+
+## Installation
+
+**One-line install** (recommended):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mcdowell8023/agent-gates/main/install.sh | bash
 ```
 
-Or clone and run:
+**Or clone and run**:
 
 ```bash
 git clone https://github.com/mcdowell8023/agent-gates.git
 cd agent-gates
 ./install.sh
+```
+
+**Optional flags**:
+
+- `--skip-deps` — Don't install external skill dependencies (Memory / Superpowers / OpenSpec)
+- `--with-openspec` — Detect-only check for OpenSpec CLI (no auto-install); mutually exclusive with the default y/N prompt
+- `--codegraph-hook` — Also register a zsh `chpwd` hook that runs `codegraph init -i` when entering a git repo
+- `--skip-hooks` — Skip platform hook registration
+- `--upgrade` / `--force` — Reinstall even when versions match
+
+**Upgrade**:
+
+```bash
+./install.sh --upgrade
+```
+
+**Uninstall**:
+
+```bash
+./uninstall.sh
+```
+
+## Usage
+
+### Initialize a project
+
+Inside your project directory, in an agent platform session, say:
+
+```
+初始化项目
+```
+
+or in English:
+
+```
+init project gates
+```
+
+The `init-project-gates` skill will automatically:
+
+1. Detect the project type (Path A: contains OpenSpec / Path B: no OpenSpec)
+2. Install `agent-quality-gate.sh` into `.githooks/`
+3. Run `git config core.hooksPath .githooks`
+4. Create `.agent/PROGRESS.md`
+5. Generate `AGENTS.md` (hierarchy depends on available tools — see the step 6 decision tree)
+6. Inject project-level rules into `CLAUDE.md`
+
+### Daily use
+
+While the agent works inside a session, agent-gates automatically:
+
+- **After each completed todo**: `memory-reminder.mjs` prompts the agent to save state via the Memory skill
+- **Before each commit**: `agent-quality-gate.sh` checks test correspondence / cross-review evidence / OpenSpec change / `.feature` files
+- **Skill loading**: `agent-workflow-rules` / `agent-review-protocol` / `init-deep-fallback` are triggered as needed
+
+### Health check
+
+```bash
+~/.agent-gates/doctor.sh           # Full check
+~/.agent-gates/doctor.sh --quiet   # PASS/WARN/FAIL summary only
+~/.agent-gates/doctor.sh --no-network  # Offline mode, skip remote version comparison
 ```
 
 ## What's Included
@@ -145,21 +212,6 @@ Agent Gates supports two workflow paths, auto-detected per project:
 Both paths share the same `agent-workflow-rules` skill as the canonical source of TDD, plan-review, verification, and anti-loop rules. Path A layers OpenSpec (L1 requirements) and BDD (L2 acceptance) on top; Path B uses TDD alone.
 
 `doctor.sh` reports which path applies for the current working directory (`check_openspec_install` + `check_bdd_features_dir`).
-
-## Usage
-
-After installation, in any project:
-
-```
-初始化项目
-```
-
-The agent will:
-1. Create `.agent/` directory with templates
-2. Install pre-commit quality gate hook
-3. Generate AGENTS.md hierarchy (via deepinit)
-4. Inject tracking rules into project CLAUDE.md
-5. **(Path A)** Scaffold `features/` + `step_definitions/` with starter templates
 
 ## BDD Quick Start (Path A)
 
