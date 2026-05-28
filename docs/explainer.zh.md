@@ -153,7 +153,7 @@ flowchart LR
 > ⚠️ 注意：`$HOME` 路径**不能含空格**——shell hook 无法可靠转义。
 >
 > ✅ v1.5.2 起，`./install.sh` 默认会**自动安装** Memory skill 与 `agent-superpowers`（14 个 skill），并就 OpenSpec CLI 交互式询问 y/N 后才执行 `npm install -g @openspec/cli`；非交互 shell 默认 N。要保留旧的"全手动"行为，加 `--skip-deps`。
-> - Memory skill：sparse-clone `clawic/skills`（MIT），仅复制 `skills/memory/`，已装则 skip
+> - Memory skill：**v1.5.4 起内置（bundled）** —— agent-gates 仓自带 `skills/memory/`，install 时直接 cp 到 platform skills 目录；已装则 skip，无网络依赖。fork 自 [clawic/skills](https://github.com/clawic/skills)（MIT），同步备注详见 `skills/memory/UPSTREAM.md`
 > - `agent-superpowers`：clone `obra/superpowers` 全量复制，5 个核心硬触发 skill 已装则 skip 整批
 > - OpenSpec CLI：检测 `which openspec`，缺失时询问 y/N 后再装（明确告知全局环境影响，红线 #2）
 >

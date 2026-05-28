@@ -13,7 +13,9 @@ agent-gates/
 ├── skills/                          # Agent skills（被各平台自动加载）
 │   ├── agent-workflow-rules/        # TDD、计划审查、验证、防环
 │   ├── agent-review-protocol/       # 三 Agent 评审、交叉检查流水线
-│   └── init-project-gates/          # 项目初始化器（一次性设置）
+│   ├── init-project-gates/          # 项目初始化器（一次性设置）
+│   ├── init-deep-fallback/          # 跨平台 AGENTS.md hierarchy 兜底（v1.5.2+）
+│   └── memory/                      # Memory skill，bundled 自 clawic/skills（MIT，v1.5.4+）
 ├── hooks/
 │   ├── git/
 │   │   └── agent-quality-gate.sh    # Pre-commit：测试对应 + 审查证据
@@ -45,7 +47,7 @@ agent-gates/
 | 依赖 | 默认行为 | 来源 | 影响 |
 |---|---|---|---|
 | **agent-gates 自带 4 个 skill**<br>`agent-workflow-rules` / `init-project-gates` / `agent-review-protocol` / `init-deep-fallback`（v1.5.2 新） | 复制到检测到的 platform skills 目录 | 本仓库 | 核心工作流规则 |
-| **Memory skill** | sparse-clone `clawic/skills` 的 `skills/memory/` 子目录 | [clawic/skills](https://github.com/clawic/skills)（MIT） | `memory-reminder.mjs` hook 提醒 agent 调用此 skill 持久化会话 |
+| **Memory skill** | **v1.5.4 起内置（bundled）** —— agent-gates 仓自带 `skills/memory/`，install 时直接 cp 到 platform skills 目录。已装则 skip，无网络依赖。 | fork 自 [clawic/skills](https://github.com/clawic/skills)（MIT），同步备注详见 `skills/memory/UPSTREAM.md` | `memory-reminder.mjs` hook 提醒 agent 调用此 skill 持久化会话 |
 | **agent-superpowers 14-skill 套件**<br>(test-driven-development / brainstorming / verification-before-completion / writing-plans / executing-plans + 9 个支撑 skill) | 全量 clone 上游仓库到 platform skills 目录 | [obra/superpowers](https://github.com/obra/superpowers) | `agent-workflow-rules` 的 TDD / 计划 / 审查 / 调试规则依赖这些上游 skill |
 | **OpenSpec CLI**（可选） | **交互式 y/N 提示，默认 N**；只有显式同意才会 `npm install -g @openspec/cli` | [@openspec/cli](https://www.npmjs.com/package/@openspec/cli) | Path A（OpenSpec 驱动的团队项目）需要 |
 | **平台 hook 注册** | 把 PostToolUse 条目写入 `~/.claude/settings.json` / `~/.config/opencode/hooks.json` / `~/.codex/hooks.json` 中**已检测到**的平台 | install.sh 自动 | `memory-reminder.mjs` 在 todo 完成时触发 |
@@ -138,6 +140,8 @@ agent 在 session 内开发时，agent-gates 自动：
 | `init-project-gates` | 项目设置：hook + `.agent/` 目录 + AGENTS.md | 手动："init project" |
 | `agent-workflow-rules` | TDD、计划审查、验证、调试 | 代码任务自动加载 |
 | `agent-review-protocol` | 三 Agent 评审流水线、交叉检查 | 审查阶段触发 |
+| `init-deep-fallback` | 跨平台 AGENTS.md hierarchy 兜底（bundled v1.5.2+） | 由 `init-project-gates` Step 6 在无 OMC/OMO 工具时调用 |
+| `memory` | Infinite organized memory（bundled v1.5.4+） | `memory-reminder` hook 触发时自动加载 |
 
 ### Hooks
 
