@@ -86,7 +86,7 @@ OMO's own lifecycle hooks coexist with Claude Code native hooks. Skills are reso
 
 File: `~/.config/opencode/hooks.json` → `.hooks.PostToolUse[]` (nested schema, same shape as OMC and OMX).
 
-Automated registration is **not yet supported** — the installer detects `~/.config/opencode/` and prints the manual entry. Add it to `~/.config/opencode/hooks.json` under `.hooks.PostToolUse[]`:
+**v1.5.2 auto-registers** — when `install.sh` detects `~/.config/opencode/`, it writes the entry below to `~/.config/opencode/hooks.json` via the same `register_hook()` jq logic used for OMC/OMX (schema is identical). Falls back to printing the manual entry only if jq is unavailable. For reference, the equivalent manual JSON to add under `.hooks.PostToolUse[]`:
 
 ```json
 {
@@ -107,7 +107,7 @@ Automated registration is **not yet supported** — the installer detects `~/.co
 }
 ```
 
-`doctor.sh` checks this exact path/schema via `check_omo_registration`; if it reports the OMO hook as missing, the fix is to add the JSON above manually.
+`doctor.sh` checks this exact path/schema via `check_omo_registration`; if it reports the OMO hook as missing, the fix is to re-run `install.sh --upgrade` so v1.5.2's auto-registration writes the entry. As a manual fallback (e.g. when jq is unavailable), add the JSON above by hand.
 
 ### OMX (Codex)
 

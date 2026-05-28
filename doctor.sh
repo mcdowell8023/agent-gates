@@ -24,7 +24,7 @@ FAIL=()
 pass() { PASS+=("$1"); }
 warn() { WARN+=("$1"); }
 fail() { FAIL+=("$1"); }
-note() { [[ "$QUIET" -eq 0 ]] && echo -e "${DIM}  …$1${NC}"; }
+note() { if [[ "$QUIET" -eq 0 ]]; then echo -e "${DIM}  …$1${NC}"; fi; return 0; }
 
 # --- Checks ---
 
@@ -184,9 +184,14 @@ check_hook_files() {
 }
 
 check_omc_registration() {
+  # v1.5.2 F1: skip when Claude Code not installed (align with OMO/OMX skip behavior)
+  if [[ ! -d "$HOME/.claude" ]]; then
+    note "OMC (Claude Code) not installed, skipping"
+    return
+  fi
   local s="$HOME/.claude/settings.json"
   if [[ ! -f "$s" ]]; then
-    warn "$s missing — Claude Code not initialized? Start Claude Code once then re-run install.sh"
+    warn "$s missing — Claude Code installed but not initialized? Start Claude Code once then re-run install.sh"
     return
   fi
   if ! command -v jq &>/dev/null; then
@@ -215,11 +220,12 @@ check_omo_registration() {
     return
   fi
   local h="$HOME/.config/opencode/hooks.json"
-  # OMO auto-registration is not implemented yet — install.sh prints manual
-  # instructions when it detects ~/.config/opencode. doctor reports presence,
-  # but the fix path is manual, not `install.sh --force`.
+  # Since v1.5.2, install.sh auto-registers the OMO hook via the same
+  # register_hook() jq logic used for OMC/OMX. doctor still reports the
+  # current state; the fix path is `install.sh --upgrade`, with manual
+  # JSON insertion only as a fallback when jq is unavailable.
   if [[ ! -f "$h" ]]; then
-    warn "OMO hooks.json missing at $h — OMO auto-registration not yet supported; add the entry manually (see install.sh OMO output / docs/platform-hooks.md)"
+    warn "OMO hooks.json missing at $h — run install.sh --upgrade to auto-register (v1.5.2+); see docs/platform-hooks.md for the manual fallback"
     return
   fi
   if ! command -v jq &>/dev/null; then
@@ -230,7 +236,7 @@ check_omo_registration() {
        "$h" &>/dev/null; then
     pass "OMO hooks.json hook registered"
   else
-    warn "OMO hook NOT registered in $h — add manually (see install.sh OMO output / docs/platform-hooks.md)"
+    warn "OMO hook NOT registered in $h — run install.sh --upgrade to auto-register (v1.5.2+); see docs/platform-hooks.md for the manual fallback"
   fi
 }
 

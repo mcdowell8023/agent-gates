@@ -152,11 +152,12 @@ flowchart LR
 
 > ⚠️ 注意：`$HOME` 路径**不能含空格**——shell hook 无法可靠转义。
 >
-> ⚠️ `agent-superpowers` 与 OpenSpec CLI **不会被自动安装**（红线：禁止未经确认执行破坏性命令）。手动安装：
-> - `agent-superpowers`：参照 <https://github.com/obra/superpowers> 把对应 skill 拷到 agent 平台 skills 目录
-> - OpenSpec CLI：`npm install -g @openspec/cli`（仓库：<https://github.com/Fission-AI/OpenSpec>）
+> ✅ v1.5.2 起，`./install.sh` 默认会**自动安装** Memory skill 与 `agent-superpowers`（14 个 skill），并就 OpenSpec CLI 交互式询问 y/N 后才执行 `npm install -g @openspec/cli`；非交互 shell 默认 N。要保留旧的"全手动"行为，加 `--skip-deps`。
+> - Memory skill：sparse-clone `clawic/skills`（MIT），仅复制 `skills/memory/`，已装则 skip
+> - `agent-superpowers`：clone `obra/superpowers` 全量复制，5 个核心硬触发 skill 已装则 skip 整批
+> - OpenSpec CLI：检测 `which openspec`，缺失时询问 y/N 后再装（明确告知全局环境影响，红线 #2）
 >
-> 如果都没装，agent-gates 仍能跑 —— 默认走 Path B（仅 TDD，无 OpenSpec / BDD），`doctor.sh` 把缺失项报告为 `note`（不适用），不是 `FAIL`。
+> 如果通过 `--skip-deps` 或交互拒绝，agent-gates 仍能跑 —— 默认走 Path B（仅 TDD，无 OpenSpec / BDD），`doctor.sh` 把缺失项报告为 `note`（不适用），不是 `FAIL`。
 
 ---
 

@@ -11,7 +11,7 @@ One-command setup for agent-assisted development in any project:
 
 1. **Quality Gate Hook** — pre-commit hook enforcing test file correspondence + cross-review evidence (agent-only)
 2. **AGENTS.md Hierarchy** — AI-readable documentation for codebase understanding (via deepinit)
-3. **PROGRESS.md** — cross-session progress tracking for multi-day work (PingCode / standup / handoff)
+3. **PROGRESS.md** — cross-session progress tracking for multi-day work (work log / standup / handoff)
 
 ### Quality Gate Details
 
@@ -124,7 +124,7 @@ All agent working artifacts live in `.agent/` directory:
 
 | File | Purpose |
 |------|---------|
-| `.agent/PROGRESS.md` | 开发进度跟踪（跨会话/汇报/PingCode） |
+| `.agent/PROGRESS.md` | 开发进度跟踪（跨会话/汇报/工时） |
 | `.agent/GATES.md` | 门禁检查清单 |
 | `.agent/reviews/` | 交叉审查证据文件（git tracked） |
 | `.agent/memory/` | 跨会话记忆（.gitignore） |
@@ -151,7 +151,7 @@ New session start: read `.agent/PROGRESS.md` first to restore context.
   - Update "当前状态" table (phase, test count, build status, latest commit)
   - Move completed items from "待完成" to "完成"
 - After each commit, add to "Commit 日志" table
-- At end of each work session, update "PingCode 工时参考" with hours and description
+- At end of each work session, update "工时参考" with hours and description
 - "排期 vs 实际" table: fill in "实际" column for completed days
 - "关键信息" section: keep paths and commands current (especially after branch changes)
 - `.agent/PROGRESS.md` is the SINGLE SOURCE OF TRUTH for project status — if in doubt, read it first
@@ -234,25 +234,41 @@ fi
 
 **If NOT Path A:** skip silently (Path B does not require BDD scaffolding).
 
-### Step 6: Generate AGENTS.md Hierarchy (deepinit)
+### Step 6: Generate AGENTS.md
 
-Check if root `AGENTS.md` already exists in the project:
+根据当前 session 所在 platform 选择 hierarchy 生成方式（降级路径）：
 
-**If AGENTS.md does NOT exist:**
-```
-正在生成 AGENTS.md 层级文档...
-```
-Invoke the `deepinit` skill workflow:
-1. Map directory structure (exclude node_modules, .git, dist, build, etc.)
-2. Create AGENTS.md files level-by-level (parent before children)
-3. Include: purpose, key files, subdirectories, AI agent instructions, testing requirements
-4. Add parent references (`<!-- Parent: ../AGENTS.md -->`) for hierarchy navigation
+**Platform 决策树（5 层降级，越靠前功能越完整）**：
 
-**If AGENTS.md already exists:**
-- **Single mode**: Ask "检测到已有 AGENTS.md。要刷新/更新吗？(y/N)"
-  - If user says yes → run deepinit in update mode (preserves `<!-- MANUAL -->` sections)
-  - If user says no → skip this step
-- **Batch mode**: Auto-skip (don't prompt for each project, just note "已跳过" in summary)
+1. **Claude Code session + 装了 OMC plugin**（检测 `~/.claude/plugins/cache/omc/oh-my-claudecode/`）
+   → 调用 OMC `deepinit` skill 生成 hierarchical AGENTS.md（多目录嵌套 + parent 引用）
+
+2. **OpenCode session + 装了 OMO 包**（检测 `~/.config/opencode/node_modules/oh-my-openagent-darwin-arm64/` 或类似）
+   → 在 session 内执行 `/init-deep`（OMO 提供）生成 hierarchical AGENTS.md
+
+3. **agent-gates 自带的 `init-deep-fallback` skill（跨平台兜底，v1.5.2+）**
+   → 任意 platform 上都可用（install.sh 默认安装）
+   → 生成 hierarchy 简化版（root + meaningful subdirs + parent 引用）
+   → 功能不如 OMC deepinit 完整，但够小到中型项目用
+
+4. **平台原生 `/init`**（Claude Code / OpenCode 都有 builtin）
+   → 生成单根 AGENTS.md / CLAUDE.md（无 hierarchy）
+   → 当 init-deep-fallback 不可用时（如 skill 没装好）的最后兜底
+
+5. **agent 手写最小根 AGENTS.md**
+   → 平台无 /init（如部分 Codex 版本）的最终 fallback
+   → 含项目目的 + 主要目录列表 + Agent Workflow 提示
+
+**已存在 AGENTS.md 时**：
+- Single mode: 询问 "检测到已有 AGENTS.md。要刷新/更新吗？(y/N)"
+  - yes → 走上面决策树（hierarchy 工具会保留 `<!-- MANUAL -->` 段）
+  - no → 跳过此步
+- Batch mode: 自动跳过，summary 标 "已跳过"
+
+**功能等价说明**：
+- v1.5.2 起：agent-gates 自带 `init-deep-fallback` skill，跨平台用户都有 hierarchy 能力
+- 装了 OMC/OMO plugin 的用户优先用 plugin 版（功能更全）
+- 完整跨平台统一接口未来由 Rampart 基座 `rampart init-deep` 提供（自动路由 OMC / OMO / fallback）
 
 ### Step 7 (Optional): CodeGraph Auto-Init Hook
 
@@ -383,6 +399,4 @@ The version number in the script header tracks which phase is installed.
 - **deepinit**: This skill invokes `deepinit` for AGENTS.md generation. If `deepinit` skill is not available, falls back to creating a minimal root AGENTS.md only.
 - **agent-workflow-rules**: Runtime companion — provides TDD/plan-review/verification discipline during development. `init-project-gates` sets up the project; `agent-workflow-rules` governs how the agent works within it.
 - **agent-review-protocol**: Review companion — provides Three-Agent Review, cross-check, and Superpowers enforcement for code review phases.
-- **waza-check**: The quality gate hook works alongside waza-check for pre-merge review.
 - **test-driven-development**: The hook enforces TDD by requiring test files to exist before commit.
-- **pingcode-log**: PROGRESS.md "PingCode 工时参考" section feeds directly into daily work logging.

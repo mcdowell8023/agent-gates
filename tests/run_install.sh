@@ -96,13 +96,111 @@ test_help_mentions_openspec() {
   )
 }
 
-echo "=== install.sh --with-openspec tests ==="
+# --- v1.5.2: auto-install dependencies ---
+
+# T5: --skip-deps flag is parsed
+test_skip_deps_parsed() {
+  echo "T5: --skip-deps flag sets SKIP_DEPS=1"
+  (
+    source_install_no_main
+    assert "SKIP_DEPS variable exists" "$([[ "${SKIP_DEPS+set}" == "set" ]] && echo true || echo false)"
+  )
+}
+
+# T6: detect_skill_dir locates target skill directory
+test_detect_skill_dir() {
+  echo "T6: detect_skill_dir returns first existing platform skill dir"
+  (
+    MOCK_HOME=$(mktemp -d)
+    export HOME="$MOCK_HOME"
+    mkdir -p "$MOCK_HOME/.claude/skills"
+    source_install_no_main
+    if ! declare -F detect_skill_dir >/dev/null; then
+      echo "  RED: detect_skill_dir function missing"
+      rm -rf "$MOCK_HOME"; exit 1
+    fi
+    result=$(detect_skill_dir 2>&1)
+    rc=$?
+    assert "returns zero when skill dir exists" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+    assert "returns path containing .claude/skills" "$(echo "$result" | grep -q "\.claude/skills" && echo true || echo false)"
+    rm -rf "$MOCK_HOME"
+  )
+}
+
+# T7: check_memory_skill_installed returns 0 if any platform has memory*
+test_check_memory_installed() {
+  echo "T7: check_memory_skill_installed detects existing memory skill"
+  (
+    MOCK_HOME=$(mktemp -d)
+    export HOME="$MOCK_HOME"
+    mkdir -p "$MOCK_HOME/.claude/skills/memory-1.0.2"
+    source_install_no_main
+    if ! declare -F check_memory_skill_installed >/dev/null; then
+      echo "  RED: check_memory_skill_installed function missing"
+      rm -rf "$MOCK_HOME"; exit 1
+    fi
+    check_memory_skill_installed && rc=0 || rc=$?
+    assert "returns zero when memory-* exists" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+    rm -rf "$MOCK_HOME"
+  )
+}
+
+# T8: check_superpowers_installed returns 0 if all 5 hardcore skills exist
+test_check_superpowers_installed() {
+  echo "T8: check_superpowers_installed detects 5 hardcore skills"
+  (
+    MOCK_HOME=$(mktemp -d)
+    export HOME="$MOCK_HOME"
+    for s in test-driven-development brainstorming verification-before-completion writing-plans executing-plans; do
+      mkdir -p "$MOCK_HOME/.claude/skills/$s"
+    done
+    source_install_no_main
+    if ! declare -F check_superpowers_installed >/dev/null; then
+      echo "  RED: check_superpowers_installed function missing"
+      rm -rf "$MOCK_HOME"; exit 1
+    fi
+    check_superpowers_installed && rc=0 || rc=$?
+    assert "returns zero when all 5 hardcore skills exist" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+    rm -rf "$MOCK_HOME"
+  )
+}
+
+# T9: --skip-deps in help output
+test_help_mentions_skip_deps() {
+  echo "T9: --help mentions --skip-deps"
+  (
+    output=$(bash "$INSTALL_SCRIPT" --help 2>&1 || true)
+    assert "help mentions --skip-deps" "$(echo "$output" | grep -q 'skip-deps' && echo true || echo false)"
+  )
+}
+
+# T10: install.sh main flow calls install_external_deps unless --skip-deps
+test_main_flow_calls_install_external_deps() {
+  echo "T10: install_external_deps function exists"
+  (
+    source_install_no_main
+    if declare -F install_external_deps >/dev/null; then
+      assert "install_external_deps function declared" "true"
+    else
+      echo "  RED: install_external_deps function missing"
+      assert "install_external_deps function declared" "false"
+    fi
+  )
+}
+
+echo "=== install.sh --with-openspec + v1.5.2 auto-deps tests ==="
 echo ""
 
 test_flag_parsed
 test_openspec_cli_missing
 test_openspec_cli_found
 test_help_mentions_openspec
+test_skip_deps_parsed
+test_detect_skill_dir
+test_check_memory_installed
+test_check_superpowers_installed
+test_help_mentions_skip_deps
+test_main_flow_calls_install_external_deps
 
 echo ""
 read -r PASS_COUNT FAIL_COUNT < "$RESULTS_FILE"

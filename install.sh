@@ -16,7 +16,7 @@ if [[ "$INSTALL_DIR" == *" "* ]]; then
   echo "agent-gates requires a space-free \$HOME path." >&2
   exit 1
 fi
-SKILLS=(init-project-gates agent-workflow-rules agent-review-protocol)
+SKILLS=(init-project-gates agent-workflow-rules agent-review-protocol init-deep-fallback)
 MEMORY_SKILL_CANDIDATES=(
   "$HOME/.claude/skills"
   "$HOME/.config/opencode/skills"
@@ -28,7 +28,20 @@ SKIP_HOOKS=0
 FORCE=0
 WITH_OPENSPEC=0
 CODEGRAPH_HOOK=0
+SKIP_DEPS=0
 BACKED_UP_SKILLS=()
+
+# v1.5.2: external dependency sources
+MEMORY_SKILL_REPO="https://github.com/clawic/skills"
+MEMORY_SKILL_SUBPATH="skills/memory"
+SUPERPOWERS_REPO="https://github.com/obra/superpowers"
+SUPERPOWERS_HARDCORE=(
+  test-driven-development
+  brainstorming
+  verification-before-completion
+  writing-plans
+  executing-plans
+)
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -117,6 +130,194 @@ check_optional_deps() {
     for cand in "${MEMORY_SKILL_CANDIDATES[@]}"; do
       echo "      - $cand/"
     done
+  fi
+}
+
+# --- v1.5.2: External dependency installation (default ON, opt-out via --skip-deps) ---
+
+# Locate the first existing platform skill directory (where to install external skills).
+# Priority: ~/.cc-switch/skills (multi-platform mirror) → ~/.claude/skills → opencode → codex → agents
+detect_skill_dir() {
+  local d
+  for d in \
+    "$HOME/.cc-switch/skills" \
+    "$HOME/.claude/skills" \
+    "$HOME/.config/opencode/skills" \
+    "$HOME/.codex/skills" \
+    "$HOME/.agents/skills"; do
+    if [[ -d "$d" ]]; then
+      echo "$d"
+      return 0
+    fi
+  done
+  # No platform dir exists yet — default to ~/.claude/skills (will be created)
+  echo "$HOME/.claude/skills"
+  return 0
+}
+
+# Returns 0 if any memory* skill is installed in any candidate dir, 1 otherwise.
+check_memory_skill_installed() {
+  local cand entry
+  for cand in "${MEMORY_SKILL_CANDIDATES[@]}"; do
+    [[ -d "$cand" ]] || continue
+    while IFS= read -r -d '' entry; do
+      [[ -n "$entry" ]] && return 0
+    done < <(find "$cand" -maxdepth 1 -mindepth 1 -type d -iname 'memory*' -print0 2>/dev/null)
+  done
+  return 1
+}
+
+# Returns 0 if all 5 hardcore superpowers skills are installed (any platform), 1 if any missing.
+check_superpowers_installed() {
+  local skill d found
+  for skill in "${SUPERPOWERS_HARDCORE[@]}"; do
+    found=0
+    for d in "${MEMORY_SKILL_CANDIDATES[@]}"; do
+      if [[ -d "$d/$skill" ]]; then
+        found=1
+        break
+      fi
+    done
+    [[ "$found" -eq 0 ]] && return 1
+  done
+  return 0
+}
+
+# Sparse-clone clawic/skills and copy skills/memory/ to target.
+install_memory_skill() {
+  local target="$1"
+  local tmp
+  tmp=$(mktemp -d) || { warn "cannot create temp dir for Memory skill clone"; return 1; }
+  if ! command -v git &>/dev/null; then
+    warn "git not in PATH — cannot install Memory skill automatically"
+    rm -rf "$tmp"; return 1
+  fi
+  (
+    cd "$tmp" || exit 1
+    git clone --depth 1 --filter=blob:none --no-checkout "$MEMORY_SKILL_REPO" clawic-skills 2>/dev/null || exit 1
+    cd clawic-skills || exit 1
+    git sparse-checkout init --cone 2>/dev/null || exit 1
+    git sparse-checkout set "$MEMORY_SKILL_SUBPATH" 2>/dev/null || exit 1
+    git checkout 2>/dev/null || exit 1
+  ) || { warn "Memory skill clone failed (network? repo unavailable?)"; rm -rf "$tmp"; return 1; }
+
+  if [[ -d "$tmp/clawic-skills/$MEMORY_SKILL_SUBPATH" ]]; then
+    mkdir -p "$target"
+    cp -R "$tmp/clawic-skills/$MEMORY_SKILL_SUBPATH" "$target/memory"
+    rm -rf "$tmp"
+    info "Memory skill installed → $target/memory"
+    return 0
+  else
+    warn "Memory skill: sparse-checkout produced no files"
+    rm -rf "$tmp"; return 1
+  fi
+}
+
+# Full clone obra/superpowers, copy all skills/* to target.
+install_superpowers() {
+  local target="$1"
+  local tmp
+  tmp=$(mktemp -d) || { warn "cannot create temp dir for Superpowers clone"; return 1; }
+  if ! command -v git &>/dev/null; then
+    warn "git not in PATH — cannot install Superpowers automatically"
+    rm -rf "$tmp"; return 1
+  fi
+  if ! git clone --depth 1 "$SUPERPOWERS_REPO" "$tmp/superpowers" 2>/dev/null; then
+    warn "Superpowers clone failed (network? repo unavailable?)"
+    rm -rf "$tmp"; return 1
+  fi
+  if [[ ! -d "$tmp/superpowers/skills" ]]; then
+    warn "Superpowers: cloned repo has no skills/ directory"
+    rm -rf "$tmp"; return 1
+  fi
+  mkdir -p "$target"
+  local count=0 skill
+  for skill in "$tmp/superpowers/skills"/*/; do
+    [[ -d "$skill" ]] || continue
+    cp -R "$skill" "$target/"
+    count=$((count + 1))
+  done
+  rm -rf "$tmp"
+  info "Superpowers installed: $count skill(s) → $target/"
+  return 0
+}
+
+# Ask user before npm install -g (global env mutation per red line #2).
+install_openspec_with_prompt() {
+  if command -v openspec &>/dev/null; then
+    info "OpenSpec CLI already on PATH: $(openspec --version 2>/dev/null || echo 'version unknown')"
+    return 0
+  fi
+  if ! command -v npm &>/dev/null; then
+    warn "npm not in PATH — cannot install OpenSpec CLI automatically"
+    echo "    Install Node.js first (npm comes with it): https://nodejs.org/"
+    return 1
+  fi
+
+  echo ""
+  echo "━━━ OpenSpec CLI 依赖检测 ━━━"
+  echo ""
+  echo "OpenSpec CLI 用于 Path A（团队/规范驱动）项目的 explore/propose/apply/archive 流程。"
+  echo "agent-gates 将它列为可选依赖（Path B 项目不需要）。"
+  echo ""
+  echo "如要启用：执行 'npm install -g @openspec/cli'"
+  echo ""
+  echo "⚠️  注意：这是 npm 全局安装命令，会："
+  echo "   - 在 npm 全局 prefix 写入新包（通常 /usr/local/lib 或 ~/.nvm/...）"
+  echo "   - 在 PATH 中暴露 'openspec' 命令"
+  echo "   - 涉及全局环境改动"
+  echo ""
+
+  # Non-interactive (CI / piped install) defaults to N
+  if [[ ! -t 0 ]]; then
+    warn "Non-interactive shell — skipping OpenSpec CLI install. To install manually: npm install -g @openspec/cli"
+    return 1
+  fi
+
+  read -r -p "是否现在自动执行? [y/N]: " reply
+  if [[ ! "$reply" =~ ^[Yy]$ ]]; then
+    info "Skipped OpenSpec CLI install (manual: npm install -g @openspec/cli)"
+    return 1
+  fi
+  if npm install -g @openspec/cli 2>&1; then
+    info "OpenSpec CLI installed"
+    return 0
+  else
+    warn "OpenSpec CLI install failed — see npm output above"
+    return 1
+  fi
+}
+
+# Orchestrator: install Memory + Superpowers + OpenSpec (default-on, opt-out via --skip-deps).
+install_external_deps() {
+  [[ "$SKIP_DEPS" -eq 1 ]] && { info "Skipping external deps (--skip-deps)"; return 0; }
+
+  section "Installing external dependencies"
+
+  local target
+  target=$(detect_skill_dir)
+
+  # 1. Memory skill
+  if check_memory_skill_installed; then
+    info "Memory skill already installed — skip"
+  else
+    install_memory_skill "$target" || warn "Memory skill install failed — agent-gates still functional but memory-reminder hook output less useful"
+  fi
+
+  # 2. Superpowers
+  if check_superpowers_installed; then
+    info "Superpowers (5 hardcore skills) already installed — skip"
+  else
+    install_superpowers "$target" || warn "Superpowers install failed — workflow rules SKILL.md references will not resolve at runtime"
+  fi
+
+  # 3. OpenSpec
+  #    --with-openspec: detect-only path (back-compat with v1.5.0). Does NOT auto-install.
+  #    default:        interactive y/N prompt to run `npm install -g @openspec/cli`.
+  if [[ "$WITH_OPENSPEC" -eq 1 ]]; then
+    check_openspec || true
+  else
+    install_openspec_with_prompt || true
   fi
 }
 
@@ -331,14 +532,10 @@ register_platform_hooks() {
     fi
   fi
 
-  # OMO: ~/.config/opencode/hooks.json (.hooks.PostToolUse, nested schema).
-  # Auto-registration not yet implemented — print explicit manual entry.
+  # OMO: ~/.config/opencode/hooks.json (.hooks.PostToolUse, nested schema, identical to OMC/OMX).
+  # v1.5.2 F2: auto-registration enabled — schema equivalence confirmed in docs/platform-hooks.md L85
   if [[ -d "$HOME/.config/opencode" ]]; then
-    warn "OMO (OpenCode): automated hook registration not yet supported."
-    echo "    Add manually to ~/.config/opencode/hooks.json under .hooks.PostToolUse[]:"
-    echo "      matcher: \"$HOOK_MATCHER\""
-    echo "      command: \"node $INSTALL_DIR/hooks/platform/memory-reminder.mjs\""
-    echo "    See docs/platform-hooks.md → OMO section for the full JSON shape."
+    register_hook "$HOME/.config/opencode/hooks.json" "OMO (OpenCode)"
   fi
 
   # OMX: ~/.codex/hooks.json (.hooks.PostToolUse, nested schema)
@@ -464,14 +661,16 @@ main() {
       --force|--upgrade) FORCE=1; shift ;;
       --with-openspec) WITH_OPENSPEC=1; shift ;;
       --codegraph-hook) CODEGRAPH_HOOK=1; shift ;;
+      --skip-deps) SKIP_DEPS=1; shift ;;
       -h|--help)
-        echo "Usage: install.sh [--target DIR] [--skip-hooks] [--force | --upgrade] [--with-openspec] [--codegraph-hook]"
+        echo "Usage: install.sh [--target DIR] [--skip-hooks] [--force | --upgrade] [--with-openspec] [--codegraph-hook] [--skip-deps]"
         echo "  --target DIR       Override skills target directory"
         echo "  --skip-hooks       Skip platform hook registration"
         echo "  --force            Reinstall even if version matches"
         echo "  --upgrade          Alias of --force"
-        echo "  --with-openspec    Check for OpenSpec CLI availability"
+        echo "  --with-openspec    Check for OpenSpec CLI availability (no auto-install)"
         echo "  --codegraph-hook   Register CodeGraph auto-init chpwd hook in ~/.zshrc"
+        echo "  --skip-deps        Skip external dependency install (Memory / Superpowers / OpenSpec)"
         exit 0
         ;;
       *) fail "Unknown option: $1" ;;
@@ -489,6 +688,7 @@ main() {
   install_hook_files
   register_platform_hooks
   [[ "$CODEGRAPH_HOOK" -eq 1 ]] && register_codegraph_hook
+  install_external_deps
 
   section "Done!"
   echo ""

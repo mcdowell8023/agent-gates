@@ -591,6 +591,64 @@ test_v151_superpowers_cross_platform() {
   assert "v1.5.1 cross-platform detection -> PASS" "$([[ $rc -eq 0 ]] && echo true || echo false)"
 }
 
+# --- v1.5.2 F1: check_omc_registration with "not installed" skip ---
+# Behavior: if ~/.claude/ does not exist, NOTE-skip (don't WARN)
+# Align with OMO / OMX which both have this skip-prefix.
+
+test_v152_omc_skip_when_not_installed() {
+  echo "v1.5.2: check_omc_registration skips when ~/.claude/ missing (not installed)"
+  (
+    setup_mock_home
+    # No ~/.claude/ dir at all — Claude Code not installed
+    source_doctor_no_main
+    PASS=(); WARN=(); FAIL=()
+    QUIET=1
+    check_omc_registration
+    local has_skip_note=false has_warn=false
+    for x in "${WARN[@]:-}"; do
+      [[ -n "$x" ]] && has_warn=true
+    done
+    teardown_mock_home
+    if [[ "$has_warn" == "false" ]]; then
+      exit 0
+    else
+      echo "  RED: expected no WARN when Claude Code not installed, got WARN=(${WARN[*]:-})"
+      exit 1
+    fi
+  )
+  local rc=$?
+  assert "v1.5.2 OMC skip when ~/.claude/ missing" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+}
+
+test_v152_omc_warn_when_installed_no_settings() {
+  echo "v1.5.2: check_omc_registration WARNs when Claude Code installed but settings.json missing"
+  (
+    setup_mock_home
+    mkdir -p "$HOME/.claude"
+    # ~/.claude/ exists but no settings.json — installed but not initialized
+    source_doctor_no_main
+    PASS=(); WARN=(); FAIL=()
+    QUIET=1
+    check_omc_registration
+    local has_warn=false
+    for x in "${WARN[@]:-}"; do
+      [[ "$x" == *"settings.json"* || "$x" == *"not initialized"* ]] && has_warn=true
+    done
+    teardown_mock_home
+    if [[ "$has_warn" == "true" ]]; then
+      exit 0
+    else
+      echo "  RED: expected WARN about settings.json, got WARN=(${WARN[*]:-})"
+      exit 1
+    fi
+  )
+  local rc=$?
+  assert "v1.5.2 OMC WARNs when installed but missing settings.json" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+}
+
+# --- v1.5.2 F2: OMO auto-registration (install.sh writes hooks.json) ---
+# Tested in tests/run_install.sh — doctor side just verifies result.
+
 echo "Running doctor.sh tests..."
 echo ""
 test_p0_1_omo_check_exists
@@ -606,6 +664,8 @@ test_v14_not_git_repo_skip
 test_v15_step_defs_present
 test_v15_step_defs_missing
 test_v15_step_defs_skip_no_features
+test_v152_omc_skip_when_not_installed
+test_v152_omc_warn_when_installed_no_settings
 test_v151_superpowers_function_declared
 test_v151_superpowers_all_present_cc_switch
 test_v151_superpowers_partial_missing_brainstorming

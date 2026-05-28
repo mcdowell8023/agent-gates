@@ -1,6 +1,6 @@
 # 开发进度跟踪 — {{PROJECT_NAME}}
 
-> 供汇报 / PingCode / 跨会话引用  
+> 供汇报 / 工时记录 / 跨会话引用  
 > 分支：`{{BRANCH}}`  
 > Worktree：`{{WORKTREE_PATH}}`  
 > 排期：{{START_DATE}} ~ {{END_DATE}}（{{WORKDAYS}} 工作日）
@@ -57,7 +57,7 @@
 
 ---
 
-## PingCode 工时参考
+## 工时参考
 
 | 日期 | 工时(h) | 任务描述 |
 |------|---------|----------|

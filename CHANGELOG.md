@@ -2,6 +2,45 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## [1.5.2] - 2026-05-28
+
+### Added (依赖自动安装)
+- **`install.sh` 默认自动安装外部依赖**（强制依赖开箱即用）：
+  - **Memory skill** — sparse-clone `clawic/skills`（MIT），仅 `skills/memory/`，复制到主 platform skill dir。已装则 skip。
+  - **Superpowers 14 个 skill** — clone `obra/superpowers`，全部 `skills/*` 复制。已装 5 个 hardcore（test-driven-development / brainstorming / verification-before-completion / writing-plans / executing-plans）则 skip 整批。
+  - **OpenSpec CLI** — 检测 `which openspec`，缺失时**交互式询问 y/N** 执行 `npm install -g @openspec/cli`。非交互 shell 默认 N。明确告知用户全局环境影响（红线 #2）。
+- `--skip-deps` 参数：opt-out 外部依赖安装（CI / 老用户保留入口）
+
+### Fixed (平台检测一致性)
+- **F1: `doctor.sh check_omc_registration`** 加"未装则 skip"前置 — 与 OMO/OMX 行为对齐。之前 Claude Code 未装时 doctor 报 WARN "settings.json missing — not initialized?"，现在改为 NOTE skip "OMC not installed"。
+- **F2: `install.sh` OMO 自动 hook 注册** — 之前 v1.4 标记为 "automated registration not yet supported"，现已确认 OMO `~/.config/opencode/hooks.json` schema 等价 OMC/OMX，复用 `register_hook()` jq 注册逻辑，OpenCode 用户不再需要手动配置。
+
+### Changed (init-project-gates Step 6)
+- **跨平台 init 决策树**（D 方案 — `/init` 兜底）：
+  1. Claude Code + OMC plugin 装了 → OMC `deepinit` (hierarchy)
+  2. OpenCode + OMO 包装了 → `/init-deep` (hierarchy)
+  3. 任意 platform → 平台原生 `/init` (单根)
+  4. 都不行 → agent 手写最小根 AGENTS.md
+- 不强制装 OMC/OMO plugin；hierarchy 是 nice-to-have。跨平台统一接口留待 Rampart 基座层。
+
+### Removed (脱敏)
+- `init-project-gates/SKILL.md` 删除 `pingcode-log` 引用（公司内部 PingCode 工时工具）
+- `init-project-gates/SKILL.md` 删除 `waza-check` 引用（无功能依赖的关联文档）
+- `templates/PROGRESS.md` "PingCode 工时参考" → "工时参考"（脱敏）
+- CLAUDE.md 注入模板里的 "PingCode" 字样泛化为 "工时"
+
+### Test Coverage
+- run.sh: 6 pass
+- run_doctor.sh: **19 pass**（v1.5.1 17 + F1 OMC skip 2 个新测试）
+- run_gate.sh: 14 pass
+- run_install.sh: **12 pass**（v1.5.1 5 + 7 个新 auto-deps 测试）
+- run_codegraph_hook.sh: 9 pass
+- **总计: 60 pass / 0 fail**（v1.5.1 是 51）
+
+### Notes
+- v1.5.2 仍是 agent-gates 的维护版。**Rampart 是基座重构**，会磨平各 platform 差异（rampart init-deep 统一接口，自动选 OMC/OMO/fallback）。
+- 现在的 v1.5.2 用户开箱可用：装好就有 Memory + Superpowers，OpenSpec 询问后装，hook 自动注册到所有已装 platform。
+
 ## [1.5.1] - 2026-05-28
 
 ### Added

@@ -14,6 +14,6 @@
 
 <!-- Active blockers preventing progress -->
 
-## PingCode 工时参考
+## 工时参考
 
-<!-- Daily work summaries for PingCode logging -->
+<!-- Daily work summaries for hours logging -->

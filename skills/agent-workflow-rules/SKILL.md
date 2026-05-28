@@ -571,7 +571,7 @@ If the project has `.agent/PROGRESS.md`:
 
 - After completing each todo: update today's "完成" section.
 - After each commit: add to "Commit 日志" table.
-- At session end: update "PingCode 工时参考" with hours and description.
+- At session end: update "工时参考" with hours and description.
 - Keep "当前状态" table current (phase, test count, build status, latest commit).
 - Keep "关键信息" section current (especially after branch changes).
 - **New session start**: read `.agent/PROGRESS.md` FIRST to restore context.
