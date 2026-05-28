@@ -631,3 +631,53 @@ Task is complete ONLY when ALL are true:
 - [ ] PROGRESS.md updated (if exists)
 - [ ] Path A team project: OpenSpec `opsx:archive` executed (if applicable)
 - [ ] Memory persisted via §13 Memory Persistence
+
+---
+
+## §17 迭代收敛规则（Iteration Convergence）
+
+**触发**：同一个设计文档 / 同一个实现 ≥ 2 轮独立审查仍被判 REVISE。
+
+**强制动作**：暂停修补，反思整体思路。不允许直接出下一版继续 patch。
+
+**反思提问清单**：
+1. 反复出现的不同 bug 是否指向同一个隐性假设？
+2. 我是不是在堆叠新机制而非简化？
+3. 现在的设计是不是重新发明了一个已有机制？
+4. 复杂度是不是已经超过解决的问题本身？
+
+**禁止动作**：
+- 直接出 v0.N+1 继续修边界
+- 让审查者"按你的修复方案再审一次"
+
+**正确动作**：
+- 回到 v0.1 检查初始决策是否走偏
+- 用扩展性 + 渐进式重新组织，每版只解决一个核心问题
+- 如果 reset 比 patch 更简单，就 reset
+
+**真实案例**：v1.6 Drift Review v0.1→v0.3 三轮审查均 REVISE。根因不是细节 bug，是把 drift review 设计成"门禁的升级版"，重新发明了 cross-review gate。reset 为"cross-review 子类"后复杂度大降。
+
+---
+
+## §18 团队模式 / 并行优先（Team-First Parallelism）
+
+**核心原则**：复杂多任务必须优先并行派出子 agent，禁止默认串行包揽。
+
+**判定**：
+- ≥ 2 个**互不依赖**的子任务 → 必须并行（同一 message 多个 Agent tool call）
+- 1 个 trivial 单任务 → 主 agent 自己做
+- 串行依赖链（A 输出是 B 输入）→ 不强制并行，但应识别可分支点
+
+**判断子任务是否互不依赖的标准**：
+- 改动**不同文件集**
+- 不需要彼此的产出作为输入
+- 失败时不影响对方继续
+
+**反模式（出现即停手）**：
+- 主 agent 包揽 ≥ 3 件可拆任务
+- "我先做 A 再做 B 再做 C" — 检查：A B C 真的有依赖吗？没有就并行
+- 子 agent 后台跑期间主 agent 闲等
+
+**真实案例**：v1.5.1 收尾包含规则沉淀 / Vault 更新 / CHANGELOG / 测试验证 4 件互不依赖的事，主 agent 包揽 3 件被用户纠正"分工反了"。正确做法：4 件全派出去并行，主 agent 留最后 commit + push。
+
+**与现有 §30-delegation 的关系**：本节是**触发约束**（什么时候必须派）；30-delegation 是**操作规范**（派的 prompt 格式要求）。两者互补。

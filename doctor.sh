@@ -78,6 +78,55 @@ check_memory_skill() {
   fi
 }
 
+check_superpowers_install() {
+  # v1.5.1: detect the 5 upstream "superpowers" skills across known agent
+  # platform skill dirs. These skills back agent-gates' workflow guarantees
+  # (TDD loop, brainstorming, plan→verify lifecycle). Missing them does not
+  # break agent-gates itself, but downstream hooks/skills will degrade, so we
+  # WARN rather than FAIL.
+  local dirs=(
+    "$HOME/.claude/skills"
+    "$HOME/.config/opencode/skills"
+    "$HOME/.codex/skills"
+    "$HOME/.cc-switch/skills"
+    "$HOME/.agents/skills"
+  )
+  local skills=(
+    "test-driven-development"
+    "brainstorming"
+    "verification-before-completion"
+    "writing-plans"
+    "executing-plans"
+  )
+  local found=()
+  local missing=()
+  local skill d hit
+  for skill in "${skills[@]}"; do
+    hit=""
+    for d in "${dirs[@]}"; do
+      [[ -d "$d" ]] || continue
+      if [[ -d "$d/$skill" ]]; then
+        hit="$d/$skill"
+        break
+      fi
+    done
+    if [[ -n "$hit" ]]; then
+      found+=("$skill")
+    else
+      missing+=("$skill")
+    fi
+  done
+
+  if (( ${#missing[@]} == 0 )); then
+    pass "Superpowers skills detected: ${found[*]}"
+  elif (( ${#found[@]} == 0 )); then
+    warn "no Superpowers skills found in agent skill dirs — install via: https://github.com/obra/superpowers (or cc-switch / opsx)"
+  else
+    warn "Superpowers partial: missing (${missing[*]}); install the rest via: https://github.com/obra/superpowers"
+  fi
+  return 0
+}
+
 check_version_local() {
   if [[ ! -f "$INSTALL_DIR/.version" ]]; then
     fail "$INSTALL_DIR/.version missing — run install.sh first"
@@ -342,6 +391,7 @@ main() {
   check_node
   check_jq
   check_memory_skill
+  check_superpowers_install
   check_version_local
   check_version_remote
   check_hook_files

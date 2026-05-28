@@ -1,0 +1,16 @@
+# OMC (oh-my-claudecode) runtime state
+.omc/
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Backups (install.sh --upgrade creates these)
+*.bak
+*.bak.*
+
+# Local environment
+.env
+.env.local

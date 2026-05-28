@@ -437,6 +437,160 @@ test_v15_step_defs_skip_no_features() {
   assert "v1.5 check_bdd_step_definitions skips when no features/" "$([[ $rc -eq 0 ]] && echo true || echo false)"
 }
 
+# --- v1.5.1: check_superpowers_install ---
+# Detects 5 upstream superpowers skills across 5 platform skill dirs:
+#   - test-driven-development, brainstorming, verification-before-completion,
+#     writing-plans, executing-plans
+# search dirs: ~/.claude/skills, ~/.config/opencode/skills, ~/.codex/skills,
+#              ~/.cc-switch/skills, ~/.agents/skills
+
+create_all_superpowers() {
+  local parent="$1"
+  mkdir -p "$parent/test-driven-development"
+  mkdir -p "$parent/brainstorming"
+  mkdir -p "$parent/verification-before-completion"
+  mkdir -p "$parent/writing-plans"
+  mkdir -p "$parent/executing-plans"
+}
+
+test_v151_superpowers_function_declared() {
+  echo "v1.5.1: check_superpowers_install function is declared after sourcing doctor.sh"
+  (
+    setup_mock_home
+    source_doctor_no_main
+    if declare -F check_superpowers_install >/dev/null; then
+      teardown_mock_home; exit 0
+    else
+      echo "  RED: check_superpowers_install function not defined"
+      teardown_mock_home; exit 1
+    fi
+  )
+  local rc=$?
+  assert "v1.5.1 check_superpowers_install function declared" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+}
+
+test_v151_superpowers_all_present_cc_switch() {
+  echo "v1.5.1: all 5 superpowers under ~/.cc-switch/skills/ -> PASS"
+  (
+    setup_mock_home
+    create_all_superpowers "$HOME/.cc-switch/skills"
+    source_doctor_no_main
+    if ! declare -F check_superpowers_install >/dev/null; then
+      echo "  RED: check_superpowers_install function missing"
+      teardown_mock_home; exit 1
+    fi
+    PASS=(); WARN=(); FAIL=()
+    QUIET=1
+    check_superpowers_install
+    local found=false
+    for x in "${PASS[@]:-}"; do
+      [[ "$x" == *"superpowers"* || "$x" == *"Superpowers"* ]] && found=true
+    done
+    teardown_mock_home
+    if [[ "$found" == "true" && ${#WARN[@]} -eq 0 ]]; then
+      exit 0
+    else
+      echo "  RED: expected PASS containing superpowers, no WARN; got PASS=(${PASS[*]:-}) WARN=(${WARN[*]:-})"
+      exit 1
+    fi
+  )
+  local rc=$?
+  assert "v1.5.1 all 5 superpowers present in cc-switch -> PASS" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+}
+
+test_v151_superpowers_partial_missing_brainstorming() {
+  echo "v1.5.1: missing brainstorming -> WARN mentioning 'brainstorming'"
+  (
+    setup_mock_home
+    mkdir -p "$HOME/.cc-switch/skills/test-driven-development"
+    mkdir -p "$HOME/.cc-switch/skills/verification-before-completion"
+    mkdir -p "$HOME/.cc-switch/skills/writing-plans"
+    mkdir -p "$HOME/.cc-switch/skills/executing-plans"
+    source_doctor_no_main
+    if ! declare -F check_superpowers_install >/dev/null; then
+      echo "  RED: check_superpowers_install function missing"
+      teardown_mock_home; exit 1
+    fi
+    PASS=(); WARN=(); FAIL=()
+    QUIET=1
+    check_superpowers_install
+    local mentions_bs=false
+    for x in "${WARN[@]:-}"; do
+      [[ "$x" == *"brainstorming"* ]] && mentions_bs=true
+    done
+    teardown_mock_home
+    if [[ "$mentions_bs" == "true" ]]; then
+      exit 0
+    else
+      echo "  RED: expected WARN mentioning brainstorming; got PASS=(${PASS[*]:-}) WARN=(${WARN[*]:-})"
+      exit 1
+    fi
+  )
+  local rc=$?
+  assert "v1.5.1 missing brainstorming -> WARN mentions name" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+}
+
+test_v151_superpowers_all_missing() {
+  echo "v1.5.1: all missing (no platform dirs) -> WARN mentioning install"
+  (
+    setup_mock_home
+    source_doctor_no_main
+    if ! declare -F check_superpowers_install >/dev/null; then
+      echo "  RED: check_superpowers_install function missing"
+      teardown_mock_home; exit 1
+    fi
+    PASS=(); WARN=(); FAIL=()
+    QUIET=1
+    check_superpowers_install
+    local mentions_install=false
+    for x in "${WARN[@]:-}"; do
+      [[ "$x" == *"install"* || "$x" == *"Install"* || "$x" == *"INSTALL"* ]] && mentions_install=true
+    done
+    teardown_mock_home
+    if [[ "$mentions_install" == "true" && ${#PASS[@]} -eq 0 ]]; then
+      exit 0
+    else
+      echo "  RED: expected WARN mentioning install, no PASS; got PASS=(${PASS[*]:-}) WARN=(${WARN[*]:-})"
+      exit 1
+    fi
+  )
+  local rc=$?
+  assert "v1.5.1 all missing -> WARN mentions install" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+}
+
+test_v151_superpowers_cross_platform() {
+  echo "v1.5.1: skills spread across ~/.claude/skills and ~/.agents/skills (not in cc-switch) -> PASS"
+  (
+    setup_mock_home
+    mkdir -p "$HOME/.claude/skills/test-driven-development"
+    mkdir -p "$HOME/.claude/skills/brainstorming"
+    mkdir -p "$HOME/.claude/skills/verification-before-completion"
+    mkdir -p "$HOME/.agents/skills/writing-plans"
+    mkdir -p "$HOME/.agents/skills/executing-plans"
+    source_doctor_no_main
+    if ! declare -F check_superpowers_install >/dev/null; then
+      echo "  RED: check_superpowers_install function missing"
+      teardown_mock_home; exit 1
+    fi
+    PASS=(); WARN=(); FAIL=()
+    QUIET=1
+    check_superpowers_install
+    local found=false
+    for x in "${PASS[@]:-}"; do
+      [[ "$x" == *"superpowers"* || "$x" == *"Superpowers"* ]] && found=true
+    done
+    teardown_mock_home
+    if [[ "$found" == "true" && ${#WARN[@]} -eq 0 ]]; then
+      exit 0
+    else
+      echo "  RED: expected PASS containing superpowers across platforms, no WARN; got PASS=(${PASS[*]:-}) WARN=(${WARN[*]:-})"
+      exit 1
+    fi
+  )
+  local rc=$?
+  assert "v1.5.1 cross-platform detection -> PASS" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+}
+
 echo "Running doctor.sh tests..."
 echo ""
 test_p0_1_omo_check_exists
@@ -452,6 +606,11 @@ test_v14_not_git_repo_skip
 test_v15_step_defs_present
 test_v15_step_defs_missing
 test_v15_step_defs_skip_no_features
+test_v151_superpowers_function_declared
+test_v151_superpowers_all_present_cc_switch
+test_v151_superpowers_partial_missing_brainstorming
+test_v151_superpowers_all_missing
+test_v151_superpowers_cross_platform
 
 echo ""
 echo "Results: $PASS_COUNT passed, $FAIL_COUNT failed"
