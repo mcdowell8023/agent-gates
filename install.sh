@@ -16,7 +16,7 @@ if [[ "$INSTALL_DIR" == *" "* ]]; then
   echo "agent-gates requires a space-free \$HOME path." >&2
   exit 1
 fi
-SKILLS=(init-project-gates agent-workflow-rules agent-review-protocol init-deep-fallback)
+SKILLS=(init-project-gates agent-workflow-rules agent-review-protocol init-deep-fallback memory)
 MEMORY_SKILL_CANDIDATES=(
   "$HOME/.claude/skills"
   "$HOME/.config/opencode/skills"
@@ -31,9 +31,8 @@ CODEGRAPH_HOOK=0
 SKIP_DEPS=0
 BACKED_UP_SKILLS=()
 
-# v1.5.2: external dependency sources
-MEMORY_SKILL_REPO="https://github.com/clawic/skills"
-MEMORY_SKILL_SUBPATH="skills/memory"
+# v1.5.2+: external dependency sources
+# Note: Memory skill is bundled in v1.5.4+ (see skills/memory/), no longer cloned at install time.
 SUPERPOWERS_REPO="https://github.com/obra/superpowers"
 SUPERPOWERS_HARDCORE=(
   test-driven-development
@@ -155,18 +154,6 @@ detect_skill_dir() {
   return 0
 }
 
-# Returns 0 if any memory* skill is installed in any candidate dir, 1 otherwise.
-check_memory_skill_installed() {
-  local cand entry
-  for cand in "${MEMORY_SKILL_CANDIDATES[@]}"; do
-    [[ -d "$cand" ]] || continue
-    while IFS= read -r -d '' entry; do
-      [[ -n "$entry" ]] && return 0
-    done < <(find "$cand" -maxdepth 1 -mindepth 1 -type d -iname 'memory*' -print0 2>/dev/null)
-  done
-  return 1
-}
-
 # Returns 0 if all 5 hardcore superpowers skills are installed (any platform), 1 if any missing.
 check_superpowers_installed() {
   local skill d found
@@ -183,35 +170,10 @@ check_superpowers_installed() {
   return 0
 }
 
-# Sparse-clone clawic/skills and copy skills/memory/ to target.
-install_memory_skill() {
-  local target="$1"
-  local tmp
-  tmp=$(mktemp -d) || { warn "cannot create temp dir for Memory skill clone"; return 1; }
-  if ! command -v git &>/dev/null; then
-    warn "git not in PATH — cannot install Memory skill automatically"
-    rm -rf "$tmp"; return 1
-  fi
-  (
-    cd "$tmp" || exit 1
-    git clone --depth 1 --filter=blob:none --no-checkout "$MEMORY_SKILL_REPO" clawic-skills 2>/dev/null || exit 1
-    cd clawic-skills || exit 1
-    git sparse-checkout init --cone 2>/dev/null || exit 1
-    git sparse-checkout set "$MEMORY_SKILL_SUBPATH" 2>/dev/null || exit 1
-    git checkout 2>/dev/null || exit 1
-  ) || { warn "Memory skill clone failed (network? repo unavailable?)"; rm -rf "$tmp"; return 1; }
-
-  if [[ -d "$tmp/clawic-skills/$MEMORY_SKILL_SUBPATH" ]]; then
-    mkdir -p "$target"
-    cp -R "$tmp/clawic-skills/$MEMORY_SKILL_SUBPATH" "$target/memory"
-    rm -rf "$tmp"
-    info "Memory skill installed → $target/memory"
-    return 0
-  else
-    warn "Memory skill: sparse-checkout produced no files"
-    rm -rf "$tmp"; return 1
-  fi
-}
+# v1.5.4+: Memory skill is bundled — installed by the standard install_skills()
+# loop from skills/memory/ (same as init-project-gates / agent-workflow-rules /
+# agent-review-protocol / init-deep-fallback). No clone needed.
+# See skills/memory/UPSTREAM.md for sync-from-upstream procedure.
 
 # Full clone obra/superpowers, copy all skills/* to target.
 install_superpowers() {
@@ -288,7 +250,9 @@ install_openspec_with_prompt() {
   fi
 }
 
-# Orchestrator: install Memory + Superpowers + OpenSpec (default-on, opt-out via --skip-deps).
+# Orchestrator: install Superpowers + OpenSpec (default-on, opt-out via --skip-deps).
+# Note: v1.5.4+ Memory skill is bundled in skills/memory/ and installed by the
+# standard install_skills() loop (no longer handled here).
 install_external_deps() {
   [[ "$SKIP_DEPS" -eq 1 ]] && { info "Skipping external deps (--skip-deps)"; return 0; }
 
@@ -297,21 +261,14 @@ install_external_deps() {
   local target
   target=$(detect_skill_dir)
 
-  # 1. Memory skill
-  if check_memory_skill_installed; then
-    info "Memory skill already installed — skip"
-  else
-    install_memory_skill "$target" || warn "Memory skill install failed — agent-gates still functional but memory-reminder hook output less useful"
-  fi
-
-  # 2. Superpowers
+  # 1. Superpowers (still cloned from upstream — 14 skill, too large to bundle)
   if check_superpowers_installed; then
     info "Superpowers (5 hardcore skills) already installed — skip"
   else
     install_superpowers "$target" || warn "Superpowers install failed — workflow rules SKILL.md references will not resolve at runtime"
   fi
 
-  # 3. OpenSpec
+  # 2. OpenSpec
   #    --with-openspec: detect-only path (back-compat with v1.5.0). Does NOT auto-install.
   #    default:        interactive y/N prompt to run `npm install -g @openspec/cli`.
   if [[ "$WITH_OPENSPEC" -eq 1 ]]; then

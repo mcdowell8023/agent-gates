@@ -13,7 +13,9 @@ agent-gates/
 ├── skills/                          # Agent skills (auto-loaded by platforms)
 │   ├── agent-workflow-rules/        # TDD, plan review, verification, anti-loop
 │   ├── agent-review-protocol/       # Three-Agent Review, cross-check pipeline
-│   └── init-project-gates/          # Project initializer (one-time setup)
+│   ├── init-project-gates/          # Project initializer (one-time setup)
+│   ├── init-deep-fallback/          # Cross-platform AGENTS.md hierarchy fallback (v1.5.2+)
+│   └── memory/                      # Memory skill, bundled from clawic/skills (MIT, v1.5.4+)
 ├── hooks/
 │   ├── git/
 │   │   └── agent-quality-gate.sh    # Pre-commit: test correspondence + review evidence
@@ -45,7 +47,7 @@ Running `./install.sh` automatically performs the following (each step is skippe
 | Dependency | Default behavior | Source | Why it matters |
 |---|---|---|---|
 | **agent-gates own 4 skills**<br>`agent-workflow-rules` / `init-project-gates` / `agent-review-protocol` / `init-deep-fallback` (new in v1.5.2) | Copied into the detected platform skills directory | This repo | Core workflow rules |
-| **Memory skill** | Sparse-clone of the `skills/memory/` subdirectory from `clawic/skills` | [clawic/skills](https://github.com/clawic/skills) (MIT) | `memory-reminder.mjs` hook prompts the agent to call this skill for session persistence |
+| **Memory skill** | **Bundled in agent-gates repo since v1.5.4** — `skills/memory/` ships with this repo and is copied directly to the platform skills directory at install time. Skipped if already present. No network dependency. | Forked from [clawic/skills](https://github.com/clawic/skills) (MIT) — see `skills/memory/UPSTREAM.md` for sync notes | `memory-reminder.mjs` hook prompts the agent to call this skill for session persistence |
 | **agent-superpowers 14-skill suite**<br>(test-driven-development / brainstorming / verification-before-completion / writing-plans / executing-plans + 9 supporting skills) | Full clone of the upstream repo into the platform skills dir | [obra/superpowers](https://github.com/obra/superpowers) | `agent-workflow-rules` TDD / plan / review / debug rules depend on these upstream skills |
 | **OpenSpec CLI** (optional) | **Interactive y/N prompt, defaults to N**; runs `npm install -g @openspec/cli` only on explicit consent | [@openspec/cli](https://www.npmjs.com/package/@openspec/cli) | Required for Path A (OpenSpec-driven team projects) |
 | **Platform hook registration** | Writes PostToolUse entries into `~/.claude/settings.json` / `~/.config/opencode/hooks.json` / `~/.codex/hooks.json` for any **detected** platform | install.sh built-in | `memory-reminder.mjs` fires when a todo completes |
@@ -138,6 +140,8 @@ While the agent works inside a session, agent-gates automatically:
 | `init-project-gates` | Project setup: hook + `.agent/` dir + AGENTS.md | Manual: "init project" |
 | `agent-workflow-rules` | TDD, plan review, verification, debugging | Auto-loads on code tasks |
 | `agent-review-protocol` | Three-Agent Review pipeline, cross-check | During review phases |
+| `init-deep-fallback` | Cross-platform AGENTS.md hierarchy fallback (bundled v1.5.2+) | Invoked by `init-project-gates` Step 6 when no OMC/OMO tools available |
+| `memory` | Infinite organized memory (bundled v1.5.4+) | Auto-loaded when `memory-reminder` hook fires |
 
 ### Hooks
 

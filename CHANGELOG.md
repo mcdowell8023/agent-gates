@@ -2,6 +2,30 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## [1.5.4] - 2026-05-28
+
+### Changed (Memory skill 从 sparse-clone 改为内置)
+- **`skills/memory/`** 新增 — fork 自 [clawic/skills](https://github.com/clawic/skills) MIT 的 `skills/memory/` 子目录（6 个文件：`SKILL.md` / `_meta.json` / `memory-template.md` / `patterns.md` / `setup.md` / `troubleshooting.md`）+ 新增 `UPSTREAM.md` 标明 attribution 和上游同步流程。
+- **`install.sh` SKILLS 数组** 加 `memory` — 走标准 `install_skills()` 流程（与 `init-project-gates` / `agent-workflow-rules` / `agent-review-protocol` / `init-deep-fallback` 同等地位）。
+- **删除 `install_memory_skill()` 函数 + sparse-clone 逻辑** — 不再需要 install 时 git clone clawic/skills。安装更稳（无网络依赖）+ 更快（直接 cp）。
+- **删除 `check_memory_skill_installed()` 函数**（dead code，无调用方）+ 删除 `MEMORY_SKILL_REPO` / `MEMORY_SKILL_SUBPATH` 常量。
+- **`install_external_deps()` 简化** — 只剩 Superpowers + OpenSpec 两层（Memory 已交给 `install_skills()`）。
+
+### Removed
+- 网络依赖（针对 Memory skill）— 内网用户 / CI / 离线环境也能装
+
+### Documentation
+- README.md / README.zh-CN.md 双语同步：Architecture 目录树补 `memory/` + `init-deep-fallback/` + Auto-Installed Dependencies 表 Memory 行从 "sparse-clone" → "Bundled"（attribution 指向 `skills/memory/UPSTREAM.md`）+ Skills 表加 memory + init-deep-fallback 两行
+- docs/explainer.zh.md L156 sparse-clone 描述同步更新
+- `skills/memory/UPSTREAM.md` 记录 fork 来源 / 同步命令 / license attribution
+
+### Test Coverage
+- `tests/run_install.sh` T7 改为验证 `skills/memory/SKILL.md` 内置存在（替代旧 `check_memory_skill_installed` 测试）
+
+### Notes
+- Superpowers 14 个 skill **不内置**（仓库 ~MB 级，且 obra/superpowers 更新频繁，sparse-clone 更合理）
+- Memory skill 与 clawic 上游分叉风险：v1.5.4 fork 时与上游字节一致；后续 clawic 更新由 agent-gates 维护者按 UPSTREAM.md 手动同步（频率低，clawic 自身 Memory skill 已稳定在 v1.0.2）
+
 ## [1.5.3] - 2026-05-28
 
 ### Fixed

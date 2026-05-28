@@ -127,21 +127,18 @@ test_detect_skill_dir() {
   )
 }
 
-# T7: check_memory_skill_installed returns 0 if any platform has memory*
-test_check_memory_installed() {
-  echo "T7: check_memory_skill_installed detects existing memory skill"
+# T7: v1.5.4 — Memory skill is bundled (not sparse-cloned), so we verify
+# that skills/memory/ exists in the repo (which install_skills() will copy).
+# This replaces the v1.5.2 test for the removed check_memory_skill_installed.
+test_check_memory_bundled() {
+  echo "T7: v1.5.4 Memory skill bundled in skills/memory/"
   (
-    MOCK_HOME=$(mktemp -d)
-    export HOME="$MOCK_HOME"
-    mkdir -p "$MOCK_HOME/.claude/skills/memory-1.0.2"
-    source_install_no_main
-    if ! declare -F check_memory_skill_installed >/dev/null; then
-      echo "  RED: check_memory_skill_installed function missing"
-      rm -rf "$MOCK_HOME"; exit 1
+    local repo_root="$SCRIPT_DIR/.."
+    if [[ -d "$repo_root/skills/memory" && -f "$repo_root/skills/memory/SKILL.md" ]]; then
+      assert "skills/memory/SKILL.md exists (bundled)" "true"
+    else
+      assert "skills/memory/SKILL.md exists (bundled)" "false"
     fi
-    check_memory_skill_installed && rc=0 || rc=$?
-    assert "returns zero when memory-* exists" "$([[ $rc -eq 0 ]] && echo true || echo false)"
-    rm -rf "$MOCK_HOME"
   )
 }
 
@@ -197,7 +194,7 @@ test_openspec_cli_found
 test_help_mentions_openspec
 test_skip_deps_parsed
 test_detect_skill_dir
-test_check_memory_installed
+test_check_memory_bundled
 test_check_superpowers_installed
 test_help_mentions_skip_deps
 test_main_flow_calls_install_external_deps
