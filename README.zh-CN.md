@@ -131,6 +131,15 @@ agent 在 session 内开发时，agent-gates 自动：
 ~/.agent-gates/doctor.sh --no-network  # 离线模式，跳过远端版本比对
 ```
 
+## v1.6.0 新特性
+
+**跨平台审查能力检测与自适应路由** — agent-gates 现在会检测系统上可用的异构审查工具，并据此路由交叉审查工作。
+
+- **能力等级（L0--L3）**：`install.sh` 和 `doctor.sh` 探测 opencode CLI、codex CLI、OMC codex 插件、Paseo，计算能力等级。结果持久化到 `~/.agent-gates/review-capability.json`，审查时直接读配置，不做运行时检测。
+- **平台自适应审查路由（§8）**：`agent-review-protocol` 读取 `review-capability.json`，按瀑布优先级路由审查：opencode → codex → OMC codex 插件 → Paseo → agent-tool（L0 兜底）。包含超时处理、环境适配、可选 `REQUIRE_HETEROGENEOUS=1` 严格模式。
+- **审查 prompt 模板（§9）**：`agent-review-protocol` 内置 Spec Review / Quality Review / Cross-Check 三套 prompt 模板，解决"子 agent 不知道干啥"的问题。
+- **环境检测**：检测 CI、Windows、WSL、容器环境并记录，让审查路由能适配受限环境。
+
 ## What's Included（装好的内容）
 
 ### Skills
@@ -139,7 +148,7 @@ agent 在 session 内开发时，agent-gates 自动：
 |-------|------|--------|
 | `init-project-gates` | 项目设置：hook + `.agent/` 目录 + AGENTS.md | 手动："init project" |
 | `agent-workflow-rules` | TDD、计划审查、验证、调试 | 代码任务自动加载 |
-| `agent-review-protocol` | 三 Agent 评审流水线、交叉检查 | 审查阶段触发 |
+| `agent-review-protocol` | 三 Agent 评审流水线、交叉检查、平台自适应审查路由（§8）、审查 prompt 模板（§9） | 审查阶段触发 |
 | `init-deep-fallback` | 跨平台 AGENTS.md hierarchy 兜底（bundled v1.5.2+） | 由 `init-project-gates` Step 6 在无 OMC/OMO 工具时调用 |
 | `memory` | Infinite organized memory（bundled v1.5.4+） | `memory-reminder` hook 触发时自动加载 |
 
@@ -306,14 +315,15 @@ curl -fsSL https://raw.githubusercontent.com/mcdowell8023/agent-gates/main/insta
 ~/.agent-gates/doctor.sh
 ```
 
-示例输出（理想 Path A：OpenSpec 已装 + ≥1 个 `.feature` + transcripts 干净）：
+示例输出（理想 Path A：OpenSpec 已装 + ≥1 个 `.feature` + transcripts 干净 + 异构审查工具齐全）：
 
 ```
 ✓ node v26.0.0
 ✓ jq jq-1.8.1
 ✓ Memory skill detected: ~/.cc-switch/skills/memory-1.0.2
-✓ installed version: 1.4.0
-✓ up to date with remote (1.4.0)
+✓ Superpowers skills detected (5/5)
+✓ installed version: 1.6.0
+✓ up to date with remote (1.6.0)
 ✓ memory-reminder.mjs present
 ✓ agent-quality-gate.sh present (executable)
 ✓ OMC settings.json hook registered (matcher contains TaskUpdate)
@@ -324,11 +334,12 @@ curl -fsSL https://raw.githubusercontent.com/mcdowell8023/agent-gates/main/insta
 ✓ OpenSpec installed in current project (Path A applies)
 ✓ BDD features/ has 3 .feature file(s)
 ✓ BDD step_definitions/ has 3 step file(s)
+✓ Cross-review capability: L3 (opencode + codex)
 
-14 pass · 0 warn · 0 fail
+17 pass · 0 warn · 0 fail
 ```
 
-在默认的 Path B 项目（无 OpenSpec、无 `features/`）里，最后三行变成信息性 `note` 而不是 PASS，所以典型输出是 **11 PASS + 3 note**（不是 14 PASS）。`note` 表示"不适用 / 未配置"，不是"坏了"。
+在默认的 Path B 项目（无 OpenSpec、无 `features/`）里，OpenSpec/BDD 行变成信息性 `note` 而不是 PASS，交叉审查能力检查反映实际安装的工具（L0 变 WARN，L1+ 为 PASS）。典型输出带异构审查工具但无 OpenSpec 时为 **14 PASS + 1 WARN/PASS + 3 note**。`note` 表示"不适用 / 未配置"，不是"坏了"。
 
 退出码 **没有 FAIL 时为 0**（允许 WARN），**有 FAIL 时为 1**，所以脚本可以接入 CI：
 
