@@ -131,6 +131,15 @@ While the agent works inside a session, agent-gates automatically:
 ~/.agent-gates/doctor.sh --no-network  # Offline mode, skip remote version comparison
 ```
 
+## What's New in v1.6.0
+
+**Cross-review capability detection and platform-adaptive routing** — agent-gates now detects which heterogeneous review tools are available on your system and routes cross-review work accordingly.
+
+- **Capability levels (L0--L3)**: `install.sh` and `doctor.sh` probe for opencode CLI, codex CLI, OMC codex plugin, and Paseo, then compute a capability level. Results are persisted in `~/.agent-gates/review-capability.json` so review-time routing is instant (no runtime detection).
+- **Platform-adaptive review routing (§8)**: `agent-review-protocol` reads `review-capability.json` and routes reviews through a waterfall: opencode → codex → OMC codex plugin → Paseo → agent-tool (L0 fallback). Includes timeout handling, environment adaptation, and an optional `REQUIRE_HETEROGENEOUS=1` strict mode.
+- **Review prompt templates (§9)**: Pre-built Spec Review / Quality Review / Cross-Check prompt templates shipped in `agent-review-protocol`, eliminating "sub-agent doesn't know what to do" problems.
+- **Environment detection**: CI, Windows, WSL, and container environments are detected and recorded, allowing review routing to adapt to constrained environments.
+
 ## What's Included
 
 ### Skills
@@ -139,7 +148,7 @@ While the agent works inside a session, agent-gates automatically:
 |-------|---------|------------|
 | `init-project-gates` | Project setup: hook + `.agent/` dir + AGENTS.md | Manual: "init project" |
 | `agent-workflow-rules` | TDD, plan review, verification, debugging | Auto-loads on code tasks |
-| `agent-review-protocol` | Three-Agent Review pipeline, cross-check | During review phases |
+| `agent-review-protocol` | Three-Agent Review pipeline, cross-check, platform-adaptive review routing (§8), review prompt templates (§9) | During review phases |
 | `init-deep-fallback` | Cross-platform AGENTS.md hierarchy fallback (bundled v1.5.2+) | Invoked by `init-project-gates` Step 6 when no OMC/OMO tools available |
 | `memory` | Infinite organized memory (bundled v1.5.4+) | Auto-loaded when `memory-reminder` hook fires |
 
@@ -306,14 +315,15 @@ After install, run `~/.agent-gates/doctor.sh` (or `./doctor.sh` from the repo) t
 ~/.agent-gates/doctor.sh
 ```
 
-Sample output (ideal Path A: OpenSpec installed + ≥1 `.feature` + clean transcripts):
+Sample output (ideal Path A: OpenSpec installed + ≥1 `.feature` + clean transcripts + heterogeneous review tools):
 
 ```
 ✓ node v26.0.0
 ✓ jq jq-1.8.1
 ✓ Memory skill detected: ~/.cc-switch/skills/memory-1.0.2
-✓ installed version: 1.4.0
-✓ up to date with remote (1.4.0)
+✓ Superpowers skills detected (5/5)
+✓ installed version: 1.6.0
+✓ up to date with remote (1.6.0)
 ✓ memory-reminder.mjs present
 ✓ agent-quality-gate.sh present (executable)
 ✓ OMC settings.json hook registered (matcher contains TaskUpdate)
@@ -324,11 +334,12 @@ Sample output (ideal Path A: OpenSpec installed + ≥1 `.feature` + clean transc
 ✓ OpenSpec installed in current project (Path A applies)
 ✓ BDD features/ has 3 .feature file(s)
 ✓ BDD step_definitions/ has 3 step file(s)
+✓ Cross-review capability: L3 (opencode + codex)
 
-14 pass · 0 warn · 0 fail
+17 pass · 0 warn · 0 fail
 ```
 
-In a default Path B project (no OpenSpec, no `features/`) the last three lines become informational `note`s instead of PASS, so the typical output is **11 PASS + 3 note** (not 14 PASS). `note` means "not applicable / not configured", not "broken".
+In a default Path B project (no OpenSpec, no `features/`) the OpenSpec/BDD lines become informational `note`s instead of PASS, and the cross-review capability check reflects whatever tools are installed (L0 becomes a WARN, L1+ is PASS). A typical output with cross-review tools but no OpenSpec is **14 PASS + 1 WARN/PASS + 3 note**. `note` means "not applicable / not configured", not "broken".
 
 Exit code is **0 if no FAIL** (WARN allowed), **1 if any FAIL**, so the script is CI-friendly:
 
