@@ -499,11 +499,13 @@ When the task involves **>1 non-test logic file AND >50 total changed lines**, O
 
 1. Include a final todo item: `"交叉审查：用不同模型审查本次变更"` — ALWAYS the **last** todo before claiming done.
 2. Ensure directory exists: `mkdir -p .agent/reviews`
-3. Execute cross-review using `agent-review-protocol` §1 (tool priority: opencode CLI > codex > code-reviewer).
+3. Execute cross-review using `agent-review-protocol` §8 platform-adaptive routing. The agent reads `~/.agent-gates/review-capability.json` to select the best available heterogeneous review tool (opencode → codex → omc-codex-plugin → paseo → agent-tool fallback). See §8 for route details and timeout handling.
 4. Save the review output to `.agent/reviews/<date>-<topic>.md`. File MUST end with explicit verdict line: `VERDICT: PASS` or `VERDICT: ISSUES`.
 5. Only THEN mark the final todo complete and proceed to commit.
 
 **Anti-loop (⛔)**: Cross-review follows the same 2-round cap as Three-Agent Pipeline (§4 of `agent-review-protocol`). After 2 rounds of fix→re-review still unresolved, escalate to user. Do NOT continue indefinitely.
+
+**Review level tracking**: The review output file MUST include a `<!-- REVIEW_LEVEL: L0/L1/L2/L3 -->` header line indicating the actual heterogeneous capability used. `doctor.sh` checks this on subsequent runs. L0 reviews trigger a warning; set `REQUIRE_HETEROGENEOUS=1` to make L0 a blocking failure.
 
 **Physical enforcement**: §8 CLI gate (`agent-quality-gate.sh` v1.3+) validates:
 - Has `.agent/` but no `reviews/` → blocks

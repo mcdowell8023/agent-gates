@@ -598,6 +598,132 @@ register_codegraph_hook() {
   fi
 }
 
+# --- v1.6.0: Detect cross-review capability at install time ---
+detect_review_capability() {
+  local opencode_available=false opencode_path=""
+  local codex_available=false codex_path="" codex_version=""
+  local omc_codex_plugin=false
+  local paseo_available=false
+  local env_type="local"
+  local level="L0"
+  local preferred="" fallback=""
+
+  # -- tool detection --
+  if command -v opencode &>/dev/null; then
+    opencode_available=true
+    opencode_path=$(command -v opencode)
+  fi
+
+  if command -v codex &>/dev/null; then
+    codex_available=true
+    codex_path=$(command -v codex)
+    codex_version=$(codex --version 2>/dev/null | head -1 || true)
+  fi
+
+  if [[ -d "$HOME/.claude/plugins/cache/openai-codex" ]]; then
+    omc_codex_plugin=true
+  fi
+
+  if command -v paseo &>/dev/null || [[ -f "$HOME/.paseo/paseo.pid" ]]; then
+    paseo_available=true
+  fi
+
+  # -- environment detection --
+  if [[ -n "${CI:-}" ]]; then
+    env_type="ci"
+  elif [[ -f /.dockerenv ]]; then
+    env_type="container"
+  else
+    local uname_out=""
+    uname_out=$(uname -s 2>/dev/null || true)
+    case "$uname_out" in
+      CYGWIN*|MINGW*|MSYS*) env_type="windows" ;;
+      Linux)
+        if grep -qi microsoft /proc/version 2>/dev/null; then
+          env_type="wsl"
+        fi
+        ;;
+    esac
+  fi
+
+  # -- capability level --
+  if [[ "$opencode_available" == "true" && "$codex_available" == "true" ]]; then
+    level="L3"
+    preferred="opencode"
+    fallback="codex"
+  elif [[ "$opencode_available" == "true" ]]; then
+    level="L2"
+    preferred="opencode"
+    fallback="agent-tool"
+  elif [[ "$codex_available" == "true" ]]; then
+    level="L1"
+    preferred="codex"
+    fallback="agent-tool"
+  elif [[ "$omc_codex_plugin" == "true" ]]; then
+    level="L1"
+    preferred="omc-codex-plugin"
+    fallback="agent-tool"
+  else
+    level="L0"
+    preferred="agent-tool"
+    fallback=""
+  fi
+
+  # -- persist to JSON --
+  local detected_at out_file
+  detected_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%S" || true)
+  out_file="$INSTALL_DIR/review-capability.json"
+
+  cat > "$out_file" <<RCEOF
+{
+  "detected_at": "${detected_at}",
+  "detected_by": "install",
+  "level": "${level}",
+  "env": "${env_type}",
+  "decision_tree": [
+    { "route": "opencode", "available": ${opencode_available}, "path": "${opencode_path}" },
+    { "route": "codex", "available": ${codex_available}, "version": "${codex_version}", "path": "${codex_path}" },
+    { "route": "omc-codex-plugin", "available": ${omc_codex_plugin} },
+    { "route": "paseo", "available": ${paseo_available} },
+    { "route": "agent-tool", "available": true, "note": "always available (L0 fallback)" }
+  ],
+  "preferred_route": "${preferred}",
+  "fallback_route": "${fallback:-agent-tool}",
+  "ultimate_fallback": "agent-tool"
+}
+RCEOF
+
+  # -- report --
+  section "Cross-review capability detection"
+  if [[ "$level" == "L3" ]]; then
+    info "Review capability: $level (opencode + codex — full heterogeneous review)"
+  elif [[ "$level" == "L2" ]]; then
+    info "Review capability: $level (opencode — cross-model review via opencode CLI)"
+  elif [[ "$level" == "L1" ]]; then
+    info "Review capability: $level (${preferred} — single external reviewer)"
+  else
+    warn "Review capability: L0 (no heterogeneous review tools detected)"
+    echo ""
+    echo "    Cross-review improves code quality by using a different AI model to"
+    echo "    review changes. Install at least one tool to unlock L1+:"
+    echo ""
+    echo "    opencode (recommended, unlocks L2):"
+    echo "      brew install opencode-ai/tap/opencode   # macOS"
+    echo "      curl -fsSL https://opencode.ai/install | bash  # Linux"
+    echo "      https://opencode.ai"
+    echo ""
+    echo "    codex (unlocks L1, or L3 with opencode):"
+    echo "      npm install -g @openai/codex"
+    echo "      https://github.com/openai/codex"
+    echo ""
+  fi
+
+  [[ "$paseo_available" == "true" ]] && info "Paseo orchestrator detected (does not affect review level)"
+  [[ "$env_type" != "local" ]] && info "Environment: $env_type"
+  info "Saved: $out_file"
+  return 0
+}
+
 # --- Cleanup ---
 cleanup() {
   [[ -n "$REPO_DIR" ]] && rm -rf "$(dirname "$REPO_DIR")" 2>/dev/null || true
@@ -646,6 +772,7 @@ main() {
   register_platform_hooks
   [[ "$CODEGRAPH_HOOK" -eq 1 ]] && register_codegraph_hook
   install_external_deps
+  detect_review_capability
 
   section "Done!"
   echo ""

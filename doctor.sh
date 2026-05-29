@@ -373,6 +373,120 @@ check_bdd_step_definitions() {
   fi
 }
 
+check_cross_review_capability() {
+  # v1.6.0: detect heterogeneous cross-review tools, compute capability level,
+  # persist to review-capability.json for downstream hook/skill consumption.
+  local opencode_available=false opencode_path=""
+  local codex_available=false codex_path="" codex_version=""
+  local omc_codex_plugin=false
+  local paseo_available=false
+  local env_type="local"
+  local level="L0"
+  local preferred="" fallback=""
+
+  # -- tool detection --
+  if command -v opencode &>/dev/null; then
+    opencode_available=true
+    opencode_path=$(command -v opencode)
+  fi
+
+  if command -v codex &>/dev/null; then
+    codex_available=true
+    codex_path=$(command -v codex)
+    codex_version=$(codex --version 2>/dev/null | head -1 || true)
+  fi
+
+  if [[ -d "$HOME/.claude/plugins/cache/openai-codex" ]]; then
+    omc_codex_plugin=true
+  fi
+
+  if command -v paseo &>/dev/null || [[ -f "$HOME/.paseo/paseo.pid" ]]; then
+    paseo_available=true
+  fi
+
+  # -- environment detection --
+  if [[ -n "${CI:-}" ]]; then
+    env_type="ci"
+  elif [[ -f /.dockerenv ]]; then
+    env_type="container"
+  else
+    local uname_out=""
+    uname_out=$(uname -s 2>/dev/null || true)
+    case "$uname_out" in
+      CYGWIN*|MINGW*|MSYS*) env_type="windows" ;;
+      Linux)
+        if grep -qi microsoft /proc/version 2>/dev/null; then
+          env_type="wsl"
+        fi
+        ;;
+    esac
+  fi
+
+  # -- capability level --
+  if [[ "$opencode_available" == "true" && "$codex_available" == "true" ]]; then
+    level="L3"
+    preferred="opencode"
+    fallback="codex"
+  elif [[ "$opencode_available" == "true" ]]; then
+    level="L2"
+    preferred="opencode"
+    fallback="agent-tool"
+  elif [[ "$codex_available" == "true" ]]; then
+    level="L1"
+    preferred="codex"
+    fallback="agent-tool"
+  elif [[ "$omc_codex_plugin" == "true" ]]; then
+    level="L1"
+    preferred="omc-codex-plugin"
+    fallback="agent-tool"
+  else
+    level="L0"
+    preferred="agent-tool"
+    fallback=""
+  fi
+
+  # -- persist to JSON --
+  local detected_at out_file
+  detected_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%S" || true)
+  out_file="$INSTALL_DIR/review-capability.json"
+
+  cat > "$out_file" <<RCEOF
+{
+  "detected_at": "${detected_at}",
+  "detected_by": "doctor",
+  "level": "${level}",
+  "env": "${env_type}",
+  "decision_tree": [
+    { "route": "opencode", "available": ${opencode_available}, "path": "${opencode_path}" },
+    { "route": "codex", "available": ${codex_available}, "version": "${codex_version}", "path": "${codex_path}" },
+    { "route": "omc-codex-plugin", "available": ${omc_codex_plugin} },
+    { "route": "paseo", "available": ${paseo_available} },
+    { "route": "agent-tool", "available": true, "note": "always available (L0 fallback)" }
+  ],
+  "preferred_route": "${preferred}",
+  "fallback_route": "${fallback:-agent-tool}",
+  "ultimate_fallback": "agent-tool"
+}
+RCEOF
+
+  # -- report --
+  if [[ "$level" == "L3" ]]; then
+    pass "Cross-review capability: $level (opencode + codex)"
+  elif [[ "$level" == "L2" ]]; then
+    pass "Cross-review capability: $level (opencode)"
+  elif [[ "$level" == "L1" ]]; then
+    pass "Cross-review capability: $level (${preferred})"
+  else
+    warn "Cross-review capability: L0 (no heterogeneous review tools detected)"
+    note "upgrade: install opencode (https://opencode.ai) or codex (npm i -g @openai/codex) for cross-model review"
+  fi
+
+  [[ "$paseo_available" == "true" ]] && note "Paseo orchestrator detected (does not affect review level)"
+  [[ "$env_type" != "local" ]] && note "environment: $env_type"
+  note "wrote $out_file"
+  return 0
+}
+
 # --- Main ---
 main() {
   while [[ $# -gt 0 ]]; do
@@ -424,6 +538,7 @@ main() {
   check_openspec_install
   check_bdd_features_dir
   check_bdd_step_definitions
+  check_cross_review_capability
 
   echo ""
   if (( ${#PASS[@]} > 0 )); then

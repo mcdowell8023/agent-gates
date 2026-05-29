@@ -2,6 +2,30 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## [1.6.0] - 2026-05-29
+
+### Added (跨平台审查路由 — 磨平不同 AI agent 平台的审查能力差距)
+
+- **`doctor.sh` 新增 `check_cross_review_capability`** — 每次 doctor 运行时重新检测所有异构审查工具(opencode CLI / codex CLI / OMC codex 插件 / Paseo),计算能力等级(L0-L3),写入 `~/.agent-gates/review-capability.json` 持久化配置。含 CI / Windows / WSL / 容器环境检测。L0 时输出升级建议。
+- **`install.sh` 新增 `detect_review_capability`** — 安装时首次检测审查能力,写入持久化配置。L0 时输出详细安装引导(codex CLI / opencode CLI)。
+- **`agent-review-protocol` SKILL.md §8 Cross-Check Platform Routing** — 审查时读 `review-capability.json`,按优先级瀑布式路由: opencode → codex → OMC codex plugin → Paseo → agent-tool (最终兜底)。含超时处理、环境适配、`REQUIRE_HETEROGENEOUS=1` 严格模式。
+- **`agent-review-protocol` SKILL.md §9 Review Prompt Templates** — 预写好 Spec Review / Quality Review / Cross-Check 三套 prompt 模板,解决"子 agent 不知道干啥"的问题。
+- **`~/.agent-gates/review-capability.json`** — 新增持久化配置文件,记录决策树(5 个路线的可用性 + 路径 + 版本)、能力等级、首选/备选/兜底路线。
+
+### Changed
+- **`agent-workflow-rules` SKILL.md §12.1** — 交叉审查 tool priority 从固定列表改为引用 `agent-review-protocol` §8 自适应路由。新增 `REVIEW_LEVEL` 强制标注要求。
+
+### Design Decisions
+- 决策树在 install/doctor 时确定并持久化,审查时只读配置 + 失败回退,不做实时检测
+- Paseo 标注可用但不参与自动等级计算(它是编排层不是审查工具)
+- L0 (同模型审查) 默认 warn 不阻塞,可通过 `REQUIRE_HETEROGENEOUS=1` 升级为 fail
+- review 文件必须标注 `<!-- REVIEW_LEVEL: L0/L1/L2/L3 -->` 供 doctor 事后检查
+
+### Notes
+- gpt-5.5 异构审查 VERDICT: REVISE → 采纳 4 条(health probe / 迁移表 / REVIEW_LEVEL / 失败回退) + CI/Win/容器
+- 后置 9 项(D1-D9)记录在方案文档,留 Rampart 跟进
+- 方案文档: `~/AgentWorkspace/docs/research/v1.6-cross-review-routing.md`
+
 ## [1.5.5] - 2026-05-28
 
 ### Fixed (E2E 测试发现的两个小改进)

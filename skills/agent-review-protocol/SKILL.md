@@ -373,3 +373,163 @@ A review is NOT complete without:
 - [ ] Tests passing after any review-prompted fixes
 
 **Forbidden:** Claiming "reviewed" without reviewer output artifact.
+
+---
+
+## 8. Cross-Check Platform Routing
+
+Before executing a Cross-Check (§1), the agent reads the persisted configuration `~/.agent-gates/review-capability.json` to select the review route. This replaces ad-hoc tool probing with deterministic, user-tunable routing.
+
+### Route Priority (Waterfall)
+
+Routes are tried top-to-bottom. A higher-priority route that is available and healthy always wins.
+
+| Priority | Route | Command Pattern | Heterogeneous? |
+| --- | --- | --- | --- |
+| L4 | opencode CLI | `opencode run -m github-copilot/gpt-5.5 --dir <workdir> "$(cat <prompt>)" > <result>` | Yes |
+| L3 | codex CLI | `codex review --base <main-branch> --title "Cross-check: <feature>"` or `codex exec "<prompt>"` | Yes |
+| L2 | OMC codex plugin | Via `codex:codex-rescue` agent or `/ask codex` | Yes |
+| L1 | Paseo | `create_agent provider="codex/gpt-5.4" prompt="<review>" background=true` | Yes |
+| L0 | Agent tool (ultimate fallback) | Claude Code Agent tool — same-model sub-agent | **No** |
+
+L0 is always available but does NOT satisfy the heterogeneous-model requirement of §1.
+
+### Routing Logic
+
+```
+read ~/.agent-gates/review-capability.json
+  → config exists?
+      → use preferred_route
+        → execution succeeds within timeout?
+            → done (record REVIEW_LEVEL)
+        → fails or times out?
+            → try fallback_route
+              → also fails?
+                  → ultimate_fallback: agent-tool (L0)
+  → config missing?
+      → go straight to agent-tool (L0)
+      → emit warning: "review-capability.json not found — run doctor.sh to configure"
+```
+
+### REVIEW_LEVEL Header (Mandatory)
+
+Every review output file MUST include a header indicating the actual review level and tool used:
+
+```markdown
+<!-- REVIEW_LEVEL: L2 -->
+<!-- REVIEW_TOOL: opencode/gpt-5.5 -->
+```
+
+This enables auditing which reviews were truly heterogeneous and which fell back to same-model.
+
+### Environment Adaptation
+
+| Environment | Consideration |
+| --- | --- |
+| CI (`"env": "ci"`) | Review tools may exist but auth tokens differ from local; requires an extra health probe before selecting route |
+| Container | Tool binary paths may differ from host; `review-capability.json` should use absolute paths or `$PATH` lookup |
+| Windows / WSL | Path format adaptation (backslash vs forward slash); WSL can invoke host binaries via `wslpath` |
+
+### Timeout Handling
+
+Each route has a default timeout. When exceeded, the agent automatically falls through to the next route.
+
+| Route | Default Timeout | Notes |
+| --- | --- | --- |
+| opencode CLI (L4) | 5 minutes | Generous — handles large diffs |
+| codex CLI (L3) | 3 minutes | Known hard limit on background mode |
+| OMC codex plugin (L2) | 3 minutes | Inherits codex timeout characteristics |
+| Paseo (L1) | 5 minutes | Async; agent polls for completion |
+| Agent tool (L0) | No timeout | Runs in-process |
+
+### Strict Heterogeneous Mode
+
+Set environment variable `REQUIRE_HETEROGENEOUS=1` to enforce that L0 (same-model) fallback is treated as a **failure** rather than a degraded pass.
+
+- Without the flag: L0 review produces a `⚠️ WARN: same-model review` annotation but does not block delivery.
+- With the flag: L0 review produces `❌ FAIL: heterogeneous review required` and the agent must either fix tool availability or escalate to the user.
+
+---
+
+## 9. Review Prompt Templates
+
+Pre-written prompt templates for each review role. These solve the "sub-agent doesn't know what to do" problem by giving structured, copy-paste-ready prompts with placeholders.
+
+### 9.1 Spec Review Prompt (Role 2 — Requirements Verification)
+
+```markdown
+你是独立的 Spec Reviewer。不要信任实现者的自评,自己读源码验证。
+
+## 任务
+逐项验证每个需求是否有对应实现和测试覆盖。
+
+## 需求来源
+[粘贴需求描述或 PR body]
+
+## 待审查文件
+[列出文件路径]
+
+## 输出格式 (严格遵守)
+
+| # | 需求 | 实现位置 | 测试覆盖 | 判定 |
+|---|------|---------|---------|------|
+| 1 | [需求文本] | [file:line] | [test file:line] | ✅ / ❌ |
+
+如有 ❌,在表格后列出具体差距。
+最后一行必须是: VERDICT: PASS 或 VERDICT: ISSUES
+```
+
+### 9.2 Quality Review Prompt (Role 3 — Code Quality)
+
+```markdown
+你是独立的 Quality Reviewer。Spec Review 已通过,你只关注代码质量。
+
+## 待审查文件
+[列出文件路径]
+
+## 检查维度 (每项必须评估)
+
+| # | 维度 | 判定 | 说明 |
+|---|------|------|------|
+| 1 | 可维护性 | ✅/⚠️/❌ | 命名、结构、复杂度 |
+| 2 | 测试质量 | ✅/⚠️/❌ | 有意义、覆盖边界 |
+| 3 | 代码风格 | ✅/⚠️/❌ | 项目约定一致 |
+| 4 | 安全 | ✅/⚠️/❌ | secrets、注入、权限 |
+| 5 | 性能 | ✅/⚠️/❌ | N+1、无界循环、内存泄露 |
+| 6 | 依赖合理性 | ✅/⚠️/❌ | 无多余依赖 |
+
+如有 ❌/⚠️,给出 file:line 引用。
+最后一行: VERDICT: PASS 或 VERDICT: ISSUES
+```
+
+### 9.3 Cross-Check Prompt (Heterogeneous Review)
+
+```markdown
+你在独立审查另一个 AI agent 的工作。不要信任下面的自评结论,自己读源码验证。
+
+## 实现者自评
+[粘贴自评报告]
+
+## 待审查文件
+[列出文件路径]
+
+## 检查重点
+1. 逻辑正确性 + 边界条件
+2. 测试覆盖充分性
+3. 安全 (hardcoded secrets, injection, permission)
+4. 代码风格与项目约定一致性
+
+## 输出要求
+- 500 字以内
+- 每个问题引用 file:line
+- 最后一行: VERDICT: PASS 或 VERDICT: ISSUES
+```
+
+### 9.4 Usage
+
+When performing a review, the agent:
+
+1. Copies the appropriate template from above.
+2. Fills in all `[placeholder]` fields with actual content (file paths, requirements, self-assessment).
+3. Sends the completed prompt through the route selected by §8 (Cross-Check Platform Routing).
+4. Parses the response for `VERDICT:` line to determine pass/fail.
