@@ -446,8 +446,22 @@ Excludes `.lock`, `.md`, `.json`, `.yaml`, `.yml`, `generated/`, `migrations/`, 
 | Bug fixed | Original symptom's reproduction case passes |
 | Requirements met | Point-by-point check against requirements |
 | Agent task done | Independently verify diff + run commands (don't trust agent self-report alone) |
+| Heuristic / trigger / threshold correct | Validated against a sample of **real** inputs (logs, transcripts, actual payloads), not only synthetic fixtures — report the true-positive / miss rate on real data (§9.2) |
 
 **Forbidden phrases without evidence:** "should be fine", "looks good", "done", "fixed".
+
+### 9.2 Synthetic Fixtures ≠ Real-Data Evidence (Calibrate Triggers Against Reality)
+
+**This does NOT replace §4 TDD** — you still write the failing test first, and fixtures stay necessary. The point is narrower: for a **heuristic, trigger condition, threshold, classifier, or matcher** — anything that fires based on input *patterns* — passing fixtures are *necessary but not sufficient*. Green hand-authored fixtures only prove the code does what the *fixture author imagined* the inputs look like; they encode an assumption about the input distribution, and if that assumption is wrong, all-green tests are green against the wrong world.
+
+**Rule**: in addition to §4 unit tests, before claiming such a feature works, validate against a sample of **real** inputs:
+- Pull real examples (production logs, session transcripts, captured payloads).
+- Run the real inputs through the actual code; measure how often it fires correctly vs misses.
+- Report the real-data hit/miss rate as the evidence — not "N fixtures pass". Note sample size + source; if non-trivial, save the check (anonymized) under `.agent/reviews/`.
+
+**Tell-tale that you're in this trap**: "all my tests are green" but you have never run the feature against a single real input.
+
+**Real case (v1.6.1 → v1.6.2)**: a Parallelism Reminder fired when "≥3 todos, all pending". 16 fixtures, all green. But transcript mining showed **64% of real plan-writes mark the first todo `in_progress` in the same write** — so the reminder missed the majority of real plan moments. The fixtures were all "all-pending"; reality wasn't. Found by sampling real transcripts, not by tests. v1.6.2 recalibrated the threshold against real transcripts: real-data trigger rate went ~33% → ~92%. Lesson: **for trigger/threshold logic, real-data calibration is mandatory verification, not optional polish.**
 
 ---
 
@@ -618,6 +632,7 @@ Stop immediately if any of these are true:
 | "This time is different" | Rules apply especially when you think they don't |
 | "I already know the answer" | Read the file first |
 | "Let me try again" (after 2 failures) | Third failure = question architecture |
+| "All my fixtures pass" (for a trigger/threshold) | Fixtures encode your guess about inputs — run it on REAL data (§9.2) |
 
 ---
 
