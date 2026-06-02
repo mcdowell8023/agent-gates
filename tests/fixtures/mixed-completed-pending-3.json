@@ -1,0 +1,10 @@
+{
+  "tool_name": "TodoWrite",
+  "tool_input": {
+    "todos": [
+      { "content": "Fix G5-011 IndexPage header", "status": "completed", "priority": "high" },
+      { "content": "Fix G5-012 HomePage padding", "status": "pending", "priority": "medium" },
+      { "content": "Fix G5-013 Step4 empty state", "status": "pending", "priority": "medium" }
+    ]
+  }
+}

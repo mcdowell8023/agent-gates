@@ -2,6 +2,28 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## [1.6.1] - 2026-06-02
+
+### Added (并行优先 — 减少独立任务被串行处理)
+
+- **`memory-reminder.mjs` 新增 Parallelism Reminder** — 当 agent 一次性创建 ≥3 个全 pending 的 todo(刚做完计划、未动工)时,注入 `[AGENT-GATES: Parallelism Reminder]`,提示按 §18 判断哪些独立、用机制 A(批量 tool call)还是 B(子 agent)。只在计划时触发一次,开工后(有 todo 转 in_progress)不再刷,避免提醒疲劳。matcher 已含 `TaskCreate`,无需改注册。
+- **tests: 2 个新 fixture** — `plan-time-3-pending.json`(≥3 全 pending → 触发) + `plan-time-started.json`(已有 in_progress → 不触发); run.sh 新增 marker 断言验证两种 reminder 各自正确触发。
+
+### Changed
+
+- **`agent-workflow-rules` SKILL.md §18 重写** — 拆分两种并行机制: A. 批量 tool call(同消息多 Read/Edit/Bash,轻量独立操作) vs B. 子 agent 并行(重独立工作流)。加判定线 + 真实案例 2(某 agent 5 个独立 UX 修复串行、用户纠正三次的"A/B 没分清"教训)。
+
+### Why
+
+- v1.6.0 后观察到: §18 把"批量 tool call"和"子 agent 并行"揉成一条,导致 agent 被纠正三次仍误解用户意图。根因是概念没分清,不是规则没写。本版先拆概念(治根因)+ 加 plan-time 软提醒(补运行时激活)。
+- 诚实边界: 这是软提醒(同 memory reminder 层级),非硬门控。"串行"不是可拦截的事件,只能降频率,不能消灭。
+
+### gpt-5.5 交叉审查修订 (VERDICT: ISSUES → 已修)
+
+- **判定改保守**: `detectPlanTimeTodos` 要求 status **显式** `=== 'pending'`,缺失/空 status 不触发(防异常 payload 误触发)。
+- **诚实声明无去重**: hook 无状态,不跨调用去重。注释 + §18.5 + CHANGELOG 不再声称"触发一次",改为"全 pending 时触发,实践中一次 TodoWrite 计划写入触发一次"。stateful 去重会破坏测试幂等性且引入跨 turn 状态脆弱性,故不做。
+- **测试补全**: 新增 4 个 fixture(OMO plan-time / 缺失 status / completed+pending 优先级 / malformed JSON),hook 测试 6→16 用例。
+
 ## [1.6.0] - 2026-05-29
 
 ### Added (跨平台审查路由 — 磨平不同 AI agent 平台的审查能力差距)

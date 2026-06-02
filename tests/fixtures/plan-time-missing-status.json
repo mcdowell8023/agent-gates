@@ -1,0 +1,10 @@
+{
+  "tool_name": "TodoWrite",
+  "tool_input": {
+    "todos": [
+      { "content": "Task without status A" },
+      { "content": "Task without status B" },
+      { "content": "Task without status C" }
+    ]
+  }
+}

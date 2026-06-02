@@ -1,0 +1,10 @@
+{
+  "type": "todo.updated",
+  "properties": {
+    "todos": [
+      { "content": "Fix G5-011 IndexPage header", "status": "pending" },
+      { "content": "Fix G5-012 HomePage padding", "status": "pending" },
+      { "content": "Fix G5-013 Step4 empty state", "status": "pending" }
+    ]
+  }
+}
