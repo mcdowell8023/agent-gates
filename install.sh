@@ -448,7 +448,16 @@ install_hook_files() {
   mkdir -p "$INSTALL_DIR/hooks/platform" "$INSTALL_DIR/hooks/git"
 
   cp "$REPO_DIR/hooks/platform/memory-reminder.mjs" "$INSTALL_DIR/hooks/platform/memory-reminder.mjs"
-  cp "$REPO_DIR/hooks/git/agent-quality-gate.sh" "$INSTALL_DIR/hooks/git/agent-quality-gate.sh"
+  # Stamp the real version into the gate (replaces __AGENT_GATES_VERSION__ placeholder)
+  # so the runtime banner — and any per-project copy made from this authority — honestly
+  # report the version they were stamped with, instead of a hardcoded string going stale.
+  local gate_version="dev"
+  [[ -f "$REPO_DIR/.version" ]] && gate_version=$(tr -d '[:space:]' < "$REPO_DIR/.version")
+  # Guard: .version is our controlled semver, but reject anything that could break
+  # the sed replacement (/, &, newline) — fall back to "dev" rather than corrupt the gate.
+  [[ "$gate_version" =~ ^[0-9A-Za-z.+-]+$ ]] || gate_version="dev"
+  sed "s/__AGENT_GATES_VERSION__/${gate_version}/g" \
+    "$REPO_DIR/hooks/git/agent-quality-gate.sh" > "$INSTALL_DIR/hooks/git/agent-quality-gate.sh"
   chmod +x "$INSTALL_DIR/hooks/git/agent-quality-gate.sh"
   cp "$REPO_DIR/.version" "$INSTALL_DIR/.version" 2>/dev/null || true
 
@@ -739,8 +748,21 @@ trap cleanup EXIT
 
 # --- Main ---
 main() {
+  # Dynamic banner version (read from repo .version, auto-centered) — same approach
+  # as doctor.sh; avoids the hardcoded-"v1.5" staleness that misled other sessions.
+  local ver title inner_width=34 total_pad lpad rpad
+  if [[ -f "$REPO_DIR/.version" ]]; then
+    ver=$(tr -d '[:space:]' < "$REPO_DIR/.version")
+  else
+    ver="?"
+  fi
+  title="Agent Gates Installer v${ver}"
+  total_pad=$(( inner_width - ${#title} ))
+  (( total_pad < 0 )) && total_pad=0
+  lpad=$(( total_pad / 2 ))
+  rpad=$(( total_pad - lpad ))
   echo -e "${BLUE}╔══════════════════════════════════╗${NC}"
-  echo -e "${BLUE}║${NC}    Agent Gates Installer v1.5    ${BLUE}║${NC}"
+  printf "${BLUE}║${NC}%${lpad}s%s%${rpad}s${BLUE}║${NC}\n" "" "$title" ""
   echo -e "${BLUE}╚══════════════════════════════════╝${NC}"
   echo ""
 
