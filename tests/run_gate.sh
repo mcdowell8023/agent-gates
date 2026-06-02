@@ -232,6 +232,139 @@ test_check1_opencode_skill_dir() {
 }
 
 # =====================================================================
+# CHECK 5b: Heterogeneous review enforcement (v1.7.0)
+# =====================================================================
+
+# Build a NEEDS_REVIEW-triggering diff (2 logic files, >50 added lines) + a fresh
+# review file, and an isolated review-capability.json at $AGENT_GATES_DIR.
+# $1 = REVIEW_LEVEL marker to embed ("" = none); $2 = machine capability level.
+setup_review_scenario() {
+  local review_marker="$1" cap_level="$2" i n
+  for i in 1 2; do
+    printf 'export const f%s = () => {\n' "$i" > "mod$i.ts"
+    for n in $(seq 1 30); do echo "  // line $n" >> "mod$i.ts"; done
+    echo "}" >> "mod$i.ts"
+    echo "test('f$i', () => {})" > "mod$i.test.ts"
+  done
+  git add mod1.ts mod2.ts mod1.test.ts mod2.test.ts
+  CAPDIR=$(mktemp -d)
+  printf '{\n  "level": "%s"\n}\n' "$cap_level" > "$CAPDIR/review-capability.json"
+  export AGENT_GATES_DIR="$CAPDIR"
+  # Create review file LAST so its mtime is newest (passes freshness gate)
+  mkdir -p .agent/reviews
+  {
+    [[ -n "$review_marker" ]] && echo "<!-- REVIEW_LEVEL: $review_marker -->"
+    echo "# Cross-review"
+    echo "Looks correct, no issues."
+    echo "VERDICT: PASS"
+  } > .agent/reviews/2099-01-01-test.md
+}
+
+# T11: machine L3 but review has NO REVIEW_LEVEL marker → block (same-model assumed)
+test_hetero_block_unmarked() {
+  echo "T11: cap L3 + review unmarked → block"
+  (
+    setup_mock_repo
+    setup_review_scenario "" "L3"
+    output=$(bash "$GATE" 2>&1)
+    rc=$?
+    assert "exits 1 when machine L3 but review unmarked" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+    assert "output mentions heterogeneous/REVIEW_LEVEL" "$(echo "$output" | grep -qiE 'heterogen|REVIEW_LEVEL|same-model' && echo true || echo false)"
+    rm -rf "${CAPDIR:-}"
+    teardown_mock_repo
+  )
+}
+
+# T12: machine L3 + review explicitly REVIEW_LEVEL: L0 → block
+test_hetero_block_l0() {
+  echo "T12: cap L3 + review L0 → block"
+  (
+    setup_mock_repo
+    setup_review_scenario "L0" "L3"
+    output=$(bash "$GATE" 2>&1)
+    rc=$?
+    assert "exits 1 when review L0 but machine L3" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+    rm -rf "${CAPDIR:-}"
+    teardown_mock_repo
+  )
+}
+
+# T13: machine L3 + review REVIEW_LEVEL: L2 (heterogeneous) → pass
+test_hetero_pass_l2() {
+  echo "T13: cap L3 + review L2 → pass"
+  (
+    setup_mock_repo
+    setup_review_scenario "L2" "L3"
+    output=$(bash "$GATE" 2>&1)
+    rc=$?
+    assert "exits 0 when review L2 (heterogeneous)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+    rm -rf "${CAPDIR:-}"
+    teardown_mock_repo
+  )
+}
+
+# T14: true L0 machine + unmarked review → pass (no heterogeneous tool available)
+test_hetero_pass_l0machine() {
+  echo "T14: cap L0 + review unmarked → pass (no alternative)"
+  (
+    setup_mock_repo
+    setup_review_scenario "" "L0"
+    output=$(bash "$GATE" 2>&1)
+    rc=$?
+    assert "exits 0 on true L0 machine" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+    rm -rf "${CAPDIR:-}"
+    teardown_mock_repo
+  )
+}
+
+# T15: SKIP_HETERO_CHECK=1 bypasses the block even on L3 machine
+test_hetero_skip_override() {
+  echo "T15: SKIP_HETERO_CHECK=1 bypasses"
+  (
+    setup_mock_repo
+    setup_review_scenario "L0" "L3"
+    output=$(SKIP_HETERO_CHECK=1 bash "$GATE" 2>&1)
+    rc=$?
+    assert "exits 0 with SKIP_HETERO_CHECK=1" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+    rm -rf "${CAPDIR:-}"
+    teardown_mock_repo
+  )
+}
+
+# T16: gate must pick the NEWEST review by mtime, not by filename.
+# Bug: `find | sort -r | head -1` sorts by filename, so an old but
+# alphabetically-later file (e.g. zzz) shadows the freshly-written one (aaa).
+test_review_picks_newest_by_mtime() {
+  echo "T16: gate picks newest review by mtime, not filename"
+  (
+    setup_mock_repo
+    local i n
+    for i in 1 2; do
+      printf 'export const f%s = () => {\n' "$i" > "mod$i.ts"
+      for n in $(seq 1 30); do echo "  // line $n" >> "mod$i.ts"; done
+      echo "}" >> "mod$i.ts"
+      echo "test('f$i', () => {})" > "mod$i.test.ts"
+    done
+    git add mod1.ts mod2.ts mod1.test.ts mod2.test.ts
+    # L0 capability so Gate 2b (heterogeneity) is exempt — isolate selection logic
+    CAPDIR=$(mktemp -d)
+    printf '{ "level": "L0" }\n' > "$CAPDIR/review-capability.json"
+    export AGENT_GATES_DIR="$CAPDIR"
+    mkdir -p .agent/reviews
+    # OLD file, alphabetically LAST, BAD verdict
+    printf '# old\nVERDICT: ISSUES\n' > .agent/reviews/zzz-old.md
+    sleep 1
+    # NEW file, alphabetically FIRST, GOOD verdict
+    printf '# new\nVERDICT: PASS\n' > .agent/reviews/aaa-new.md
+    output=$(bash "$GATE" 2>&1)
+    rc=$?
+    assert "picks newest (aaa=PASS), not alphabetical-last (zzz=ISSUES)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+    rm -rf "${CAPDIR:-}"
+    teardown_mock_repo
+  )
+}
+
+# =====================================================================
 # Run all tests
 # =====================================================================
 echo "=== agent-quality-gate.sh CHECK 1 + CHECK 2 tests ==="
@@ -247,6 +380,12 @@ test_check2_skip_path_b
 test_trivial_skip
 test_check1_skill_dir_no_changes
 test_check1_opencode_skill_dir
+test_hetero_block_unmarked
+test_hetero_block_l0
+test_hetero_pass_l2
+test_hetero_pass_l0machine
+test_hetero_skip_override
+test_review_picks_newest_by_mtime
 
 echo ""
 read -r PASS_COUNT FAIL_COUNT < "$RESULTS_FILE"

@@ -614,6 +614,7 @@ Stop immediately if any of these are true:
 - Plan ready to execute but hasn't been reviewed → STOP
 - About to say "done" but haven't run verification → STOP
 - Multi-file change about to commit but no `.agent/reviews/` evidence → STOP
+- Cross-review needed and opencode/codex IS installed, but about to spawn `general-purpose`/`oracle` with no model override → STOP (that's same-model "Opus reviews Opus"; use a different model per `agent-review-protocol` §8)
 - Doing things beyond what was asked (adding features, refactoring unrelated code) → STOP
 - Same fix failed 3 times → STOP, question architecture
 - Path A team project but no OpenSpec change record → STOP

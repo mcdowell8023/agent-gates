@@ -110,7 +110,18 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
     fail "Project has .agent/ but missing .agent/reviews/ directory"
     echo "   Fix: mkdir -p .agent/reviews"
   elif [[ -d .agent/reviews ]]; then
-    REVIEW_FILE=$(find .agent/reviews/ -name "*.md" -mmin -240 2>/dev/null | sort -r | head -1)
+    # Pick the NEWEST review by mtime — NOT `sort -r` (which sorts by filename,
+    # so an old but alphabetically-later file would shadow a freshly-written one).
+    REVIEW_FILE=""
+    REVIEW_NEWEST_MTIME=0
+    while IFS= read -r rf; do
+      [[ -z "$rf" || ! -f "$rf" ]] && continue
+      rf_mtime=$(stat -f %m "$rf" 2>/dev/null || stat -c %Y "$rf" 2>/dev/null || echo "0")
+      if [[ "$rf_mtime" -gt "$REVIEW_NEWEST_MTIME" ]]; then
+        REVIEW_NEWEST_MTIME="$rf_mtime"
+        REVIEW_FILE="$rf"
+      fi
+    done < <(find .agent/reviews/ -name "*.md" -mmin -240 2>/dev/null)
     if [[ -z "$REVIEW_FILE" ]]; then
       fail "Cross-review evidence missing or stale (>4h old)"
       echo "   Fix: Run cross-review, save to .agent/reviews/$(date +%Y-%m-%d)-<topic>.md"
@@ -126,6 +137,11 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
         fi
       else
         # Freshness gate: skip if post-review changes are minor (<20 lines)
+        # KNOWN LIMITATION: mtime is second-granularity (macOS `stat -f %m`). A source
+        # edit made in the SAME second as (but after) the review write escapes this `>`
+        # comparison. Using `>=` would over-trigger normal flow (review written right
+        # after the last edit), so we accept the rare same-second race. See CHANGELOG
+        # v1.7.0 known limitations; a sub-second fix is not portably available.
         REVIEW_MTIME=$(stat -f %m "$REVIEW_FILE" 2>/dev/null || stat -c %Y "$REVIEW_FILE" 2>/dev/null || echo "0")
         POST_REVIEW_LINES=0
         while IFS= read -r sf; do
@@ -140,6 +156,33 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
         if [[ "$POST_REVIEW_LINES" -gt 20 ]]; then
           fail "Significant changes ($POST_REVIEW_LINES lines) made AFTER review — re-review required"
           echo "   Fix: Re-run cross-review covering your latest changes."
+        fi
+
+        # === Gate 2b (v1.7.0): heterogeneous-review enforcement ===
+        # If this machine can do heterogeneous review (review-capability.json
+        # level >= L1), a same-model (L0) or unmarked review does NOT satisfy
+        # 红线 #8's "different model" requirement — block it. A true L0 machine
+        # (no opencode/codex) is exempt: there is no heterogeneous alternative.
+        if [[ "${SKIP_HETERO_CHECK:-0}" != "1" ]]; then
+          HETERO_DIR="${AGENT_GATES_DIR:-$HOME/.agent-gates}"
+          CAP_FILE="$HETERO_DIR/review-capability.json"
+          if [[ -f "$CAP_FILE" ]]; then
+            CAP_LEVEL=$(grep -oE '"level"[[:space:]]*:[[:space:]]*"L[0-3]"' "$CAP_FILE" 2>/dev/null | grep -oE 'L[0-3]' | head -1 || true)
+            if [[ "$CAP_LEVEL" == "L1" || "$CAP_LEVEL" == "L2" || "$CAP_LEVEL" == "L3" ]]; then
+              RLEVEL=$(grep -oE 'REVIEW_LEVEL:[[:space:]]*L[0-3]' "$REVIEW_FILE" 2>/dev/null | grep -oE 'L[0-3]' | head -1 || true)
+              if [[ -z "$RLEVEL" ]]; then
+                fail "Review has no REVIEW_LEVEL marker, but this machine supports heterogeneous review ($CAP_LEVEL)"
+                echo "   Same-model review (e.g. Opus reviewing Opus) does NOT satisfy the different-model requirement."
+                echo "   Fix: run cross-review via a DIFFERENT model (opencode/codex — agent-review-protocol §8),"
+                echo "        then add a header line to the review file: <!-- REVIEW_LEVEL: L1 -->  (or higher)."
+                echo "   Override (genuine exception, e.g. stale config): SKIP_HETERO_CHECK=1"
+              elif [[ "$RLEVEL" == "L0" ]]; then
+                fail "Review is same-model (REVIEW_LEVEL: L0) but machine supports heterogeneous ($CAP_LEVEL)"
+                echo "   Fix: re-run cross-review via a different model (opencode/codex — §8)."
+                echo "   Override (genuine exception): SKIP_HETERO_CHECK=1"
+              fi
+            fi
+          fi
         fi
       fi
     fi
