@@ -2,6 +2,23 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## [1.6.3] - 2026-06-02
+
+### Added (规则沉淀: 合成 fixture ≠ 真实数据证据)
+
+- **`agent-workflow-rules` SKILL.md §9.2 新增** — "Synthetic Fixtures ≠ Real-Data Evidence":对启发式/触发条件/阈值/分类器类逻辑,绿色单测(手写 fixture)不证明正确性,必须用**真实输入样本**(日志/transcript/真实 payload)校准并报告真实命中/漏报率。
+- §9.1 证据表加一行(heuristic/trigger/threshold → 需真实数据验证)。
+- §15.1 反合理化表加一行("所有 fixture 都过" → 跑真实数据)。
+
+### Why
+
+- 直接来自 v1.6.1→v1.6.2 的真实教训: Parallelism Reminder 16 个 fixture 全绿,但 fixture 全是"全 pending",而真实 64% 是"首条 in_progress" → 漏掉大多数。bug 是 transcript 挖矿发现的,不是测试。把这条沉淀成可复用规则,避免重蹈。
+
+### gpt-5.5 交叉审查修订 (VERDICT: ISSUES → 已修)
+
+- 防误读: §9.2 显式声明"**不替代 §4 TDD**,fixture 仍必要,只是对 pattern 类逻辑'必要但不足'",避免被速读成否定单测。
+- 可审计: 真实数据验证需注明样本量 + 来源,非平凡时(脱敏后)存 `.agent/reviews/`。
+
 ## [1.6.2] - 2026-06-02
 
 ### Fixed (Parallelism Reminder 触发门槛按真实数据校准)
