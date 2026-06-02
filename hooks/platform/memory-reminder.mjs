@@ -72,8 +72,9 @@ function detectTodoCompleted(payload) {
   if (!payload) return false;
 
   // OMO: EventTodoUpdated — type: "todo.updated", properties.todos array
+  // v1.6.2: accept 'done' as well as 'completed' to match the OMC/OMX branch below.
   if (payload.type === 'todo.updated' && Array.isArray(payload.properties?.todos)) {
-    return payload.properties.todos.some(t => t.status === 'completed');
+    return payload.properties.todos.some(t => t.status === 'completed' || t.status === 'done');
   }
 
   // OMC/OMX PostToolUse: tool_name matches todo-related tools
@@ -123,20 +124,36 @@ function extractTodos(payload) {
   return null;
 }
 
-// Plan-time signal: >=3 todos AND every one EXPLICITLY pending.
-// "all-pending" is the initial-plan fingerprint, not a mid-stream status update,
-// so the reminder fires during planning and goes quiet once work begins (the first
-// in_progress/completed transition makes this return false).
+// Plan-time signal: >=3 todos, NOTHING completed yet, and at most one in_progress.
+// This is the "work just laid out, barely started" fingerprint. We deliberately do
+// NOT require all-pending: real-world plan writes commonly mark the first item
+// in_progress in the same write (~64% of sampled real TodoWrite plan writes), so an
+// all-pending gate would miss the majority of genuine plan moments. Once a second
+// item goes in_progress or anything is completed, work is underway → stay quiet.
 //
-// Statelessness note: the hook does NOT dedupe across calls — if the platform
-// delivers the same all-pending payload more than once it will nudge each time.
-// In practice a TodoWrite plan write is a single PostToolUse event, so this fires
-// effectively once per plan. We require EXPLICIT status === 'pending' (missing or
-// empty status does NOT count) so malformed/partial payloads can't false-trigger.
+// Calibration note: thresholds tuned against real TodoWrite transcripts, not just
+// synthetic fixtures — see v1.6.2. The status fingerprint to FIRE:
+//   completed == 0  AND  in_progress <= 1  AND  >=1 explicit pending  AND  no unknown status
+// Anything else (work underway, or unrecognized/malformed statuses) → no fire.
+//
+// We classify each status explicitly. Missing/empty/garbage status counts as
+// "unknown" and BLOCKS firing (a well-formed TodoWrite always sets status), which
+// preserves the v1.6.1 hardening against malformed payloads false-triggering.
+//
+// Statelessness note: the hook does NOT dedupe across calls. In practice a TodoWrite
+// plan write is a single PostToolUse event, so this fires effectively once per plan.
 function detectPlanTimeTodos(payload) {
   const todos = extractTodos(payload);
   if (!Array.isArray(todos) || todos.length < PARALLEL_MIN_TODOS) return false;
-  return todos.every(t => String(t?.status || '').toLowerCase() === 'pending');
+  let completed = 0, inProgress = 0, pending = 0, unknown = 0;
+  for (const t of todos) {
+    const s = String(t?.status || '').toLowerCase();
+    if (s === 'completed' || s === 'done') completed++;
+    else if (s === 'in_progress' || s === 'in-progress') inProgress++;
+    else if (s === 'pending') pending++;
+    else unknown++;
+  }
+  return completed === 0 && inProgress <= 1 && pending >= 1 && unknown === 0;
 }
 
 // --- Main ---

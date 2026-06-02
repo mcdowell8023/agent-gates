@@ -2,6 +2,29 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## [1.6.2] - 2026-06-02
+
+### Fixed (Parallelism Reminder 触发门槛按真实数据校准)
+
+- **`memory-reminder.mjs` detectPlanTimeTodos 放宽门槛** — 从"≥3 且**全** pending"改为 **"≥3 且 0 completed 且 ≤1 in_progress 且无未知状态"**。真实 transcript 抽样显示 64%(7/11)的计划写入首条已是 in_progress(agent 写计划时常直接起手第一项),旧的"全 pending"门槛把这些全漏了。校准后真实计划写入触发率从 ~33%(4/12)升到 ~92%(11/12)。
+- 保留 v1.6.1 的 malformed 防护: 未知/缺失 status 计入 `unknown` 并阻止触发(well-formed TodoWrite 总会带 status)。
+- 2 个 in_progress 或任意 completed → 判定为"工作已进行中",不触发。
+
+### Added (tests)
+
+- `work-underway.json` fixture(2 in_progress → 不触发);`plan-time-started.json` 期望从 false 翻为 true(现覆盖 64% 真实模式)+ Parallelism marker 断言。hook 测试 16→18 用例。
+
+### Why / 元教训
+
+- **单元 fixture ≠ 真实数据分布**: v1.6.1 的 16 个测试全绿,但 fixture 全是"全 pending",而真实世界 64% 是"首条 in_progress"。bug 是靠"本地跑 + transcript 挖矿"发现的,不是单测。
+- 顺带排除伪问题: 全局 1738 次 `todowrite` vs 0 次 `TaskCreate` → TaskCreate 跨调用 state 不做(非真实工作流)。
+
+### gpt-5.5 交叉审查修订 (VERDICT: ISSUES → 已修)
+
+- **补 5 个边界 fixture**: all-in-progress / completed+in_progress / empty-status / garbage-status / omo-done(把 gpt-5.5 手测的边界固化成回归测试)。hook 测试 18→25 用例。
+- **顺带修预存 bug**: OMO completed 检测(`detectTodoCompleted` line 75-77)原只认 `completed`,不认 `done`,与 OMC/OMX 路径不一致 → 补 `|| status === 'done'`。
+- 逻辑/优先级/malformed 防护经 gpt-5.5 6 个 ad-hoc 边界验证全部正确。
+
 ## [1.6.1] - 2026-06-02
 
 ### Added (并行优先 — 减少独立任务被串行处理)

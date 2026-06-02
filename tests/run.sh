@@ -57,20 +57,31 @@ run_test "$FIXTURES/unrelated-tool.json" "false"
 run_test "$FIXTURES/single-todo-completed.json" "true"
 run_test "$FIXTURES/fallback-output-completed.json" "true"
 
-# v1.6.1 parallelism reminder
-run_test "$FIXTURES/plan-time-3-pending.json" "true"
-run_test "$FIXTURES/plan-time-started.json" "false"
+# v1.6.1/v1.6.2 parallelism reminder
+run_test "$FIXTURES/plan-time-3-pending.json" "true"       # all pending
+run_test "$FIXTURES/plan-time-started.json" "true"         # v1.6.2: first in_progress + rest pending (the ~64% real pattern)
+run_test "$FIXTURES/work-underway.json" "false"            # v1.6.2: 2 in_progress → work underway, no fire
 run_test "$FIXTURES/plan-time-omo.json" "true"            # OMO format, 3 all-pending
-run_test "$FIXTURES/plan-time-missing-status.json" "false" # missing status → conservative no-fire
+run_test "$FIXTURES/plan-time-missing-status.json" "false" # missing status → unknown blocks (malformed guard)
 run_test "$FIXTURES/mixed-completed-pending-3.json" "true" # has a completed → memory reminder
 run_test "$FIXTURES/malformed.json" "false"               # invalid JSON → no-op, no crash
+
+# v1.6.2 edge cases (locked in from gpt-5.5 review ad-hoc checks)
+run_test "$FIXTURES/all-in-progress.json" "false"          # 3 in_progress → work underway, no fire
+run_test "$FIXTURES/completed-and-in-progress.json" "true" # has completed → memory reminder
+run_test "$FIXTURES/empty-status.json" "false"             # empty status → unknown blocks
+run_test "$FIXTURES/garbage-status.json" "false"           # garbage status → unknown blocks
+run_test "$FIXTURES/omo-done.json" "true"                  # OMO 'done' now detected as completed (v1.6.2 fix)
 
 # Verify the RIGHT reminder fires for each trigger
 run_test_marker "$FIXTURES/todo-completed.json" "Memory Persistence Reminder"
 run_test_marker "$FIXTURES/plan-time-3-pending.json" "Parallelism Reminder"
+run_test_marker "$FIXTURES/plan-time-started.json" "Parallelism Reminder"
 run_test_marker "$FIXTURES/plan-time-omo.json" "Parallelism Reminder"
 # Priority: 3 todos but one completed → Memory wins, NOT parallelism
 run_test_marker "$FIXTURES/mixed-completed-pending-3.json" "Memory Persistence Reminder"
+run_test_marker "$FIXTURES/completed-and-in-progress.json" "Memory Persistence Reminder"
+run_test_marker "$FIXTURES/omo-done.json" "Memory Persistence Reminder"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
