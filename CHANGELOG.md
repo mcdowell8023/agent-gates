@@ -2,6 +2,20 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## [1.7.1] - 2026-06-02
+
+### Fixed (gate 版本号 stale — 误导了别的会话)
+
+- **`agent-quality-gate.sh` 版本号从硬编码改为 install 时戳入** — 头部注释 + 运行时 banner 长期硬编码 `v1.5`(自 v1.5 起就没更新),导致**别的会话读 banner 以为部署的是 v1.5**,实际是 v1.7.0。根因:版本字符串和 `.version` 没有任何同步机制。
+  - gate 改用 `GATE_VERSION="__AGENT_GATES_VERSION__"` 占位符,`install.sh` 复制时 `sed` 戳入 `.version` 真实版本;直接跑源码(repo/测试)显示 `dev`。
+  - per-project copy 从已戳版的 authority 拷贝 → 诚实显示自己被戳的版本(stale copy 不再谎称 v1.5)。
+- **`init-project-gates` SKILL.md** — 删掉 "(v1.5)" 硬编码 + 旧 check 清单,改为"始终从 authority 拷最新、版本看 `.version`/CHANGELOG",补 Gate 2b(v1.7.0)说明 + 直接给 `cp` 命令。
+- **`install.sh` banner**(gpt-5.5 审查发现的同类漏网)— main() banner 原硬编码 `Agent Gates Installer v1.5`,改为按 `$REPO_DIR/.version` 动态居中(同 doctor.sh v1.5.3 做法)。+ sed 戳版本前加 semver 校验守卫(`^[0-9A-Za-z.+-]+$`,防 `/&` 破坏替换,异常 fallback dev)。
+
+### Why
+
+- 真实事件: 一个 restart 后的会话读 gate banner 显示 "v1.5",误判权威版本,差点按错误版本决策。这是 v1.5.3 banner 硬编码 bug 的同类复发(换了个位置)。根治:版本号只有一个来源(`.version`),其余位置 install 时注入,不再手写。
+
 ## [1.7.0] - 2026-06-02
 
 ### Added (异构审查物理强制 — gate 长牙,堵"Opus 审 Opus")

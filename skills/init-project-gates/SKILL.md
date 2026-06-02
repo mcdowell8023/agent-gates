@@ -368,14 +368,19 @@ CodeGraph:
 
 The following is the complete hook script to write to `.githooks/agent-quality-gate.sh`:
 
-The hook script is maintained in `hooks/git/agent-quality-gate.sh` (v1.5). Copy the latest version from the installed agent-gates repo at `~/.agent-gates/hooks/git/agent-quality-gate.sh`, or from the repo source at `hooks/git/agent-quality-gate.sh`.
+**Always copy the latest gate from the installed authority** — do NOT transcribe a version from memory. The authority is the single source of truth; `~/.agent-gates/.version` tells you which version it is.
 
-The v1.5 gate includes:
+```bash
+cp ~/.agent-gates/hooks/git/agent-quality-gate.sh .githooks/agent-quality-gate.sh
+```
+
+(Or from the repo source at `hooks/git/agent-quality-gate.sh`.) The current gate includes (see CHANGELOG for the authoritative, version-specific list):
 - **Path detection**: auto-detects Path A (OpenSpec) vs Path B
 - **CHECK 1** (Path A): `openspec/changes/` must have an active change directory
 - **CHECK 2** (Path A): new source files require `features/*.feature` scenarios
 - **Gate 1**: test file correspondence (all paths)
-- **Gate 2**: cross-review evidence (all paths, threshold-triggered)
+- **Gate 2**: cross-review evidence (all paths, threshold-triggered) — picks the newest review by **mtime**
+- **Gate 2b** (v1.7.0+): on an L1+ machine, a same-model / unmarked review is blocked — the review file must carry `<!-- REVIEW_LEVEL: Lx -->` proving a different model was used
 
 ## Idempotency
 

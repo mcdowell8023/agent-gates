@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Agent Quality Gate v1.5
+# Agent Quality Gate — version is stamped at install time (see GATE_VERSION below).
 # Only fires when AGENT_MODE=1; human developers pass through.
-# Version: 1.5.0
 # Source: https://github.com/mcdowell8023/agent-gates
 
 set -euo pipefail
@@ -9,6 +8,13 @@ set -euo pipefail
 [[ "${AGENT_MODE:-0}" != "1" ]] && exit 0
 
 git rev-parse MERGE_HEAD &>/dev/null 2>&1 && exit 0
+
+# Version stamped into THIS copy by install.sh / init-project-gates when copied from
+# the repo source (sed replaces the placeholder). Shows "dev" if run from an unstamped
+# source tree (repo / tests). This is why the runtime banner no longer hardcodes a
+# version — a stale per-project copy now honestly reports the version it was stamped with.
+GATE_VERSION="__AGENT_GATES_VERSION__"
+[[ "$GATE_VERSION" == *VERSION* ]] && GATE_VERSION="dev"
 
 FAILED=0
 fail() { echo "❌ GATE: $1"; FAILED=1; }
@@ -26,7 +32,7 @@ if [[ -z "$NEW_SOURCE" && "$DIFF_LINES" -le 15 && "$CHANGED_COUNT" -le 2 ]]; the
   exit 0
 fi
 
-echo "🔍 Agent Quality Gate v1.5 ($CHANGED_COUNT files, +${DIFF_LINES} lines)"
+echo "🔍 Agent Quality Gate v$GATE_VERSION ($CHANGED_COUNT files, +${DIFF_LINES} lines)"
 
 # === Path detection: A (OpenSpec) vs B ===
 IS_PATH_A=0
