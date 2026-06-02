@@ -2,6 +2,35 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## [1.7.0] - 2026-06-02
+
+### Added (异构审查物理强制 — gate 长牙,堵"Opus 审 Opus")
+
+- **`agent-quality-gate.sh` Gate 2b** — CHECK 5 确认 `VERDICT: PASS` 后,读 `~/.agent-gates/review-capability.json`:若机器能力 ≥ L1(装了 opencode/codex)但 review 文件 `REVIEW_LEVEL: L0` 或**无 REVIEW_LEVEL 标注** → **阻断 commit**。真 L0 机器(无异构工具)豁免。逃生口 `SKIP_HETERO_CHECK=1`。配置缺失/损坏 → 不阻断(优雅降级)。配置路径可经 `AGENT_GATES_DIR` 覆盖(测试隔离)。
+- **gate 测试 +5(T11-T15)** — cap L3+无标注→阻断 / cap L3+L0→阻断 / cap L3+L2→放行 / 真 L0→放行 / SKIP_HETERO_CHECK 绕过。gate 测试 15→20 用例,TDD(先 RED 后 GREEN)。
+
+### Fixed (review 文件选择 bug — 按文件名而非 mtime)
+
+- **`agent-quality-gate.sh:113`** — 原 `find .agent/reviews/ -mmin -240 | sort -r | head -1` 按**文件名**降序挑,4 小时内有多个 review 时会挑中字母序最末的旧文件(如 `ux-fixes.md` 盖过新写的 `round1.md`),导致校验/Gate 2b 看错文件。改为遍历 + `stat` mtime 选真正最新。回归测试 T16 钉死。**这直接修了截图里"gate 挑中旧 ux-fixes 而非新 review"的真实故障**——不再需要"改名让它排最后"的 workaround。
+
+### Changed (文档层定性)
+
+- **`agent-review-protocol` §8** — 新增 "L0 Fallback is a VIOLATION When L1+ is Available":机器能做异构却走同模型兜底 = 违反红线 #8,不是可接受降级。明确"opencode 卡死过 / 派 subagent 更快"不是借口。补 "Physical Enforcement (v1.7.0)" 小节说明 gate 行为。
+- **§1 工具优先级表** — 兜底档(code-reviewer)标注"仅真 L0 机器,装了 opencode/codex 时不是捷径"。
+- **`agent-workflow-rules` §15** — 反模式新增一行:opencode/codex 已装却派 general-purpose/oracle 不指定 model → STOP(同模型 Opus 审 Opus)。
+
+### Why
+
+- 真实数据(412 transcript 挖矿,2026-06-02): 20 个有交叉审查活动的会话,只有 2 个用了真异构工具,**~90% 是同模型兑水**。截图实证:某 agent 派 general-purpose 不指定 model → 继承 Opus → Opus 审 Opus,只满足红线 #8 兜底档不满足核心"不同模型"。
+- v1.6.0 建了检测(review-capability.json)却没接到 gate;v1.7.0 把检测接到闸门 = 物理强制。规则早就存在却被忽略 90%,只有硬阻断能改。
+- 诚实边界: 残留洞——agent 可谎报 `REVIEW_LEVEL: L2` 而没真跑异构工具(更主动的违规)。留待 C 档(证据嵌入)按需再堵。per-project hook 是 copy,老项目需 re-init 才获得本强制。
+
+### Known Limitations (gpt-5.5 审查 VERDICT: ISSUES → 已记录,非本版修)
+
+- **freshness 同秒竞态**(预存,非本版引入): post-review 改动检测用秒级 mtime + `SF_MTIME > REVIEW_MTIME`,review 后**同一秒**改源码会漏判。改 `>=` 会误伤正常流程,sub-second 不可移植 → 接受该罕见竞态,代码注释 + 本条记录。backlog 跟进。
+- **谎报 REVIEW_LEVEL**: 见上,C 档跟进。
+- 审查过程教训: 首轮派审查 prompt 漏"只读约束",审查 agent 误建 worktree `memory/`(已清理)。第二轮补只读约束后正常。→ §9 prompt 模板应默认带只读头(backlog)。
+
 ## [1.6.3] - 2026-06-02
 
 ### Added (规则沉淀: 合成 fixture ≠ 真实数据证据)

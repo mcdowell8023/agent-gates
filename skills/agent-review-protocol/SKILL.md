@@ -30,7 +30,7 @@ Cross-check MUST use a different model/vendor. Priority order:
 | --- | --- | --- |
 | 1. **opencode CLI + heterogeneous model** (首选) | `opencode run -m <provider/model> --dir <workdir> "<prompt>"` | Default for all cross-checks |
 | 2. **codex CLI + GPT-5 series** (备选) | Via `codex:codex-rescue` agent | When opencode unavailable; note 3-min timeout limit |
-| 3. **code-reviewer / critic agent** (兜底) | Same Claude model, different agent role | Only when 1+2 both unavailable |
+| 3. **code-reviewer / critic agent** (兜底) | Same Claude model, different agent role | **Only when 1+2 are genuinely unavailable** (true L0 machine). NOT a shortcut when opencode/codex is installed — see §8 "L0 Fallback is a VIOLATION When L1+ is Available". |
 
 ### Model Selection for Cross-Check
 
@@ -444,12 +444,24 @@ Each route has a default timeout. When exceeded, the agent automatically falls t
 | Paseo (L1) | 5 minutes | Async; agent polls for completion |
 | Agent tool (L0) | No timeout | Runs in-process |
 
-### Strict Heterogeneous Mode
+### L0 Fallback is a VIOLATION When L1+ is Available (⛔)
 
-Set environment variable `REQUIRE_HETEROGENEOUS=1` to enforce that L0 (same-model) fallback is treated as a **failure** rather than a degraded pass.
+The Agent-tool / same-model fallback (L0) is **only** acceptable on a genuine L0 machine — one where `review-capability.json` reports `level: L0` because no opencode/codex/OMC-plugin is installed. 
 
-- Without the flag: L0 review produces a `⚠️ WARN: same-model review` annotation but does not block delivery.
-- With the flag: L0 review produces `❌ FAIL: heterogeneous review required` and the agent must either fix tool availability or escalate to the user.
+**If the machine's capability is L1 or higher, using the L0 same-model fallback is a VIOLATION of the different-model requirement (红线 #8), not an acceptable degradation.** "opencode hung once before" / "it's faster to just spawn a sub-agent" are NOT valid reasons to skip heterogeneous review when a heterogeneous tool is installed. Spawning `general-purpose` / `oracle` with no model override on an Opus session = Opus reviewing Opus = same model = does not count.
+
+Real-world finding (2026-06-02 transcript mining): ~90% of cross-review sessions on L2/L3 machines silently fell back to same-model. That is why this is now physically enforced (below), not just convention.
+
+### Physical Enforcement (v1.7.0)
+
+The CLI pre-commit gate (`agent-quality-gate.sh`) reads `review-capability.json` and **blocks the commit** when:
+- machine capability is `L1`/`L2`/`L3`, AND
+- the latest review file has `REVIEW_LEVEL: L0` **or no `REVIEW_LEVEL` marker at all**.
+
+So on any machine with opencode/codex installed, a review file MUST carry a `<!-- REVIEW_LEVEL: L1 -->` (or higher) header proving a different model was used. A true L0 machine is exempt (no alternative exists).
+
+- Escape hatch (genuine exceptions only — stale config, emergency): `SKIP_HETERO_CHECK=1`.
+- `REQUIRE_HETEROGENEOUS=1` is the agent-side equivalent for the in-session review flow (treat L0 as fail, not degraded pass).
 
 **How to fix L0**: Install at least one external review tool to reach L1+:
 - Fastest: `npm install -g @openai/codex` (L1 — GPT cross-review)
