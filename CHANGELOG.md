@@ -2,6 +2,15 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## [1.7.2] - 2026-06-02
+
+### Fixed (v1.7.1 banner 回归 — 显示 "v?")
+
+- **`install.sh` banner 显示 `v?`** — v1.7.1 让 banner 读 `$REPO_DIR/.version`,但 banner 在 `main()` 顶部跑,而 `REPO_DIR` 要到 `fetch_repo()`(main 后段)才赋值 → 读不到 → "?"。
+  - 修法: 顶部新增 `SCRIPT_DIR`(解析 install.sh 自身所在目录 = 本地 repo;`curl|bash` 管道场景为空)。banner 版本从多来源按序解析: `SCRIPT_DIR` → `REPO_DIR` → `INSTALL_DIR`,取第一个有 `.version` 的。
+  - 本地 repo 运行: banner 正确显示 1.7.2。验证: 12 install 测试通过 + banner 实测 1.7.2。
+- 教训(§9.2 现身说法): v1.7.1 banner 只在隔离环境(手动设 REPO_DIR)测过,没在真实 install 上下文测 → "v?" 漏到了线上。修复类改动必须在真实调用路径验证,不只构造环境。
+
 ## [1.7.1] - 2026-06-02
 
 ### Fixed (gate 版本号 stale — 误导了别的会话)

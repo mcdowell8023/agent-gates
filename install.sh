@@ -10,6 +10,10 @@ REPO_URL="https://github.com/mcdowell8023/agent-gates"
 REPO_DIR=""
 TARGET_DIR=""
 INSTALL_DIR="$HOME/.agent-gates"
+# Directory of this install.sh (= the repo, for a local checkout run). Empty when
+# piped via `curl | bash` (no real source path). Used so the banner can read the
+# version BEFORE REPO_DIR is set (fetch_repo runs later in main).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "")"
 
 if [[ "$INSTALL_DIR" == *" "* ]]; then
   echo "Error: Install path contains spaces: $INSTALL_DIR" >&2
@@ -748,14 +752,17 @@ trap cleanup EXIT
 
 # --- Main ---
 main() {
-  # Dynamic banner version (read from repo .version, auto-centered) — same approach
-  # as doctor.sh; avoids the hardcoded-"v1.5" staleness that misled other sessions.
-  local ver title inner_width=34 total_pad lpad rpad
-  if [[ -f "$REPO_DIR/.version" ]]; then
-    ver=$(tr -d '[:space:]' < "$REPO_DIR/.version")
-  else
-    ver="?"
-  fi
+  # Dynamic banner version (auto-centered) — same approach as doctor.sh; avoids the
+  # hardcoded-"v1.5" staleness that misled other sessions. Resolve from the first
+  # available source: this script's own dir (local repo) → REPO_DIR (set later for
+  # remote clone) → already-installed copy. REPO_DIR is still empty at banner time.
+  local ver="?" title inner_width=34 total_pad lpad rpad d
+  for d in "$SCRIPT_DIR" "$REPO_DIR" "$INSTALL_DIR"; do
+    if [[ -n "$d" && -f "$d/.version" ]]; then
+      ver=$(tr -d '[:space:]' < "$d/.version")
+      break
+    fi
+  done
   title="Agent Gates Installer v${ver}"
   total_pad=$(( inner_width - ${#title} ))
   (( total_pad < 0 )) && total_pad=0
