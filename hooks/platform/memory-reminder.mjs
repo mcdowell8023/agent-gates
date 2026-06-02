@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // memory-reminder.mjs — Cross-platform hook for agent-gates
-// Reminds agents to save to Memory skill when todos are marked completed.
+// Two reminders, one hook:
+//   1. Memory persistence — when a todo is marked completed.
+//   2. Parallelism (v1.6.1) — when >=3 all-pending todos are created (plan time).
 // Compatible with: OMC (Claude Code), OMO (OpenCode), OMX (Codex)
 //
 // Hook protocol:
@@ -41,6 +43,25 @@ const REMINDER_EN = `You just marked a TODO as completed. Ensure you save key ou
 
 Example: Memory skill → save(category="session", content="...")
 Or update PROGRESS.md with project progress.`;
+
+// Parallelism reminder (v1.6.1): fires once at plan time, when >=3 all-pending
+// todos are created. Teaches the A-vs-B distinction (batch tool calls vs sub-agents)
+// so the agent picks the right parallelism mechanism instead of defaulting to serial.
+const PARALLEL_MIN_TODOS = 3;
+
+const PARALLEL_ZH = `你刚创建了多个 todo。动手前先按 agent-workflow-rules §18 判断哪些互相独立（不同文件、无依赖）：
+- 独立的轻量操作（读/改不同文件、跑独立命令）→ 同一条消息里批量 tool call（机制 A）
+- 独立的重工作流（各自要读多文件 + 跑验证 + 写一片代码）→ 并行派子 agent（机制 B）
+- 有依赖链（A 的输出是 B 的输入）→ 才串行
+
+别默认一件一件做。`;
+
+const PARALLEL_EN = `You just created several todos. Before starting, classify which are independent (different files, no shared input) per agent-workflow-rules §18:
+- Independent light ops (read/edit different files, run independent commands) → batch tool calls in ONE message (mechanism A)
+- Independent heavy workstreams (each reads many files + runs verification + writes code) → dispatch parallel sub-agents (mechanism B)
+- Dependency chain (A's output feeds B) → only then go serial
+
+Do not default to doing them one at a time.`;
 
 // --- Helpers ---
 function safeParse(input) {
@@ -86,6 +107,38 @@ function detectTodoCompleted(payload) {
   return false;
 }
 
+// Extract the todo array from a TodoWrite/TaskCreate payload, across platforms.
+function extractTodos(payload) {
+  if (!payload) return null;
+  // OMO: todo.updated event
+  if (payload.type === 'todo.updated' && Array.isArray(payload.properties?.todos)) {
+    return payload.properties.todos;
+  }
+  // OMC/OMX PostToolUse: tool_input.todos
+  const toolName = String(payload.tool_name || payload.tool || '').toLowerCase();
+  if (/todo|todowrite|task/i.test(toolName)) {
+    const input = payload.tool_input || payload.input || {};
+    if (Array.isArray(input.todos)) return input.todos;
+  }
+  return null;
+}
+
+// Plan-time signal: >=3 todos AND every one EXPLICITLY pending.
+// "all-pending" is the initial-plan fingerprint, not a mid-stream status update,
+// so the reminder fires during planning and goes quiet once work begins (the first
+// in_progress/completed transition makes this return false).
+//
+// Statelessness note: the hook does NOT dedupe across calls — if the platform
+// delivers the same all-pending payload more than once it will nudge each time.
+// In practice a TodoWrite plan write is a single PostToolUse event, so this fires
+// effectively once per plan. We require EXPLICIT status === 'pending' (missing or
+// empty status does NOT count) so malformed/partial payloads can't false-trigger.
+function detectPlanTimeTodos(payload) {
+  const todos = extractTodos(payload);
+  if (!Array.isArray(todos) || todos.length < PARALLEL_MIN_TODOS) return false;
+  return todos.every(t => String(t?.status || '').toLowerCase() === 'pending');
+}
+
 // --- Main ---
 function main() {
   let stdin = '';
@@ -98,14 +151,12 @@ function main() {
   }
 
   const payload = safeParse(stdin);
-  if (!detectTodoCompleted(payload)) {
-    // Not a todo-completed event — no-op
-    process.stdout.write(JSON.stringify({}));
-    process.exit(0);
-  }
 
-  // Compose system reminder
-  const reminder = `<system-reminder>
+  // Two distinct triggers, checked in priority order. Memory persistence wins
+  // when a todo just completed; otherwise check for plan-time parallelism nudge.
+  let reminder = null;
+  if (detectTodoCompleted(payload)) {
+    reminder = `<system-reminder>
 [AGENT-GATES: Memory Persistence Reminder]
 
 ${REMINDER_ZH}
@@ -113,6 +164,20 @@ ${REMINDER_ZH}
 ---
 ${REMINDER_EN}
 </system-reminder>`;
+  } else if (detectPlanTimeTodos(payload)) {
+    reminder = `<system-reminder>
+[AGENT-GATES: Parallelism Reminder]
+
+${PARALLEL_ZH}
+
+---
+${PARALLEL_EN}
+</system-reminder>`;
+  } else {
+    // Neither trigger — no-op
+    process.stdout.write(JSON.stringify({}));
+    process.exit(0);
+  }
 
   // Emit hook output per Claude Code PostToolUse schema.
   // `hookEventName` is REQUIRED — Claude Code validates against it and
