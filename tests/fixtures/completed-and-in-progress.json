@@ -1,0 +1,10 @@
+{
+  "tool_name": "TodoWrite",
+  "tool_input": {
+    "todos": [
+      { "content": "Task A", "status": "completed" },
+      { "content": "Task B", "status": "in_progress" },
+      { "content": "Task C", "status": "pending" }
+    ]
+  }
+}

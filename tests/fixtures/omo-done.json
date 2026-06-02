@@ -1,0 +1,9 @@
+{
+  "type": "todo.updated",
+  "properties": {
+    "todos": [
+      { "content": "Deploy hotfix", "status": "done" },
+      { "content": "Verify", "status": "pending" }
+    ]
+  }
+}
