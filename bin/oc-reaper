@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# oc-reaper — kill orphaned `opencode serve` processes (P1 leak cleanup).
+# Each `opencode run` (without --attach) spawns a random-port headless serve; a hung
+# or abandoned run leaves that serve as an orphan that lingers and stacks up.
+#
+# Reaps a serve ONLY when ALL hold (conservative — when unsure, keep):
+#   - it has a parseable --port
+#   - it is NOT the optional shared-server port (OC_REVIEW_PORT), if set
+#   - it is older than OC_REAPER_MIN_AGE seconds (a young one may be starting up)
+#   - it is still listening (dead ones need no reaping)
+#   - it has NO active client: no ESTABLISHED TCP conn (lsof) AND no matching
+#     `opencode run ... <port>` process
+#
+# DEFAULT DRY-RUN (lists what it would do). Pass --apply to actually kill.
+# opencode serve ignores SIGTERM, so this uses SIGKILL (confirmed empirically).
+# Env: OC_REAPER_MIN_AGE (default 120), OC_REVIEW_PORT (shared port to always keep).
+# Source: https://github.com/mcdowell8023/agent-gates
+set -uo pipefail
+
+APPLY=0
+[[ "${1:-}" == "--apply" ]] && APPLY=1
+MIN_AGE="${OC_REAPER_MIN_AGE:-120}"
+KEEP_PORT="${OC_REVIEW_PORT:-}"
+
+if ! command -v lsof >/dev/null 2>&1; then
+  echo "oc-reaper: lsof not found — connection check unavailable; aborting to stay safe" >&2
+  exit 69   # EX_UNAVAILABLE
+fi
+
+# Portable elapsed-seconds from `ps -o etime=` ([[DD-]HH:]MM:SS) — macOS ps has no
+# `etimes` (raw seconds), only `etime` (formatted). Works on macOS and Linux.
+etime_to_secs() {
+  local e="${1// /}" d=0 h=0 m=0 s=0 a b c
+  [[ -z "$e" ]] && { echo 0; return; }
+  if [[ "$e" == *-* ]]; then d="${e%%-*}"; e="${e#*-}"; fi
+  IFS=: read -r a b c <<< "$e"
+  if [[ -n "${c:-}" ]]; then h="$a"; m="$b"; s="$c"; else m="$a"; s="$b"; fi
+  echo $(( 10#${d:-0}*86400 + 10#${h:-0}*3600 + 10#${m:-0}*60 + 10#${s:-0} ))
+}
+
+reaped=0
+kept=0
+while IFS= read -r pid; do
+  [[ -z "$pid" ]] && continue
+  cmd=$(ps -o command= -p "$pid" 2>/dev/null) || continue
+  port=$(printf '%s' "$cmd" | grep -oE 'port [0-9]+' | awk '{print $2}')
+  [[ -z "$port" ]] && continue
+  if [[ -n "$KEEP_PORT" && "$port" == "$KEEP_PORT" ]]; then kept=$((kept+1)); continue; fi
+  age=$(etime_to_secs "$(ps -o etime= -p "$pid" 2>/dev/null)")
+  if [[ "$age" -lt "$MIN_AGE" ]]; then kept=$((kept+1)); continue; fi
+  # in-use? (conservative: keep if either signal says so)
+  if lsof -nP -iTCP:"$port" -sTCP:ESTABLISHED >/dev/null 2>&1; then kept=$((kept+1)); continue; fi
+  if pgrep -f "opencode run.*${port}" >/dev/null 2>&1; then kept=$((kept+1)); continue; fi
+  # orphan
+  if [[ "$APPLY" -eq 1 ]]; then
+    kill -9 "$pid" 2>/dev/null && echo "reaped serve :$port pid=$pid (age ${age}s)"
+  else
+    echo "[dry-run] would reap serve :$port pid=$pid (age ${age}s, no client)"
+  fi
+  reaped=$((reaped+1))
+done < <(pgrep -f "opencode serve")
+
+echo "---"
+if [[ "$APPLY" -eq 1 ]]; then
+  echo "oc-reaper: reaped $reaped, kept $kept (shared/young/in-use)"
+else
+  echo "oc-reaper: $reaped reapable, $kept kept — rerun with --apply to kill"
+fi

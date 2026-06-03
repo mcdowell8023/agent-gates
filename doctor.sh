@@ -506,6 +506,36 @@ RCEOF
   return 0
 }
 
+# v1.8.0: observe opencode serve leak (detect only — cleanup is oc-reaper's job).
+check_opencode_health() {
+  command -v opencode &>/dev/null || return 0
+  command -v lsof &>/dev/null || { note "opencode serve health: lsof unavailable, skipping"; return 0; }
+  local total orphans=0 pid port
+  total=$(pgrep -f "opencode serve" 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "${total:-0}" -eq 0 ]]; then pass "opencode: no leaked serve processes"; return 0; fi
+  local keep_port="${OC_REVIEW_PORT:-}"
+  while IFS= read -r pid; do
+    [[ -z "$pid" ]] && continue
+    port=$(ps -o command= -p "$pid" 2>/dev/null | grep -oE 'port [0-9]+' | awk '{print $2}')
+    [[ -z "$port" ]] && continue
+    [[ -n "$keep_port" && "$port" == "$keep_port" ]] && continue           # shared server, not an orphan
+    # only count as orphan if OLD (>2min; a just-started serve has no conn yet) AND no client
+    local et secs
+    et=$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')
+    secs=$(awk -F'[:-]' '{n=NF; s=$n; if(n>=2)s+=$(n-1)*60; if(n>=3)s+=$(n-2)*3600; if(n>=4)s+=$(n-3)*86400; print s}' <<<"${et:-0}")
+    [[ "${secs:-0}" -lt 120 ]] && continue
+    lsof -nP -iTCP:"$port" -sTCP:ESTABLISHED >/dev/null 2>&1 || orphans=$((orphans + 1))
+  done < <(pgrep -f "opencode serve" 2>/dev/null)
+  if [[ "$orphans" -ge 1 ]]; then
+    warn "opencode: $orphans/$total serve process(es) orphaned (no client) — run ~/.agent-gates/bin/oc-reaper --apply to clean"
+  elif [[ "$total" -ge 3 ]]; then
+    warn "opencode: $total serve processes stacking (none orphaned now) — watch for leaks; oc-reaper available"
+  else
+    pass "opencode serve health: $total active, 0 orphaned"
+  fi
+  return 0
+}
+
 # --- Main ---
 main() {
   while [[ $# -gt 0 ]]; do
@@ -558,6 +588,7 @@ main() {
   check_bdd_features_dir
   check_bdd_step_definitions
   check_cross_review_capability
+  check_opencode_health
 
   echo ""
   if (( ${#PASS[@]} > 0 )); then
