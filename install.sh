@@ -474,6 +474,17 @@ install_hook_files() {
     info "Installed: doctor.sh"
   fi
 
+  # v1.8.0: opencode cross-review helpers (oc-review retry-on-empty, oc-reaper leak cleanup)
+  if [[ -d "$REPO_DIR/bin" ]]; then
+    mkdir -p "$INSTALL_DIR/bin"
+    for b in "$REPO_DIR"/bin/*; do
+      [[ -f "$b" ]] || continue
+      cp "$b" "$INSTALL_DIR/bin/$(basename "$b")"
+      chmod +x "$INSTALL_DIR/bin/$(basename "$b")"
+      info "Installed: bin/$(basename "$b")"
+    done
+  fi
+
   if [[ -f "$REPO_DIR/hooks/shell/codegraph-chpwd.zsh" ]]; then
     mkdir -p "$INSTALL_DIR/hooks/shell"
     cp "$REPO_DIR/hooks/shell/codegraph-chpwd.zsh" "$INSTALL_DIR/hooks/shell/codegraph-chpwd.zsh"

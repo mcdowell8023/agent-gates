@@ -386,13 +386,17 @@ Routes are tried top-to-bottom. A higher-priority route that is available and he
 
 | Priority | Route | Command Pattern | Heterogeneous? |
 | --- | --- | --- | --- |
-| 1 (→ L3) | opencode CLI | `opencode run -m github-copilot/gpt-5.5 --dir <workdir> "$(cat <prompt>)" > <result>` | Yes |
-| 2 (→ L1) | codex CLI | `codex review --base <main-branch> --title "Cross-check: <feature>"` or `codex exec "<prompt>"` | Yes |
+| 1 (→ L3) | opencode CLI | `~/.agent-gates/bin/oc-review run -m github-copilot/gpt-5.5 --dir <workdir> "$(cat <prompt>)" > <result>` | Yes |
+| 2 (→ L1) | codex CLI | `codex exec -s read-only --skip-git-repo-check -C <workdir> < <prompt-file>` (prompt via **stdin**) | Yes |
 | 3 (→ L1) | OMC codex plugin | Via `codex:codex-rescue` agent or `/ask codex` | Yes |
 | 4 | Paseo | `create_agent provider="codex/gpt-5.4" prompt="<review>" background=true` | Yes |
 | 5 (→ L0) | Agent tool (ultimate fallback) | Claude Code Agent tool — same-model sub-agent | **No** |
 
 Note: L0/L1/L2/L3 refer to capability levels set by `doctor.sh`, not route priority numbers. L3 = opencode + codex, L2 = opencode, L1 = codex or OMC plugin, L0 = none.
+
+**Route 1 — use `oc-review`, not bare `opencode run`** (v1.8.0): `~/.agent-gates/bin/oc-review` wraps `opencode run` with **retry-on-empty** (opencode intermittently exits 0 with empty output — the "P2" flake). On persistent empty output it exits **75** with an `oc-review:`-prefixed stderr line → treat as route failure and fall through to route 2 (codex). It does NOT spawn or manage a shared server; per-run `opencode serve` leaks are swept separately by `~/.agent-gates/bin/oc-reaper --apply` (also surfaced by `doctor.sh` → `check_opencode_health`).
+
+**Route 2 — codex prompt MUST go via stdin** (`< prompt-file`), NOT as a positional arg. `codex exec "..."` blocks on "Reading additional input from stdin..." in non-TTY/background contexts. `-s read-only` sandboxes the reviewer so it physically cannot modify files.
 
 L0 is always available but does NOT satisfy the heterogeneous-model requirement of §1.
 

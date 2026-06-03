@@ -2,6 +2,30 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## [1.8.0] - 2026-06-02
+
+### Added (opencode 跨模型审查可靠性 — oc-review + oc-reaper)
+
+- **`bin/oc-review`** — `opencode run` 的 retry-on-empty 包装。opencode 偶发 exit 0 但**空输出**(裸 run 和 --attach 都犯,POC 实证),导致审查无声失败。检测空输出→重试(默认 +2 次);仍空则 exit **75 (EX_TEMPFAIL)** + `oc-review:` 前缀 stderr,调用方据此 fallback codex(§8)。**治 P2 卡死**。TDD 9 用例(mock opencode 模拟空输出)。
+- **`bin/oc-reaper`** — 清孤儿 `opencode serve`。opencode run 每次起随机端口 serve,hung run 留孤儿堆叠(实测 6 个)。多信号判定(端口/年龄>2min/存活/无 ESTABLISHED 连接/无匹配 run),**默认 dry-run**,`--apply` 才 SIGKILL(opencode serve 不响应 SIGTERM,POC 实证)。**治 P1 泄漏**。真实数据验证: 现存 5 孤儿正确识别、1 保留、dry-run 不杀。
+- **`install.sh`** 部署 `bin/*` → `~/.agent-gates/bin/`。
+- **`doctor.sh` check_opencode_health** — 检测孤儿 serve 数(无 ESTABLISHED 连接),≥1 孤儿或 ≥3 堆叠 → warn 提示跑 oc-reaper。只检测不清理。
+- **`agent-review-protocol` §8** — route 1 opencode 改用 `oc-review`(retry + exit 75 fallback);route 2 codex 明确 **prompt 走 stdin**(`codex exec -s read-only < prompt`),不要当位置参数(否则卡 "Reading additional input from stdin")。
+
+### Why / 方案历程
+
+- 根因(实证): opencode run 每次起随机端口 serve、不复用(`--port` 默认 0)→ 并发堆叠 + hang 留孤儿(P1);run 偶发空输出(P2)。
+- 方案经 **gpt-5.5 审查(REVISE)+ codex 审查(PASS-with-nits)** 两轮,关键决策: **POC 实证共享 server + --attach 能消 P1 堆叠但不解决 P2 空输出** → 放弃共享 server 复杂度(锁/多会话/单点),简化为 **retry(治 P2)+ reaper(治 P1)**(§10 反过度设计)。
+- 方案文档: `~/AgentWorkspace/docs/research/opencode-serve-leak-fix.md`(v0.3)。
+- 诚实边界: P2 根因仍未完全证实(疑似 opencode 自身 flake),retry 是症状级缓解非根治;reaper 的 lsof/etime 已做 macOS/Linux 可移植处理。
+
+### codex 交叉审查 VERDICT: REVISE → 已修(讽刺旁证: opencode 审查这轮第 3 次卡死,实际走了 §8 codex fallback)
+
+- **#1(阻塞)oc-review 不再吞 opencode 非零退出**: 原 `|| true` 会让"非零+有输出"误判成功、"非零+空"误报 P2。改为捕获 rc + stderr,成功 = rc==0 且非空;非零退出单独报错并透出 opencode stderr。补 T4/T5(非零退出 / 非零+输出不当成功),oc-review 测试 9→14。
+- **#4 doctor check_opencode_health 加 age 门槛 + keep-port**: 只看"无 ESTABLISHED"会把刚起/idle serve 误判孤儿;现加 >2min 年龄 + 跳过 OC_REVIEW_PORT。实测正确报 5/6 孤儿(与 reaper 一致)。
+- **#5 §8 路径统一**: route 1 表格用全路径 `~/.agent-gates/bin/oc-review`(未加 PATH)。
+- #2(reaper pgrep 较粗)为低风险且偏保守(宁可不杀在用的),记为已知小项。
+
 ## [1.7.2] - 2026-06-02
 
 ### Fixed (v1.7.1 banner 回归 — 显示 "v?")

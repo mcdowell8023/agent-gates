@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# oc-review — opencode run with retry-on-empty.
+# Mitigates the "P2" failure mode where `opencode run` exits 0 but produces EMPTY
+# output (observed in both bare and --attach modes). Detects empty output and retries;
+# if still empty after retries, exits 75 (EX_TEMPFAIL) with an `oc-review:`-prefixed
+# stderr line so the caller can fall back to a different reviewer (e.g. codex) per
+# agent-review-protocol §8 — WITHOUT relying on a bare exit code that could collide
+# with opencode's own.
+#
+# Usage:  oc-review run -m <model> --dir <wd> "<prompt>"   (args passed straight to `opencode run`)
+# Env:
+#   OC_REVIEW_RETRIES   extra attempts after the first (default 2 → up to 3 total)
+#   OC_REVIEW_OPENCODE  opencode binary (default "opencode"; overridable for tests)
+# Source: https://github.com/mcdowell8023/agent-gates
+set -uo pipefail
+
+RETRIES="${OC_REVIEW_RETRIES:-2}"
+OPENCODE="${OC_REVIEW_OPENCODE:-opencode}"
+
+tmp=$(mktemp); errtmp=$(mktemp)
+trap 'rm -f "$tmp" "$errtmp"' EXIT
+
+attempt=0
+while :; do
+  attempt=$((attempt + 1))
+  # Capture BOTH opencode's exit code and stderr — do NOT `|| true` (that would hide
+  # a real error: non-zero+output would look like success, non-zero+empty would be
+  # misreported as the P2 empty-flake).
+  "$OPENCODE" "$@" > "$tmp" 2>"$errtmp"
+  rc=$?
+
+  has_output=0
+  if [[ -s "$tmp" ]] && grep -q '[^[:space:]]' "$tmp"; then has_output=1; fi
+
+  # Success = clean exit AND meaningful output. (The P2 flake is rc==0 + empty.)
+  if [[ "$rc" -eq 0 && "$has_output" -eq 1 ]]; then
+    cat "$tmp"
+    exit 0
+  fi
+
+  if [[ "$attempt" -gt "$RETRIES" ]]; then
+    if [[ "$rc" -ne 0 ]]; then
+      echo "oc-review: opencode exited $rc after $attempt attempt(s)$([[ $has_output -eq 1 ]] && echo ' (partial output discarded)')" >&2
+      [[ -s "$errtmp" ]] && sed 's/^/oc-review: opencode stderr: /' "$errtmp" >&2
+    else
+      echo "oc-review: opencode produced empty output after $attempt attempt(s) — likely the P2 flake; caller should fall back (e.g. codex) per agent-review-protocol §8" >&2
+    fi
+    exit 75   # EX_TEMPFAIL — caller should fall back to a different reviewer
+  fi
+  if [[ "$rc" -ne 0 ]]; then
+    echo "oc-review: opencode exit $rc, retrying ($attempt/$RETRIES)..." >&2
+  else
+    echo "oc-review: empty output, retrying ($attempt/$RETRIES)..." >&2
+  fi
+done
