@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# agent-gates-migrate — bulk-migrate per-project gates from the old frozen full-copy
+# to the v1.9.0 thin shim, so they auto-upgrade with the global authority from now on.
+#
+# Scans the given root dir(s) for projects with .githooks/agent-quality-gate.sh, and
+# replaces any that are a full copy (not yet a shim) with the shim. This is a SURGICAL
+# gate swap — it does NOT run a full init-project-gates (won't touch AGENTS.md /
+# CLAUDE.md). One-time migration to end the per-project manual-upgrade era.
+#
+# DEFAULT DRY-RUN. Pass --apply to actually replace. After --apply, review + commit the
+# .githooks change in each repo (it's a tracked file).
+#
+# Usage:  agent-gates-migrate [--apply] <root-dir> [<root-dir> ...]
+# Env:    AGENT_GATES_SHIM_SRC  shim source (default ~/.agent-gates/hooks/git/gate-shim.sh)
+# Source: https://github.com/mcdowell8023/agent-gates
+set -uo pipefail
+
+APPLY=0
+ROOTS=()
+for a in "$@"; do
+  case "$a" in
+    --apply) APPLY=1 ;;
+    -h|--help) echo "usage: agent-gates-migrate [--apply] <root-dir> [<root-dir> ...]"; exit 0 ;;
+    *) ROOTS+=("$a") ;;
+  esac
+done
+
+SHIM_SRC="${AGENT_GATES_SHIM_SRC:-$HOME/.agent-gates/hooks/git/gate-shim.sh}"
+SHIM_MARKER="agent-gates per-project gate shim"
+
+if [[ ${#ROOTS[@]} -eq 0 ]]; then
+  echo "agent-gates-migrate: no root dir given." >&2
+  echo "usage: agent-gates-migrate [--apply] <root-dir> [<root-dir> ...]" >&2
+  exit 64   # EX_USAGE
+fi
+if [[ ! -f "$SHIM_SRC" ]]; then
+  echo "agent-gates-migrate: shim source not found at $SHIM_SRC — install/upgrade agent-gates first" >&2
+  exit 69   # EX_UNAVAILABLE
+fi
+
+migrated=0
+already=0
+scanned=0
+unknown=0
+for root in "${ROOTS[@]}"; do
+  if [[ ! -d "$root" ]]; then
+    echo "skip (not a directory): $root" >&2
+    continue
+  fi
+  while IFS= read -r gate; do
+    [[ -z "$gate" ]] && continue
+    scanned=$((scanned + 1))
+    proj=$(dirname "$(dirname "$gate")")
+    if grep -q "$SHIM_MARKER" "$gate" 2>/dev/null; then
+      already=$((already + 1))
+      continue
+    fi
+    # Only migrate files POSITIVELY identified as an old agent-gates gate. A file at
+    # .githooks/agent-quality-gate.sh that is NOT a recognizable agent-gates gate
+    # (e.g. a custom/hand-written hook that happens to share the name) is left ALONE —
+    # never overwrite something we didn't author.
+    if ! grep -qE 'Agent Quality Gate|GATE_VERSION|mcdowell8023/agent-gates' "$gate" 2>/dev/null; then
+      unknown=$((unknown + 1))
+      echo "skip (not a recognizable agent-gates gate, untouched): $proj" >&2
+      continue
+    fi
+    if [[ "$APPLY" -eq 1 ]]; then
+      if cp "$SHIM_SRC" "$gate" && chmod +x "$gate"; then
+        echo "migrated: $proj"
+      else
+        echo "FAILED:   $proj" >&2
+        continue
+      fi
+    else
+      local_ver=$(grep -oE 'GATE_VERSION="[^"]*"|Agent Quality Gate v[0-9.]+' "$gate" 2>/dev/null | head -1)
+      echo "[dry-run] would migrate: $proj  (current: ${local_ver:-unknown})"
+    fi
+    migrated=$((migrated + 1))
+  done < <(find "$root" -type f -path '*/.githooks/agent-quality-gate.sh' 2>/dev/null)
+done
+
+echo "---"
+if [[ "$APPLY" -eq 1 ]]; then
+  echo "agent-gates-migrate: migrated $migrated, already-shim $already, skipped-unknown $unknown (scanned $scanned)."
+  [[ "$migrated" -gt 0 ]] && echo "  → review + commit the .githooks/agent-quality-gate.sh change in each migrated repo."
+else
+  echo "agent-gates-migrate: $migrated to migrate, $already already shim, $unknown unknown-skipped (scanned $scanned). Rerun with --apply to migrate."
+fi

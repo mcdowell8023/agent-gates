@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# agent-gates-version — show the GLOBAL gate authority version (= the version every
+# v1.9.0-shim project runs automatically). Optionally pass project root dir(s) to list
+# each project's gate status (shim → auto-upgrading, or STALE → needs migrate).
+#
+# Usage:  agent-gates-version [<root-dir> ...]
+# Env:    AGENT_GATES_DIR  install dir (default ~/.agent-gates)
+# Source: https://github.com/mcdowell8023/agent-gates
+set -uo pipefail
+
+INSTALL_DIR="${AGENT_GATES_DIR:-$HOME/.agent-gates}"
+VFILE="$INSTALL_DIR/.version"
+GATE="$INSTALL_DIR/hooks/git/agent-quality-gate.sh"
+SHIM_MARKER="agent-gates per-project gate shim"
+
+if [[ ! -f "$VFILE" ]]; then
+  echo "agent-gates: not installed (no $VFILE) — run install.sh" >&2
+  exit 69   # EX_UNAVAILABLE
+fi
+
+ver=$(tr -d '[:space:]' < "$VFILE")
+echo "Global gate authority: v$ver"
+
+# The authority gate must actually exist + be executable, else shim'd projects FALL
+# THROUGH (the shim's "authority missing → exit 0" path) and enforce NOTHING.
+if [[ ! -x "$GATE" ]]; then
+  echo "  ⚠ authority gate missing or not executable at $GATE"
+  echo "    → shim'd projects currently ENFORCE NOTHING (they fall through). Run install.sh --upgrade."
+else
+  stamped=$(grep -oE 'GATE_VERSION="[^"]*"' "$GATE" 2>/dev/null | head -1 | sed 's/.*="//;s/"//')
+  if [[ -n "$stamped" && "$stamped" != "$ver" ]]; then
+    echo "  ⚠ authority gate stamped v$stamped != .version v$ver — run install.sh --upgrade"
+  fi
+  echo "  (every project using the v1.9.0 shim runs this version automatically)"
+fi
+
+# Optional per-project status
+if [[ $# -gt 0 ]]; then
+  echo ""
+  echo "Per-project gate status:"
+  local_found=0
+  for root in "$@"; do
+    [[ -d "$root" ]] || { echo "  skip (not a dir): $root"; continue; }
+    while IFS= read -r gate; do
+      [[ -z "$gate" ]] && continue
+      local_found=1
+      proj=$(dirname "$(dirname "$gate")")
+      if grep -q "$SHIM_MARKER" "$gate" 2>/dev/null; then
+        echo "  [shim → v$ver]  $proj"
+      else
+        lv=$(grep -oE 'Agent Quality Gate v[0-9.]+|GATE_VERSION="[^"]*"' "$gate" 2>/dev/null | head -1)
+        echo "  [STALE ${lv:-?} — run agent-gates-migrate --apply]  $proj"
+      fi
+    done < <(find "$root" -type f -path '*/.githooks/agent-quality-gate.sh' 2>/dev/null)
+  done
+  [[ "$local_found" -eq 0 ]] && echo "  (no init'd projects found under the given root(s))"
+fi

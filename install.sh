@@ -463,10 +463,17 @@ install_hook_files() {
   sed "s/__AGENT_GATES_VERSION__/${gate_version}/g" \
     "$REPO_DIR/hooks/git/agent-quality-gate.sh" > "$INSTALL_DIR/hooks/git/agent-quality-gate.sh"
   chmod +x "$INSTALL_DIR/hooks/git/agent-quality-gate.sh"
+  # v1.9.0: deploy the per-project shim source. init-project-gates writes this (not a
+  # full copy) into each project's .githooks/, so projects auto-upgrade with the authority.
+  if [[ -f "$REPO_DIR/hooks/git/gate-shim.sh" ]]; then
+    cp "$REPO_DIR/hooks/git/gate-shim.sh" "$INSTALL_DIR/hooks/git/gate-shim.sh"
+    chmod +x "$INSTALL_DIR/hooks/git/gate-shim.sh"
+  fi
   cp "$REPO_DIR/.version" "$INSTALL_DIR/.version" 2>/dev/null || true
 
   info "Installed: memory-reminder.mjs"
   info "Installed: agent-quality-gate.sh"
+  [[ -f "$INSTALL_DIR/hooks/git/gate-shim.sh" ]] && info "Installed: gate-shim.sh (per-project shim source)"
 
   if [[ -f "$REPO_DIR/doctor.sh" ]]; then
     cp "$REPO_DIR/doctor.sh" "$INSTALL_DIR/doctor.sh"
