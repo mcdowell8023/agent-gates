@@ -338,6 +338,23 @@ v1.9.0 起,项目级 `.githooks/agent-quality-gate.sh` 是**瘦 shim**,委派全
 
 迁移后,在每个仓 review + commit `.githooks/agent-quality-gate.sh` 的改动。之后它们就自动升级了。
 
+### 一键升级 + 迁移（把这段粘给你的 agent）
+
+不想自己敲命令？把下面这段粘给你的编码 agent。安装器是幂等的——**没装会自动安装，已装会升级**——然后把所有已初始化项目迁移到自动跟随的 shim。
+
+> **任务**：在本机安装或升级 agent-gates，然后把所有已初始化项目迁移到 v1.9.0 shim，让它们自动跟随后续升级。全程遵守 agent-gates 门禁纪律，不要用 `--no-verify`。
+>
+> **项目根目录**（发送前先填，空格分隔）：`ROOTS="$HOME/Projects $HOME/wb/projects"`。不确定就先问我扫哪些根。
+>
+> 1. **安装或升级**（同一条命令两用——没装则装，已装则升）：`curl -fsSL https://raw.githubusercontent.com/mcdowell8023/agent-gates/main/install.sh | bash`。然后确认 `cat ~/.agent-gates/.version` 和 `~/.agent-gates/bin/agent-gates-version`。（没有 `curl`？用 `git clone https://github.com/mcdowell8023/agent-gates && cd agent-gates && ./install.sh`。）
+> 2. **扫描**门禁状态（只读）：`~/.agent-gates/bin/agent-gates-version $ROOTS`。`[shim → vX]` = 已自动跟随；`[STALE …]` = 老的完整拷贝或未识别 hook（第 3 步会区分）。
+> 3. **dry-run** 迁移（不动任何文件）：`~/.agent-gates/bin/agent-gates-migrate $ROOTS`。只迁移可识别的 agent-gates 门禁；手写的同名 hook 会被跳过并报告为 `unknown`。核一眼清单。
+> 4. **执行**：`~/.agent-gates/bin/agent-gates-migrate --apply $ROOTS`
+> 5. 迁移会改写每个仓的 `.githooks/agent-quality-gate.sh`（on-disk 即刻生效）。**不要 push。** 报告哪些仓现在有未提交的 `.githooks` 改动，让我按各仓规矩 review + commit。
+> 6. **报告**：全局版本、迁移了哪些项目、还有哪些 STALE 或被 `unknown` 跳过。
+>
+> 之后每个迁移过的项目都会自动跟随后续升级——下次你只需跑第 1 步。
+
 ### 其他升级须知
 - **备份会累积。** 每次检测到用户修改的升级都会留一个新的 `SKILL.md.bak.*` 文件。合并完编辑后跑 `./uninstall.sh --purge-backups`（如果只想清备份就配合 `--keep-skills`）来移除它们。
 - **OMO native（OpenCode）的 hook 注册是手动的。** 安装器检测到 `~/.config/opencode/` 时，打印要加到 `~/.config/opencode/hooks.json` `.hooks.PostToolUse[]` 下的 JSON 条目。`doctor.sh` 检查同样的路径/schema；如果它报告 OMO hook 缺失，请手动添加（完整 JSON 形态见 `docs/platform-hooks.md` → OMO）。注意：如果你的 OMO 跑在 Claude Code 上（而不是 OpenCode），OMC 的 `settings.json` 注册已经覆盖你 —— 无需手动步骤。
