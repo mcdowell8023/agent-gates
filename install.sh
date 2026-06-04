@@ -406,7 +406,7 @@ install_skills() {
 
     if [[ ! -d "$src" ]]; then
       warn "Skill not found in repo: $skill (skipped)"
-      ((skipped++))
+      skipped=$((skipped + 1))
       continue
     fi
 
@@ -422,7 +422,7 @@ install_skills() {
       cp -R "$src" "$dst"
       info "Installed: $skill"
     fi
-    ((installed++))
+    installed=$((installed + 1))
   done
 
   info "$installed skills installed/updated, $skipped skipped"
