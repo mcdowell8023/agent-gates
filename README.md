@@ -338,6 +338,23 @@ Since v1.9.0 the per-project `.githooks/agent-quality-gate.sh` is a **thin shim*
 
 After migration, review + commit the `.githooks/agent-quality-gate.sh` change in each repo. From then on they auto-upgrade.
 
+### One-command upgrade + migrate (paste this to your agent)
+
+Don't want to run the steps yourself? Paste the block below to your coding agent. The installer is idempotent — it **installs if agent-gates is missing, upgrades if it's already there** — then every initialized project is migrated to the auto-following shim.
+
+> **Task:** Install or upgrade agent-gates on this machine, then migrate all initialized projects to the v1.9.0 shim so they auto-follow future upgrades. Follow agent-gates discipline — never use `--no-verify`.
+>
+> **Project roots** (fill in before sending, space-separated): `ROOTS="$HOME/Projects $HOME/wb/projects"`. If unsure, ask me which roots to scan.
+>
+> 1. **Install-or-upgrade** (one command does both — installs if missing, upgrades if present): `curl -fsSL https://raw.githubusercontent.com/mcdowell8023/agent-gates/main/install.sh | bash`. Then confirm with `cat ~/.agent-gates/.version` and `~/.agent-gates/bin/agent-gates-version`. (No `curl`? `git clone https://github.com/mcdowell8023/agent-gates && cd agent-gates && ./install.sh`.)
+> 2. **Scan** gate status, read-only: `~/.agent-gates/bin/agent-gates-version $ROOTS`. `[shim → vX]` = already auto-following; `[STALE …]` = old full-copy or unrecognized hook (step 3 will sort out which).
+> 3. **Dry-run** the migration (touches nothing): `~/.agent-gates/bin/agent-gates-migrate $ROOTS`. Only recognizable agent-gates gates are migrated; custom same-named hooks are skipped and reported as `unknown`. Eyeball the list.
+> 4. **Apply**: `~/.agent-gates/bin/agent-gates-migrate --apply $ROOTS`
+> 5. The migration rewrites each repo's `.githooks/agent-quality-gate.sh` (effective on disk immediately). **Do NOT push.** Report which repos now have an uncommitted `.githooks` change so I can review + commit per each repo's own rules.
+> 6. **Report**: the global version, which projects were migrated, and anything still STALE or `unknown`-skipped.
+>
+> After this, every migrated project auto-follows future upgrades — next time you only run step 1.
+
 ### Other upgrade notes
 - **Backups accumulate.** Each upgrade that detects user changes leaves a new `SKILL.md.bak.*` file. Run `./uninstall.sh --purge-backups` (combined with `--keep-skills` if you only want to clean backups) to remove them after merging your edits.
 - **OMO native (OpenCode) hook registration is manual.** When the installer detects `~/.config/opencode/`, it prints the JSON entry to add under `~/.config/opencode/hooks.json` `.hooks.PostToolUse[]`. `doctor.sh` checks the same path/schema; if it reports the OMO hook as missing, add the entry by hand (see `docs/platform-hooks.md` → OMO for the full JSON shape). Note: if you run OMO on Claude Code (not on OpenCode), the OMC `settings.json` registration already covers you — no manual step needed.
