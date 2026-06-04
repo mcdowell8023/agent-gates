@@ -2,6 +2,30 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## [1.9.0] - 2026-06-03
+
+### Added (全局升级 — 终结"每个项目手动升级"的黑暗时刻)
+
+- **`hooks/git/gate-shim.sh` 瘦 shim** — per-project `.githooks/agent-quality-gate.sh` 从"冻结完整拷贝"改为 ~10 行壳,`exec` 全局权威 gate。**`install.sh --upgrade` 一次升级所有 shim'd 项目**,不再逐个 re-init。权威缺失(没装 agent-gates)则放行不挡 commit(契合 AGENT_MODE=1 "humans pass through")。`AGENT_GATES_GATE` 可覆盖(测试)。TDD 5 用例。
+- **`bin/agent-gates-migrate`** — 扫描指定根目录(可多个),把老的完整拷贝 gate 批量换成 shim。默认 dry-run,`--apply` 才替换(只换 gate,不做完整 re-init,不碰 AGENTS.md/CLAUDE.md)。逐项目报告。TDD 8 用例。
+- **`bin/agent-gates-version`** — 查看全局门禁版本(= 所有 shim 项目实际跑的版本);传项目根目录则列各项目 shim/stale 状态 + stamp drift 提醒。TDD 6 用例。
+- **`install.sh`** 部署 gate-shim.sh → `~/.agent-gates/hooks/git/`;bin/* 自动部署 migrate + version。
+- **`init-project-gates` SKILL.md** 改为写 shim(不再完整拷贝)+ 迁移/版本命令说明。
+
+### Why / 背景
+
+- 痛点(用户实测): per-project gate 是冻结拷贝,发新版后每个项目都要手动 re-init,tenant-app 卡在 v1.3 裸奔。用户预期"全局升级 + reload 即可"——五个部件里只有 gate 不满足,v1.9.0 把它补齐。
+- 决策: 只换 gate 成 shim(外科手术),不批量跑完整 re-init(避免覆盖手改的 AGENTS.md/CLAUDE.md)。
+- trade-off: shim 后 gate 逻辑不再 commit 进项目仓(只剩壳),依赖 ~/.agent-gates;对个人用法全是好处,团队仓队友需装 agent-gates(没装则放行)。
+- 迁移老项目: `~/.agent-gates/bin/agent-gates-migrate --apply <root>` 一次清存量。
+
+### codex 交叉审查 VERDICT: REVISE → 已修
+
+- **#2 migrate 防误删**: 原来只靠 shim marker 排除,会覆盖任何同名文件 → 改为**正向指纹**(必须含 `Agent Quality Gate`/`GATE_VERSION`/repo URL 才迁移),unknown 同名 hook(如手写的自定义 pre-commit)一律 skip 不碰。补 T5(自定义 hook 不被覆盖)。
+- **#3 version 误报**: `.version` 在就报全局版本,但权威 gate 缺失/不可执行时 shim 实际放行 → 现检查 `$GATE` 存在+可执行,缺失则 WARN "shim 项目当前不强制任何东西"。补 T5(authority 缺失告警)。
+- **#6 测试缺口**: 补 shim 参数含空格(T4)、migrate unknown-hook(T5)、version authority-missing(T5)。新增脚本测试 19→24。
+- 全套件 124 全绿。
+
 ## [1.8.0] - 2026-06-02
 
 ### Added (opencode 跨模型审查可靠性 — oc-review + oc-reaper)

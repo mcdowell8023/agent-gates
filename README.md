@@ -131,14 +131,29 @@ While the agent works inside a session, agent-gates automatically:
 ~/.agent-gates/doctor.sh --no-network  # Offline mode, skip remote version comparison
 ```
 
-## What's New in v1.6.0
+## What's New
 
-**Cross-review capability detection and platform-adaptive routing** — agent-gates now detects which heterogeneous review tools are available on your system and routes cross-review work accordingly.
+### v1.9.0 — Global upgrade (per-project gates auto-upgrade)
 
-- **Capability levels (L0--L3)**: `install.sh` and `doctor.sh` probe for opencode CLI, codex CLI, OMC codex plugin, and Paseo, then compute a capability level. Results are persisted in `~/.agent-gates/review-capability.json` so review-time routing is instant (no runtime detection).
-- **Platform-adaptive review routing (§8)**: `agent-review-protocol` reads `review-capability.json` and routes reviews through a waterfall: opencode → codex → OMC codex plugin → Paseo → agent-tool (L0 fallback). Includes timeout handling, environment adaptation, and an optional `REQUIRE_HETEROGENEOUS=1` strict mode.
-- **Review prompt templates (§9)**: Pre-built Spec Review / Quality Review / Cross-Check prompt templates shipped in `agent-review-protocol`, eliminating "sub-agent doesn't know what to do" problems.
-- **Environment detection**: CI, Windows, WSL, and container environments are detected and recorded, allowing review routing to adapt to constrained environments.
+The per-project gate is now a **thin shim** that delegates to the global authority, so `install.sh --upgrade` upgrades **every project at once** — no more re-running `init project gates` in each repo on every release.
+
+- **`hooks/git/gate-shim.sh`**: each project's `.githooks/agent-quality-gate.sh` is ~10 lines that `exec` the global gate (`~/.agent-gates/hooks/git/agent-quality-gate.sh`). If agent-gates isn't installed, the shim does NOT block commits (consistent with the `AGENT_MODE=1` "humans pass through" design).
+- **`agent-gates-migrate`**: scan project root(s) and bulk-migrate old frozen-copy gates to the shim (default dry-run; `--apply` to act).
+- **`agent-gates-version`**: show the global gate version (= what every shim'd project runs); pass project roots to list per-project shim/stale status.
+
+### v1.8.0 — opencode cross-review reliability
+
+- **`oc-review`**: wraps `opencode run` with retry-on-empty (opencode intermittently exits 0 with empty output); on persistent failure exits 75 so the caller falls back to codex.
+- **`oc-reaper`**: cleans orphaned `opencode serve` processes (default dry-run; `--apply`).
+- `doctor.sh` → `check_opencode_health` surfaces leaked serves.
+
+### v1.7.0 — heterogeneous-review enforcement
+
+- **Gate 2b**: on a machine that supports heterogeneous review (L1+), a same-model or unmarked review is **blocked** — the review file must carry `<!-- REVIEW_LEVEL: Lx -->` proving a different model was used. (Catches "Opus reviewing Opus" self-approval.) `SKIP_HETERO_CHECK=1` escape hatch.
+
+### v1.6.0 — cross-review capability detection + platform-adaptive routing
+
+- **Capability levels (L0--L3)** persisted in `~/.agent-gates/review-capability.json`; **platform-adaptive routing (§8)** waterfall (opencode → codex → OMC plugin → Paseo → agent-tool); **review prompt templates (§9)**; CI/Windows/WSL/container detection.
 
 ## What's Included
 
@@ -156,8 +171,18 @@ While the agent works inside a session, agent-gates automatically:
 
 | Hook | Type | Trigger | Enforcement |
 |------|------|---------|-------------|
-| `agent-quality-gate.sh` | Git pre-commit | Agent commits (`AGENT_MODE=1`) | Test files + review evidence |
-| `memory-reminder.mjs` | Platform PostToolUse | Todo marked completed | Memory skill save reminder |
+| `agent-quality-gate.sh` | Git pre-commit | Agent commits (`AGENT_MODE=1`) | Test files + review evidence + heterogeneous-review (Gate 2b) |
+| `memory-reminder.mjs` | Platform PostToolUse | Todo completed / ≥3 plan-time todos | Memory save reminder + parallelism reminder |
+| `gate-shim.sh` | Per-project hook source | Installed into `.githooks/` | Delegates to the global authority gate (v1.9.0+) |
+
+### Commands (`~/.agent-gates/bin/`)
+
+| Command | Purpose |
+|---------|---------|
+| `oc-review run -m <model> --dir <wd> "<prompt>"` | opencode cross-review with retry-on-empty; exits 75 → caller falls back to codex |
+| `oc-reaper [--apply]` | clean orphaned `opencode serve` processes (default dry-run) |
+| `agent-gates-migrate [--apply] <root>...` | bulk-migrate old per-project gates to the v1.9.0 shim |
+| `agent-gates-version [<root>...]` | show the global gate version; list per-project shim/stale status |
 
 ### Convention: `.agent/` Directory
 
@@ -300,9 +325,20 @@ What the installer does on upgrade:
 - **Backs up locally-modified `SKILL.md` files** as `SKILL.md.bak.<timestamp>` before overwriting, and lists them in the final summary.
 - **Idempotent hook registration**: existing `hooks.json` is merged via `jq` without duplicates. If `jq` is missing, the installer prints the command to install it and the manual JSON entry to add.
 
-### Upgrade limitations to know about
+### Per-project gates auto-upgrade (v1.9.0+)
 
-- **Per-project hook is NOT auto-upgraded.** Each project's `.githooks/agent-quality-gate.sh` (with `pre-commit` symlinked to it) is a one-time copy made by `init-project-gates`. After upgrading agent-gates globally, re-run `init project gates` in each initialized repo to sync the latest hook.
+Since v1.9.0 the per-project `.githooks/agent-quality-gate.sh` is a **thin shim** that delegates to the global authority gate. So **upgrading agent-gates globally upgrades every shim'd project at once** — no per-project re-init needed. Verify with `agent-gates-version <project-root>`.
+
+**Migrating pre-v1.9.0 projects (one-time):** projects initialized before v1.9.0 still carry a frozen full-copy gate (it won't auto-upgrade). Migrate them in one shot:
+
+```bash
+~/.agent-gates/bin/agent-gates-migrate <your-project-root>          # dry-run: list stale projects
+~/.agent-gates/bin/agent-gates-migrate --apply <your-project-root>  # swap them to the shim
+```
+
+After migration, review + commit the `.githooks/agent-quality-gate.sh` change in each repo. From then on they auto-upgrade.
+
+### Other upgrade notes
 - **Backups accumulate.** Each upgrade that detects user changes leaves a new `SKILL.md.bak.*` file. Run `./uninstall.sh --purge-backups` (combined with `--keep-skills` if you only want to clean backups) to remove them after merging your edits.
 - **OMO native (OpenCode) hook registration is manual.** When the installer detects `~/.config/opencode/`, it prints the JSON entry to add under `~/.config/opencode/hooks.json` `.hooks.PostToolUse[]`. `doctor.sh` checks the same path/schema; if it reports the OMO hook as missing, add the entry by hand (see `docs/platform-hooks.md` → OMO for the full JSON shape). Note: if you run OMO on Claude Code (not on OpenCode), the OMC `settings.json` registration already covers you — no manual step needed.
 - **No automatic skill migration.** If a future version renames or restructures a skill directory, you may need to manually clean up the old layout — the installer only updates known skill names.

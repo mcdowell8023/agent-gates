@@ -364,23 +364,28 @@ CodeGraph:
 人类开发者不受影响。
 ```
 
-## Hook Script
+## Hook Script (v1.9.0+: install the shim, not a full copy)
 
-The following is the complete hook script to write to `.githooks/agent-quality-gate.sh`:
-
-**Always copy the latest gate from the installed authority** — do NOT transcribe a version from memory. The authority is the single source of truth; `~/.agent-gates/.version` tells you which version it is.
+Write the **thin shim** to `.githooks/agent-quality-gate.sh` — copy it from the installed authority:
 
 ```bash
-cp ~/.agent-gates/hooks/git/agent-quality-gate.sh .githooks/agent-quality-gate.sh
+mkdir -p .githooks
+cp ~/.agent-gates/hooks/git/gate-shim.sh .githooks/agent-quality-gate.sh
+chmod +x .githooks/agent-quality-gate.sh
+ln -sf agent-quality-gate.sh .githooks/pre-commit
+git config core.hooksPath .githooks
 ```
 
-(Or from the repo source at `hooks/git/agent-quality-gate.sh`.) The current gate includes (see CHANGELOG for the authoritative, version-specific list):
-- **Path detection**: auto-detects Path A (OpenSpec) vs Path B
-- **CHECK 1** (Path A): `openspec/changes/` must have an active change directory
-- **CHECK 2** (Path A): new source files require `features/*.feature` scenarios
+**Why a shim, not a full copy** (v1.9.0): the shim is ~10 lines that `exec` the global authority gate (`~/.agent-gates/hooks/git/agent-quality-gate.sh`). So `install.sh --upgrade` upgrades **every** shim'd project at once — no per-project re-init on each release. (Pre-v1.9.0 projects had a frozen full copy that went stale; run `~/.agent-gates/bin/agent-gates-migrate --apply <root>` to migrate them.) If agent-gates isn't installed on a machine, the shim does NOT block commits (consistent with AGENT_MODE=1 "humans pass through").
+
+The authority gate the shim delegates to includes (see CHANGELOG for the version-specific list):
+- **Path detection**: Path A (OpenSpec) vs Path B
+- **CHECK 1/2** (Path A): active `openspec/changes/` + `features/*.feature` for new source
 - **Gate 1**: test file correspondence (all paths)
-- **Gate 2**: cross-review evidence (all paths, threshold-triggered) — picks the newest review by **mtime**
-- **Gate 2b** (v1.7.0+): on an L1+ machine, a same-model / unmarked review is blocked — the review file must carry `<!-- REVIEW_LEVEL: Lx -->` proving a different model was used
+- **Gate 2**: cross-review evidence (newest by **mtime**)
+- **Gate 2b** (v1.7.0+): on an L1+ machine, same-model/unmarked review is blocked — review must carry `<!-- REVIEW_LEVEL: Lx -->`
+
+Check versions anytime: `~/.agent-gates/bin/agent-gates-version [<project-root> ...]`
 
 ## Idempotency
 

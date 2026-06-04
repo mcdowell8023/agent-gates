@@ -131,14 +131,29 @@ agent 在 session 内开发时，agent-gates 自动：
 ~/.agent-gates/doctor.sh --no-network  # 离线模式，跳过远端版本比对
 ```
 
-## v1.6.0 新特性
+## 新特性
 
-**跨平台审查能力检测与自适应路由** — agent-gates 现在会检测系统上可用的异构审查工具，并据此路由交叉审查工作。
+### v1.9.0 — 全局升级（项目门禁自动跟随）
 
-- **能力等级（L0--L3）**：`install.sh` 和 `doctor.sh` 探测 opencode CLI、codex CLI、OMC codex 插件、Paseo，计算能力等级。结果持久化到 `~/.agent-gates/review-capability.json`，审查时直接读配置，不做运行时检测。
-- **平台自适应审查路由（§8）**：`agent-review-protocol` 读取 `review-capability.json`，按瀑布优先级路由审查：opencode → codex → OMC codex 插件 → Paseo → agent-tool（L0 兜底）。包含超时处理、环境适配、可选 `REQUIRE_HETEROGENEOUS=1` 严格模式。
-- **审查 prompt 模板（§9）**：`agent-review-protocol` 内置 Spec Review / Quality Review / Cross-Check 三套 prompt 模板，解决"子 agent 不知道干啥"的问题。
-- **环境检测**：检测 CI、Windows、WSL、容器环境并记录，让审查路由能适配受限环境。
+per-project 门禁现在是**瘦 shim**,委派全局权威 gate,所以 `install.sh --upgrade` **一次升级所有项目**——不再需要每个仓重跑 `init project gates`。
+
+- **`hooks/git/gate-shim.sh`**:每个项目的 `.githooks/agent-quality-gate.sh` 是 ~10 行壳,`exec` 全局 gate(`~/.agent-gates/hooks/git/agent-quality-gate.sh`)。没装 agent-gates 则不挡 commit(契合 `AGENT_MODE=1` "humans pass through")。
+- **`agent-gates-migrate`**:扫描项目根目录,把老的冻结拷贝门禁批量换成 shim(默认 dry-run;`--apply` 才动手)。
+- **`agent-gates-version`**:查看全局门禁版本(= 所有 shim 项目实际跑的版本);传项目根目录可列各项目 shim/stale 状态。
+
+### v1.8.0 — opencode 交叉审查可靠性
+
+- **`oc-review`**:包装 `opencode run`,空输出自动重试(opencode 偶发 exit 0 空输出);持续失败 exit 75,调用方 fallback codex。
+- **`oc-reaper`**:清理孤儿 `opencode serve` 进程(默认 dry-run;`--apply`)。
+- `doctor.sh` → `check_opencode_health` 暴露泄漏的 serve。
+
+### v1.7.0 — 异构审查物理强制
+
+- **Gate 2b**:机器支持异构审查(L1+)时,同模型或无标注的 review 被**阻断**——review 文件必须带 `<!-- REVIEW_LEVEL: Lx -->` 证明用了不同模型(拦"Opus 审 Opus"自批)。`SKIP_HETERO_CHECK=1` 逃生。
+
+### v1.6.0 — 跨平台审查能力检测 + 自适应路由
+
+- **能力等级(L0--L3)** 持久化到 `~/.agent-gates/review-capability.json`;**平台自适应路由(§8)** 瀑布(opencode → codex → OMC 插件 → Paseo → agent-tool);**审查 prompt 模板(§9)**;CI/Windows/WSL/容器检测。
 
 ## What's Included（装好的内容）
 
@@ -156,8 +171,18 @@ agent 在 session 内开发时，agent-gates 自动：
 
 | Hook | 类型 | 触发时机 | 强制内容 |
 |------|------|--------|--------|
-| `agent-quality-gate.sh` | Git pre-commit | Agent commit（`AGENT_MODE=1`） | 测试文件 + 审查证据 |
-| `memory-reminder.mjs` | 平台 PostToolUse | todo 标记 completed | Memory skill 存档提醒 |
+| `agent-quality-gate.sh` | Git pre-commit | Agent commit（`AGENT_MODE=1`） | 测试文件 + 审查证据 + 异构审查（Gate 2b） |
+| `memory-reminder.mjs` | 平台 PostToolUse | todo completed / ≥3 计划时 todo | Memory 存档提醒 + 并行提醒 |
+| `gate-shim.sh` | per-project hook 源 | 装入 `.githooks/` | 委派全局权威 gate（v1.9.0+） |
+
+### 命令（`~/.agent-gates/bin/`）
+
+| 命令 | 用途 |
+|------|------|
+| `oc-review run -m <model> --dir <wd> "<prompt>"` | opencode 交叉审查 + 空输出重试;exit 75 → 调用方 fallback codex |
+| `oc-reaper [--apply]` | 清理孤儿 `opencode serve` 进程（默认 dry-run） |
+| `agent-gates-migrate [--apply] <root>...` | 批量把老门禁迁到 v1.9.0 shim |
+| `agent-gates-version [<root>...]` | 查看全局门禁版本;列各项目 shim/stale 状态 |
 
 ### 约定：`.agent/` 目录
 
@@ -300,9 +325,20 @@ curl -fsSL https://raw.githubusercontent.com/mcdowell8023/agent-gates/main/insta
 - 在覆盖前**备份本地修改过的 `SKILL.md`** 为 `SKILL.md.bak.<timestamp>`，并在最终摘要里列出。
 - **幂等 hook 注册**：已有的 `hooks.json` 通过 `jq` 合并且去重。如果缺 `jq`，安装器打印安装命令以及要手动加进去的 JSON 条目。
 
-### 升级时需要知道的限制
+### 项目级门禁自动升级（v1.9.0+）
 
-- **项目级 hook 不会自动升级。** 每个项目的 `.githooks/agent-quality-gate.sh`（pre-commit 软链指向它）是 `init-project-gates` 一次性复制过来的。全局升级 agent-gates 后，需要在每个已初始化的仓库重新跑 `init project gates` 以同步最新 hook。
+v1.9.0 起,项目级 `.githooks/agent-quality-gate.sh` 是**瘦 shim**,委派全局权威 gate。所以**全局升级 agent-gates 会同时升级所有 shim 项目**——不必逐个 re-init。用 `agent-gates-version <项目根>` 核对。
+
+**迁移 v1.9.0 之前的老项目(一次性)**:v1.9.0 之前 init 的项目仍带冻结完整拷贝(不会自动升级)。一把迁移:
+
+```bash
+~/.agent-gates/bin/agent-gates-migrate <你的项目根>          # dry-run: 列出 stale 项目
+~/.agent-gates/bin/agent-gates-migrate --apply <你的项目根>  # 换成 shim
+```
+
+迁移后,在每个仓 review + commit `.githooks/agent-quality-gate.sh` 的改动。之后它们就自动升级了。
+
+### 其他升级须知
 - **备份会累积。** 每次检测到用户修改的升级都会留一个新的 `SKILL.md.bak.*` 文件。合并完编辑后跑 `./uninstall.sh --purge-backups`（如果只想清备份就配合 `--keep-skills`）来移除它们。
 - **OMO native（OpenCode）的 hook 注册是手动的。** 安装器检测到 `~/.config/opencode/` 时，打印要加到 `~/.config/opencode/hooks.json` `.hooks.PostToolUse[]` 下的 JSON 条目。`doctor.sh` 检查同样的路径/schema；如果它报告 OMO hook 缺失，请手动添加（完整 JSON 形态见 `docs/platform-hooks.md` → OMO）。注意：如果你的 OMO 跑在 Claude Code 上（而不是 OpenCode），OMC 的 `settings.json` 注册已经覆盖你 —— 无需手动步骤。
 - **不自动迁移 skill。** 如果未来某个版本重命名或重构了 skill 目录，你可能需要手动清理旧布局 —— 安装器只更新已知名字的 skill。
