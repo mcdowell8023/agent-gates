@@ -28,7 +28,7 @@ Cross-check MUST use a different model/vendor. Priority order:
 
 | Priority | Tool | When to use |
 | --- | --- | --- |
-| 1. **opencode CLI + heterogeneous model** (首选) | `opencode run -m <provider/model> --dir <workdir> "<prompt>"` | Default for all cross-checks |
+| 1. **opencode CLI + heterogeneous model** (首选) | `opencode run -m <provider/model> --dir <workdir> --format json "<prompt>"` (⚠️ `-p` 是 `--password`；prompt 是位置参数放最后；**必须 `--format json`** 否则非 TTY 无输出) | Default for all cross-checks |
 | 2. **codex CLI + GPT-5 series** (备选) | Via `codex:codex-rescue` agent | When opencode unavailable; note 3-min timeout limit |
 | 3. **code-reviewer / critic agent** (兜底) | Same Claude model, different agent role | **Only when 1+2 are genuinely unavailable** (true L0 machine). NOT a shortcut when opencode/codex is installed — see §8 "L0 Fallback is a VIOLATION When L1+ is Available". |
 
@@ -43,15 +43,46 @@ Cross-check MUST use a different model/vendor. Priority order:
 
 ### opencode Command Template
 
+Parse script (extract plain text from `--format json` stream):
+
 ```bash
-# Write prompt to file, capture result to file
-opencode run -m github-copilot/gpt-5.5 --dir <workdir> "$(cat <prompt-file>)" > <result-file> 2>&1
+OC_PARSE='python3 -c "
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    try:
+        obj = json.loads(line)
+        if obj.get(\"type\") == \"text\":
+            print(obj.get(\"part\", {}).get(\"text\", \"\"), end=\"\")
+    except: pass
+"'
+```
+
+Short prompt (inline):
+
+```bash
+opencode run -m github-copilot/gpt-5.5 --dir <workdir> --format json "<prompt>" 2>&1 | eval "$OC_PARSE"
+```
+
+Long prompt (file → file, recommended):
+
+```bash
+opencode run -m github-copilot/gpt-5.5 --dir <workdir> --format json "$(cat <prompt-file>)" 2>&1 | eval "$OC_PARSE" > <result-file>
 ```
 
 - Prompt file: `~/AgentWorkspace/tmp/<task>-prompt.md`
 - Result file: `~/AgentWorkspace/tmp/<task>-result.md`
 - Run with `run_in_background=true` to avoid blocking main session (this is for the SHELL process, not the task() function).
 - **Arg-length limit**: macOS ~262KB. If prompt exceeds ~200KB, split into summary + file references instead of inlining full content.
+
+**⚠️ Common mistakes**:
+
+| Wrong | Why | Correct |
+| --- | --- | --- |
+| `opencode run -p "prompt"` | `-p` is `--password`, not prompt | prompt is a positional arg — put it last |
+| `> result.md` empty | default format is interactive, no output in non-TTY | add `--format json` + pipe through `OC_PARSE` |
+| result contains JSON fragments | redirected without parsing | pipe through `OC_PARSE` before redirect |
 
 ### Pre-Dispatch Requirements
 
@@ -256,7 +287,7 @@ Return: PASS or ISSUES with file:line references. Max 500 words.
 EOF
 
 # 2. Run with heterogeneous model
-opencode run -m github-copilot/gpt-5.5 --dir <workdir> "$(cat ~/AgentWorkspace/tmp/crosscheck-prompt.md)" > ~/AgentWorkspace/tmp/crosscheck-result.md 2>&1 &
+opencode run -m github-copilot/gpt-5.5 --dir <workdir> --format json "$(cat ~/AgentWorkspace/tmp/crosscheck-prompt.md)" 2>&1 | eval "$OC_PARSE" > ~/AgentWorkspace/tmp/crosscheck-result.md &
 ```
 
 ### Three-Agent Pipeline Roles via oracle (same-model, for structured review)
@@ -386,7 +417,7 @@ Routes are tried top-to-bottom. A higher-priority route that is available and he
 
 | Priority | Route | Command Pattern | Heterogeneous? |
 | --- | --- | --- | --- |
-| 1 (→ L3) | opencode CLI | `~/.agent-gates/bin/oc-review run -m github-copilot/gpt-5.5 --dir <workdir> "$(cat <prompt>)" > <result>` | Yes |
+| 1 (→ L3) | opencode CLI | `~/.agent-gates/bin/oc-review run -m github-copilot/gpt-5.5 --dir <workdir> --format json "$(cat <prompt>)" 2>&1 \| eval "$OC_PARSE" > <result>` | Yes |
 | 2 (→ L1) | codex CLI | `codex exec -s read-only --skip-git-repo-check -C <workdir> < <prompt-file>` (prompt via **stdin**) | Yes |
 | 3 (→ L1) | OMC codex plugin | Via `codex:codex-rescue` agent or `/ask codex` | Yes |
 | 4 | Paseo | `create_agent provider="codex/gpt-5.4" prompt="<review>" background=true` | Yes |
