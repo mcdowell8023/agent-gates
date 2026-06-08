@@ -22,6 +22,18 @@ All completed development and documentation MUST be independently verified by a 
 | Code (feature / bugfix / refactor) | Different model/agent does code review + runs tests |
 | Documentation | Different model/agent checks accuracy, completeness, actionability |
 
+### Recommended: `agent-gates-review` (v1.10.0+)
+
+Instead of manually choosing a review tool, use the unified review command:
+
+```bash
+~/.agent-gates/bin/agent-gates-review <prompt-file> [--result <result-file>]
+```
+
+It reads `~/.agent-gates/review-capability.json`, routes to the best available heterogeneous tool (L3→opencode→codex, L2→opencode, L1→codex), and auto-appends `REVIEW_TOOL` / `REVIEW_MODEL` / `REVIEW_LEVEL` markers to the output. On L0 machines (no heterogeneous tool) it exits 78 — caller falls back to same-model agent-tool.
+
+**Use this command instead of spawning a Claude subagent for review.** On L1+ machines, using a same-model subagent violates the heterogeneous-review requirement (红线 #8).
+
 ### Tool Priority (⛔ Hard Constraint)
 
 Cross-check MUST use a different model/vendor. Priority order:
