@@ -7,15 +7,16 @@
 # Usage:  agent-gates-review <prompt-file> [--result <result-file>]
 #
 # Routing:
-#   L3 (opencode+codex): oc-review (opencode) → fallback codex
-#   L2 (opencode):       oc-review (opencode) → exit 75
-#   L1 (codex/omc):      codex exec            → exit 75
+#   L3 (opencode+codex): opencode → fallback codex
+#   L2 (opencode):       opencode → exit 75
+#   L1 (codex/omc):      codex exec → exit 75
 #   L0 (none):           exit 78 + warning (same-model only)
 #
 # Exit codes:
 #   0   review completed with heterogeneous tool
 #   69  not installed (no review-capability.json)
 #   75  review tool failed (caller should fall back to agent-tool)
+#   76  prompt too long for opencode and no codex fallback
 #   78  L0 machine — no heterogeneous tool available
 #
 # Env:
@@ -24,6 +25,7 @@
 #   OC_REVIEW_RETRIES     oc-review retry count
 #   AG_REVIEW_CODEX       codex binary (default "codex")
 #   AG_REVIEW_MODEL       opencode model (default "github-copilot/gpt-5.5")
+#   AG_REVIEW_MAX_CHARS   opencode prompt char limit (default 800)
 #
 # Source: https://github.com/mcdowell8023/agent-gates
 set -uo pipefail
@@ -32,6 +34,7 @@ GATES_DIR="${AGENT_GATES_DIR:-$HOME/.agent-gates}"
 CAP_FILE="$GATES_DIR/review-capability.json"
 CODEX="${AG_REVIEW_CODEX:-codex}"
 MODEL="${AG_REVIEW_MODEL:-github-copilot/gpt-5.5}"
+MAX_CHARS="${AG_REVIEW_MAX_CHARS:-800}"
 
 PROMPT_FILE=""
 RESULT_FILE=""
@@ -60,6 +63,9 @@ PREFERRED=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d
 FALLBACK=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('fallback_route','agent-tool'))" "$CAP_FILE" 2>/dev/null || echo "agent-tool")
 
 PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
+PROMPT_LEN=${#PROMPT_CONTENT}
+
+# --- Helpers ---
 
 append_marker() {
   local tool="$1" model="$2" content="$3"
@@ -69,11 +75,37 @@ append_marker() {
 output_result() {
   local content="$1"
   if [[ -n "$RESULT_FILE" ]]; then
-    echo "$content" > "$RESULT_FILE"
+    printf '%s\n' "$content" > "$RESULT_FILE"
   else
-    echo "$content"
+    printf '%s\n' "$content"
   fi
 }
+
+# Parse opencode --format json stream → extract plain text parts.
+# Matches the OC_PARSE pattern from 30-delegation.md / agent-review-protocol.
+parse_opencode_json() {
+  python3 -c "
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    try:
+        obj = json.loads(line)
+        if obj.get('type') == 'text':
+            print(obj.get('part', {}).get('text', ''), end='')
+    except:
+        pass
+"
+}
+
+# Check if review output contains a substantive conclusion (not just a plan/intent).
+has_valid_conclusion() {
+  local text="$1"
+  echo "$text" | grep -qiE '^VERDICT:\s*(PASS|REVISE|FAIL|ISSUES|APPROVED|REJECT)' && return 0
+  return 1
+}
+
+# --- Review runners ---
 
 run_opencode() {
   local opencode_bin="${OC_REVIEW_OPENCODE:-opencode}"
@@ -88,13 +120,26 @@ run_opencode() {
     rc=$?
   fi
 
-  if [[ $rc -eq 0 ]] && [[ -n "$raw" ]] && echo "$raw" | grep -q '[^[:space:]]'; then
-    local result
-    result=$(append_marker "opencode" "$MODEL" "$raw")
-    output_result "$result"
-    return 0
+  if [[ $rc -ne 0 ]] || [[ -z "$raw" ]] || ! echo "$raw" | grep -q '[^[:space:]]'; then
+    return 1
   fi
-  return 1
+
+  local parsed
+  parsed=$(echo "$raw" | parse_opencode_json)
+
+  if [[ -z "$parsed" ]] || ! echo "$parsed" | grep -q '[^[:space:]]'; then
+    return 1
+  fi
+
+  if ! has_valid_conclusion "$parsed"; then
+    echo "agent-gates-review: opencode output has no substantive conclusion (failure mode B) — treating as failure" >&2
+    return 1
+  fi
+
+  local result
+  result=$(append_marker "opencode" "$MODEL" "$parsed")
+  output_result "$result"
+  return 0
 }
 
 run_codex() {
@@ -110,8 +155,22 @@ run_codex() {
   return 1
 }
 
+# --- Prompt length gate ---
+
+prompt_too_long_for_opencode() {
+  [[ "$PROMPT_LEN" -gt "$MAX_CHARS" ]]
+}
+
+# --- Main routing ---
+
 case "$LEVEL" in
   L3)
+    if prompt_too_long_for_opencode; then
+      echo "agent-gates-review: prompt too long for opencode (${PROMPT_LEN} > ${MAX_CHARS} chars), routing to codex" >&2
+      if run_codex; then exit 0; fi
+      echo "agent-gates-review: codex also failed" >&2
+      exit 75
+    fi
     if run_opencode; then exit 0; fi
     echo "agent-gates-review: opencode failed, falling back to codex" >&2
     if run_codex; then exit 0; fi
@@ -119,11 +178,20 @@ case "$LEVEL" in
     exit 75
     ;;
   L2)
+    if prompt_too_long_for_opencode; then
+      echo "agent-gates-review: prompt too long for opencode (${PROMPT_LEN} > ${MAX_CHARS} chars) and no codex fallback (L2). Shorten prompt to ≤${MAX_CHARS} chars or install codex for L3." >&2
+      exit 76
+    fi
     if run_opencode; then exit 0; fi
     echo "agent-gates-review: opencode failed (L2, no codex fallback)" >&2
     exit 75
     ;;
   L1)
+    if [[ "$PREFERRED" == "omc-codex-plugin" ]]; then
+      echo "agent-gates-review: L1 via omc-codex-plugin — this is an agent-based route, not CLI-drivable." >&2
+      echo "  Use the OMC codex plugin directly: /ask codex or codex:codex-rescue agent." >&2
+      exit 78
+    fi
     if run_codex; then exit 0; fi
     echo "agent-gates-review: codex failed (L1)" >&2
     exit 75

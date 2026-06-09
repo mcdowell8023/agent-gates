@@ -41,7 +41,7 @@ Cross-check MUST use a different model/vendor. Priority order:
 | Priority | Tool | When to use |
 | --- | --- | --- |
 | 1. **opencode CLI + heterogeneous model** (首选) | `opencode run -m <provider/model> --dir <workdir> --format json "<prompt>"` (⚠️ `-p` 是 `--password`；prompt 是位置参数放最后；**必须 `--format json`** 否则非 TTY 无输出) | Default for all cross-checks |
-| 2. **codex CLI + GPT-5 series** (备选) | Via `codex:codex-rescue` agent | When opencode unavailable; note 3-min timeout limit |
+| 2. **codex CLI + GPT-5 series** (备选) | Two sub-commands (see below) | When opencode unavailable or prompt too long |
 | 3. **code-reviewer / critic agent** (兜底) | Same Claude model, different agent role | **Only when 1+2 are genuinely unavailable** (true L0 machine). NOT a shortcut when opencode/codex is installed — see §8 "L0 Fallback is a VIOLATION When L1+ is Available". |
 
 ### Model Selection for Cross-Check
@@ -54,6 +54,8 @@ Cross-check MUST use a different model/vendor. Priority order:
 | Small patch / short code | code-reviewer agent (fast, acceptable for trivial) |
 
 ### opencode Command Template
+
+**⚠️ Prompt length limit (v1.10.1)**: opencode run 非交互模式 prompt 超 ~800 字符可能卡死（GPT-5.5 实测 800 字挂 22 分钟，短 prompt 秒回）。`agent-gates-review` 自动检测并在 L3 降级 codex、L2 拒绝。手动调用时**控制 prompt ≤200 字符**，背景让模型从代码自己读。
 
 Parse script (extract plain text from `--format json` stream):
 
@@ -71,22 +73,16 @@ for line in sys.stdin:
 "'
 ```
 
-Short prompt (inline):
+Short prompt (inline, recommended — keep ≤200 chars):
 
 ```bash
-opencode run -m github-copilot/gpt-5.5 --dir <workdir> --format json "<prompt>" 2>&1 | eval "$OC_PARSE"
-```
-
-Long prompt (file → file, recommended):
-
-```bash
-opencode run -m github-copilot/gpt-5.5 --dir <workdir> --format json "$(cat <prompt-file>)" 2>&1 | eval "$OC_PARSE" > <result-file>
+opencode run -m github-copilot/gpt-5.5 --dir <workdir> --format json "<short prompt>" 2>&1 | eval "$OC_PARSE"
 ```
 
 - Prompt file: `~/AgentWorkspace/tmp/<task>-prompt.md`
 - Result file: `~/AgentWorkspace/tmp/<task>-result.md`
-- Run with `run_in_background=true` to avoid blocking main session (this is for the SHELL process, not the task() function).
-- **Arg-length limit**: macOS ~262KB. If prompt exceeds ~200KB, split into summary + file references instead of inlining full content.
+- Run with `run_in_background=true` to avoid blocking main session.
+- **Do NOT stuff full file contents into prompt** — GPT-5.5 chokes on long non-interactive prompts. Instead, write a short instruction ("read file X, review for Y") and let the model read the file itself via its sandbox.
 
 **⚠️ Common mistakes**:
 
@@ -95,6 +91,20 @@ opencode run -m github-copilot/gpt-5.5 --dir <workdir> --format json "$(cat <pro
 | `opencode run -p "prompt"` | `-p` is `--password`, not prompt | prompt is a positional arg — put it last |
 | `> result.md` empty | default format is interactive, no output in non-TTY | add `--format json` + pipe through `OC_PARSE` |
 | result contains JSON fragments | redirected without parsing | pipe through `OC_PARSE` before redirect |
+| Long prompt (~800+ chars) | GPT-5.5 hangs/times out in non-interactive mode | Keep ≤200 chars; let model read files itself |
+
+### codex Command Template (v1.10.1)
+
+codex has **two sub-commands** for different review scenarios:
+
+| Scenario | Command | Notes |
+| --- | --- | --- |
+| Review git diff/commit | `codex review --commit HEAD` (or `--base <branch>` / `--uncommitted`) | Built-in sandbox + structured output. **Cannot combine `--commit` with `[PROMPT]`** (mutually exclusive). |
+| Review arbitrary content (design doc, plan, non-diff) | `codex exec -s read-only --skip-git-repo-check -C <dir> < prompt-file` | Prompt via **stdin** (not positional arg — positional hangs on "Reading additional input from stdin"). |
+
+**Deprecated** (do NOT use):
+- `codex -q --full-auto` — no `-q` flag in 0.134.0
+- `codex-companion.mjs task --write` — old OMC plugin path, ~3 min timeout, unreliable
 
 ### Pre-Dispatch Requirements
 
@@ -429,9 +439,10 @@ Routes are tried top-to-bottom. A higher-priority route that is available and he
 
 | Priority | Route | Command Pattern | Heterogeneous? |
 | --- | --- | --- | --- |
-| 1 (→ L3) | opencode CLI | `~/.agent-gates/bin/oc-review run -m github-copilot/gpt-5.5 --dir <workdir> --format json "$(cat <prompt>)" 2>&1 \| eval "$OC_PARSE" > <result>` | Yes |
-| 2 (→ L1) | codex CLI | `codex exec -s read-only --skip-git-repo-check -C <workdir> < <prompt-file>` (prompt via **stdin**) | Yes |
-| 3 (→ L1) | OMC codex plugin | Via `codex:codex-rescue` agent or `/ask codex` | Yes |
+| 1 (→ L3) | opencode CLI | `agent-gates-review <prompt-file>` (auto-routes; short prompt ≤200 chars) | Yes |
+| 2 (→ L1) | codex CLI (arbitrary) | `codex exec -s read-only --skip-git-repo-check -C <workdir> < <prompt-file>` (prompt via **stdin**) | Yes |
+| 2b (→ L1) | codex CLI (diff) | `codex review --commit HEAD` (or `--base <branch>` / `--uncommitted`; no custom prompt) | Yes |
+| 3 (→ L1) | OMC codex plugin | Via `codex:codex-rescue` agent or `/ask codex` (agent-based, not CLI-drivable by `agent-gates-review`) | Yes |
 | 4 | Paseo | `create_agent provider="codex/gpt-5.4" prompt="<review>" background=true` | Yes |
 | 5 (→ L0) | Agent tool (ultimate fallback) | Claude Code Agent tool — same-model sub-agent | **No** |
 
