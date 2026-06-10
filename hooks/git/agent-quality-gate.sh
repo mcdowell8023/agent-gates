@@ -86,8 +86,7 @@ if [[ "$IS_PATH_A" -eq 1 && -n "$NEW_SOURCE" ]]; then
   fi
 fi
 
-# === Gate 2: Cross-review evidence ===
-# Count non-test logic files (test files excluded from trigger count)
+# === Pre-compute change metrics (shared by CHECK 3 + Gate 2) ===
 LOGIC_FILES=0
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
@@ -96,7 +95,6 @@ done < <(git diff --cached --name-only --diff-filter=ACMR \
   | grep -vE '(\.(lock|md|json|yaml|yml)$|generated/|migrations/|\.d\.ts$)' \
   | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.)')
 
-# Single-file high-change threshold
 MAX_SINGLE_FILE_LINES=0
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
@@ -106,6 +104,85 @@ done < <(git diff --cached --name-only --diff-filter=ACMR \
   | grep -vE '(\.(lock|md|json|yaml|yml)$|generated/|migrations/|\.d\.ts$)' \
   | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.)')
 
+# === CHECK 3: Plan/design decision (v1.11.0 三态方案门控) ===
+# Non-trivial code changes require either:
+#   - A plan with PLAN_REVIEW markers (requires-plan / L1+ machines)
+#   - A plan exists (L0 machines — no marker required)
+#   - A command-generated .skip.md with GENERATED_BY (skip-with-approval)
+# Trivial changes (handled by gate top) skip entirely.
+if [[ "${SKIP_PLAN_CHECK:-0}" != "1" ]] && [[ -d .agent/plans ]]; then
+  PLAN_NEEDED=0
+  [[ -n "$NEW_SOURCE" ]] && PLAN_NEEDED=1
+  [[ "$LOGIC_FILES" -gt 1 && "$DIFF_LINES" -gt 50 ]] && PLAN_NEEDED=1
+  [[ "$MAX_SINGLE_FILE_LINES" -gt 150 ]] && PLAN_NEEDED=1
+
+  if [[ "$PLAN_NEEDED" -eq 1 ]]; then
+    PLAN_FOUND=0
+    PLAN_REVIEWED=0
+    SKIP_APPROVED=0
+
+    # Dangerous-category detection (requires-plan, skip NOT accepted)
+    DANGEROUS=0
+    while IFS= read -r df; do
+      [[ -z "$df" ]] && continue
+      if echo "$df" | grep -qiE 'migration|\.sql$|auth|security|permission|acl|schema'; then
+        DANGEROUS=1; break
+      fi
+    done < <(git diff --cached --name-only --diff-filter=ACMR)
+
+    # Check for reviewed plans (带 PLAN_REVIEW 三件套)
+    while IFS= read -r pf; do
+      [[ -z "$pf" || ! -f "$pf" ]] && continue
+      PLAN_FOUND=1
+      if grep -q 'PLAN_REVIEW:' "$pf" && grep -q 'PLAN_REVIEW_TOOL:' "$pf" && grep -q 'PLAN_REVIEW_MODEL:' "$pf"; then
+        PLAN_REVIEWED=1
+        break
+      fi
+    done < <(find .agent/plans/ -maxdepth 1 -name '*.md' ! -name '*.skip.md' 2>/dev/null)
+
+    # Check for approved skip (.skip.md with GENERATED_BY)
+    while IFS= read -r sf; do
+      [[ -z "$sf" || ! -f "$sf" ]] && continue
+      if grep -q 'GENERATED_BY: agent-gates' "$sf" \
+         && grep -q 'TIMESTAMP:' "$sf" \
+         && grep -q 'BRANCH:' "$sf" \
+         && grep -q 'HEAD:' "$sf" \
+         && grep -q 'REASON:' "$sf"; then
+        SKIP_APPROVED=1
+        break
+      fi
+    done < <(find .agent/plans/ -maxdepth 1 -name '*.skip.md' 2>/dev/null)
+
+    if [[ "$DANGEROUS" -eq 1 && "$SKIP_APPROVED" -eq 1 && "$PLAN_REVIEWED" -ne 1 ]]; then
+      fail "Dangerous change (auth/security/migration/schema) requires a reviewed plan — skip not accepted"
+      echo "   Fix: write .agent/plans/<topic>.md + run agent-gates-review --plan <plan>"
+    elif [[ "$SKIP_APPROVED" -eq 1 ]]; then
+      : # skip-with-approval — decision recorded, pass (non-dangerous only)
+    elif [[ "$PLAN_REVIEWED" -eq 1 ]]; then
+      : # reviewed plan found, pass
+    elif [[ "$PLAN_FOUND" -eq 1 ]]; then
+      # Plan exists but no PLAN_REVIEW markers — check capability level
+      PLAN_CAP_LEVEL="L0"
+      PLAN_CAP_FILE="${AGENT_GATES_DIR:-$HOME/.agent-gates}/review-capability.json"
+      if [[ -f "$PLAN_CAP_FILE" ]]; then
+        PLAN_CAP_LEVEL=$(grep -oE '"level"[[:space:]]*:[[:space:]]*"L[0-3]"' "$PLAN_CAP_FILE" 2>/dev/null | grep -oE 'L[0-3]' | head -1 || echo "L0")
+      fi
+      if [[ "$PLAN_CAP_LEVEL" == "L0" ]]; then
+        echo "⚠️  CHECK 3: L0 — plan exists but no PLAN_REVIEW markers (no heterogeneous tool to verify)"
+      else
+        fail "Plan exists but missing PLAN_REVIEW markers (machine is $PLAN_CAP_LEVEL — heterogeneous review required)"
+        echo "   Fix: run agent-gates-review --plan .agent/plans/<your-plan>.md"
+      fi
+    else
+      fail "Non-trivial change but no plan or approved skip in .agent/plans/"
+      echo "   Fix: write a plan to .agent/plans/<topic>.md + run agent-gates-review --plan <plan>"
+      echo "   Or: agent-gates-plan-decision skip --reason \"<reason>\" --topic <name>"
+    fi
+  fi
+fi
+
+# === Gate 2: Cross-review evidence ===
+# (LOGIC_FILES / MAX_SINGLE_FILE_LINES already computed above for CHECK 3)
 # Trigger: (multi-file AND substantial change) OR single-file massive change
 NEEDS_REVIEW=0
 [[ "$LOGIC_FILES" -gt 1 && "$DIFF_LINES" -gt 50 ]] && NEEDS_REVIEW=1

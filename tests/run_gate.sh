@@ -365,9 +365,143 @@ test_review_picks_newest_by_mtime() {
 }
 
 # =====================================================================
+# CHECK 3: Plan gate (三态) tests — v1.11.0
+# =====================================================================
+
+# Helper: setup a non-trivial commit (multi-file >50 lines, triggers NEEDS_REVIEW)
+setup_nontrivial_commit() {
+  for i in 1 2 3; do
+    printf 'export const fn%s = () => {\n' "$i" > "src$i.ts"
+    for n in $(seq 1 25); do echo "  // line $n" >> "src$i.ts"; done
+    echo "}" >> "src$i.ts"
+    echo "test('fn$i', () => {})" > "src$i.test.ts"
+  done
+  git add src1.ts src2.ts src3.ts src1.test.ts src2.test.ts src3.test.ts
+}
+
+# T-B1: Path B + plan with PLAN_REVIEW → PASS
+test_check3_plan_with_review() {
+  echo "T-B1: Path B plan + PLAN_REVIEW → PASS"
+  (
+    setup_mock_repo
+    setup_nontrivial_commit
+    CAPDIR=$(mktemp -d); printf '{ "level": "L0" }\n' > "$CAPDIR/review-capability.json"
+    export AGENT_GATES_DIR="$CAPDIR"
+    mkdir -p .agent/reviews .agent/plans
+    printf 'VERDICT: PASS\n' > .agent/reviews/r.md
+    printf '# Plan\n<!-- PLAN_REVIEW: L1 -->\n<!-- PLAN_REVIEW_TOOL: codex -->\n<!-- PLAN_REVIEW_MODEL: gpt-5 -->\n' > .agent/plans/design.md
+    output=$(bash "$GATE" 2>&1); rc=$?
+    assert "PASS with plan+review" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+    rm -rf "$CAPDIR"; teardown_mock_repo
+  )
+}
+
+# T-B2: Path B + no plans → FAIL
+test_check3_no_plan() {
+  echo "T-B2: Path B no plan → FAIL"
+  (
+    setup_mock_repo
+    setup_nontrivial_commit
+    CAPDIR=$(mktemp -d); printf '{ "level": "L0" }\n' > "$CAPDIR/review-capability.json"
+    export AGENT_GATES_DIR="$CAPDIR"
+    mkdir -p .agent/reviews .agent/plans
+    printf 'VERDICT: PASS\n' > .agent/reviews/r.md
+    # no plan file
+    output=$(bash "$GATE" 2>&1); rc=$?
+    assert "FAIL without plan" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+    rm -rf "$CAPDIR"; teardown_mock_repo
+  )
+}
+
+# T-B3: Path B + plan without PLAN_REVIEW on L1+ → FAIL
+test_check3_plan_no_marker_l1() {
+  echo "T-B3: plan without PLAN_REVIEW on L1 → FAIL"
+  (
+    setup_mock_repo
+    setup_nontrivial_commit
+    CAPDIR=$(mktemp -d); printf '{ "level": "L1", "preferred_route": "codex" }\n' > "$CAPDIR/review-capability.json"
+    export AGENT_GATES_DIR="$CAPDIR"
+    mkdir -p .agent/reviews .agent/plans
+    printf 'VERDICT: PASS\n<!-- REVIEW_LEVEL: L1 -->\n' > .agent/reviews/r.md
+    printf '# Plan\nSome design notes without markers\n' > .agent/plans/design.md
+    output=$(bash "$GATE" 2>&1); rc=$?
+    assert "FAIL plan without PLAN_REVIEW on L1" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+    rm -rf "$CAPDIR"; teardown_mock_repo
+  )
+}
+
+# T-C1: Plan no marker on L0 → PASS (L0 降级: 方案存在即可)
+test_check3_l0_plan_no_marker() {
+  echo "T-C1: L0 + plan no marker → PASS (降级)"
+  (
+    setup_mock_repo
+    setup_nontrivial_commit
+    CAPDIR=$(mktemp -d); printf '{ "level": "L0" }\n' > "$CAPDIR/review-capability.json"
+    export AGENT_GATES_DIR="$CAPDIR"
+    mkdir -p .agent/reviews .agent/plans
+    printf 'VERDICT: PASS\n' > .agent/reviews/r.md
+    printf '# Plan\nSome design notes\n' > .agent/plans/design.md
+    output=$(bash "$GATE" 2>&1); rc=$?
+    assert "PASS L0 plan exists (no marker required)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+    rm -rf "$CAPDIR"; teardown_mock_repo
+  )
+}
+
+# T-C2: skip-with-approval → .skip.md with GENERATED_BY → PASS
+test_check3_skip_approved() {
+  echo "T-C2: skip.md with GENERATED_BY → PASS"
+  (
+    setup_mock_repo
+    setup_nontrivial_commit
+    CAPDIR=$(mktemp -d); printf '{ "level": "L0" }\n' > "$CAPDIR/review-capability.json"
+    export AGENT_GATES_DIR="$CAPDIR"
+    mkdir -p .agent/reviews .agent/plans
+    printf 'VERDICT: PASS\n' > .agent/reviews/r.md
+    printf 'GENERATED_BY: agent-gates\nTIMESTAMP: 2026-06-10T00:00:00Z\nBRANCH: main\nHEAD: abc1234\nREASON: trivial config\n' > .agent/plans/config.skip.md
+    output=$(bash "$GATE" 2>&1); rc=$?
+    assert "PASS with approved skip" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+    rm -rf "$CAPDIR"; teardown_mock_repo
+  )
+}
+
+# T-C3: hand-written .skip.md (no GENERATED_BY) → FAIL
+test_check3_skip_handwritten() {
+  echo "T-C3: hand-written skip.md → FAIL"
+  (
+    setup_mock_repo
+    setup_nontrivial_commit
+    CAPDIR=$(mktemp -d); printf '{ "level": "L0" }\n' > "$CAPDIR/review-capability.json"
+    export AGENT_GATES_DIR="$CAPDIR"
+    mkdir -p .agent/reviews .agent/plans
+    printf 'VERDICT: PASS\n' > .agent/reviews/r.md
+    printf 'I skip this\n' > .agent/plans/fake.skip.md
+    output=$(bash "$GATE" 2>&1); rc=$?
+    assert "FAIL hand-written skip" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+    rm -rf "$CAPDIR"; teardown_mock_repo
+  )
+}
+
+# T-C5: SKIP_PLAN_CHECK=1 → bypass
+test_check3_skip_env() {
+  echo "T-C5: SKIP_PLAN_CHECK=1 → bypass"
+  (
+    setup_mock_repo
+    setup_nontrivial_commit
+    CAPDIR=$(mktemp -d); printf '{ "level": "L0" }\n' > "$CAPDIR/review-capability.json"
+    export AGENT_GATES_DIR="$CAPDIR"
+    mkdir -p .agent/reviews .agent/plans
+    printf 'VERDICT: PASS\n' > .agent/reviews/r.md
+    # no plan, no skip — would normally fail
+    output=$(SKIP_PLAN_CHECK=1 bash "$GATE" 2>&1); rc=$?
+    assert "PASS with SKIP_PLAN_CHECK=1" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+    rm -rf "$CAPDIR"; teardown_mock_repo
+  )
+}
+
+# =====================================================================
 # Run all tests
 # =====================================================================
-echo "=== agent-quality-gate.sh CHECK 1 + CHECK 2 tests ==="
+echo "=== agent-quality-gate.sh tests ==="
 echo ""
 
 test_check1_pass_with_active_change
@@ -386,6 +520,63 @@ test_hetero_pass_l2
 test_hetero_pass_l0machine
 test_hetero_skip_override
 test_review_picks_newest_by_mtime
+# T-D1: dangerous path (migrations/*.sql) + skip → FAIL (requires-plan, skip not accepted)
+test_check3_dangerous_skip_rejected() {
+  echo "T-D1: dangerous path + skip → FAIL (requires-plan)"
+  (
+    setup_mock_repo
+    # Create a migration file (dangerous category)
+    mkdir -p migrations
+    printf 'ALTER TABLE users ADD COLUMN role TEXT;\n' > migrations/001_add_role.sql
+    echo "test('migration', () => {})" > migrations/001_add_role.sql.test.ts
+    printf 'export const x = 1;\n' > app.ts
+    for n in $(seq 1 25); do echo "  // line $n" >> app.ts; done
+    echo "test('x', () => {})" > app.test.ts
+    git add migrations/001_add_role.sql migrations/001_add_role.sql.test.ts app.ts app.test.ts
+    CAPDIR=$(mktemp -d); printf '{ "level": "L0" }\n' > "$CAPDIR/review-capability.json"
+    export AGENT_GATES_DIR="$CAPDIR"
+    mkdir -p .agent/reviews .agent/plans
+    printf 'VERDICT: PASS\n' > .agent/reviews/r.md
+    printf 'GENERATED_BY: agent-gates\nTIMESTAMP: 2026-06-10\nBRANCH: main\nHEAD: abc\nREASON: quick fix\n' > .agent/plans/migration.skip.md
+    output=$(bash "$GATE" 2>&1); rc=$?
+    assert "FAIL dangerous + skip" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+    assert "mentions dangerous/requires-plan" "$(echo "$output" | grep -qiE 'dangerous|requires.*plan|skip not accepted' && echo true || echo false)"
+    rm -rf "$CAPDIR"; teardown_mock_repo
+  )
+}
+
+# T-D2: dangerous path + reviewed plan → PASS
+test_check3_dangerous_with_plan() {
+  echo "T-D2: dangerous path + reviewed plan → PASS"
+  (
+    setup_mock_repo
+    mkdir -p migrations
+    printf 'ALTER TABLE users ADD COLUMN role TEXT;\n' > migrations/001_add_role.sql
+    echo "test('migration', () => {})" > migrations/001_add_role.sql.test.ts
+    printf 'export const x = 1;\n' > app.ts
+    for n in $(seq 1 25); do echo "  // line $n" >> app.ts; done
+    echo "test('x', () => {})" > app.test.ts
+    git add migrations/001_add_role.sql migrations/001_add_role.sql.test.ts app.ts app.test.ts
+    CAPDIR=$(mktemp -d); printf '{ "level": "L0" }\n' > "$CAPDIR/review-capability.json"
+    export AGENT_GATES_DIR="$CAPDIR"
+    mkdir -p .agent/reviews .agent/plans
+    printf 'VERDICT: PASS\n' > .agent/reviews/r.md
+    printf '# Migration Plan\n<!-- PLAN_REVIEW: L1 -->\n<!-- PLAN_REVIEW_TOOL: codex -->\n<!-- PLAN_REVIEW_MODEL: gpt -->\n' > .agent/plans/migration.md
+    output=$(bash "$GATE" 2>&1); rc=$?
+    assert "PASS dangerous + reviewed plan" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+    rm -rf "$CAPDIR"; teardown_mock_repo
+  )
+}
+
+test_check3_plan_with_review
+test_check3_no_plan
+test_check3_plan_no_marker_l1
+test_check3_l0_plan_no_marker
+test_check3_skip_approved
+test_check3_skip_handwritten
+test_check3_skip_env
+test_check3_dangerous_skip_rejected
+test_check3_dangerous_with_plan
 
 echo ""
 read -r PASS_COUNT FAIL_COUNT < "$RESULTS_FILE"

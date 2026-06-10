@@ -500,7 +500,7 @@ install_hook_files() {
 }
 
 # --- Hook configuration constants ---
-HOOK_MATCHER="TodoWrite|todowrite|TaskUpdate|TaskCreate"
+HOOK_MATCHER="TodoWrite|todowrite|TaskUpdate|TaskCreate|Edit|Write|edit|write"
 
 # --- Register platform hooks ---
 # All supported platforms use schema { "hooks": { "<Event>": [...] } }.
@@ -546,7 +546,17 @@ register_hook() {
   if [[ -f "$config_file" ]] && command -v jq &>/dev/null \
      && jq -e '.hooks.PostToolUse[]?.hooks[]? | select(.command | test("memory-reminder"))' \
           "$config_file" &>/dev/null; then
-    info "$platform: already registered"
+    # v1.11.0 matcher migration: check if existing matcher contains Edit|Write
+    local current_matcher
+    current_matcher=$(jq -r '.hooks.PostToolUse[]? | select(.hooks[]?.command | test("memory-reminder")) | .matcher // ""' "$config_file" 2>/dev/null || true)
+    if [[ -n "$current_matcher" ]] && ! echo "$current_matcher" | grep -q 'Edit'; then
+      info "$platform: upgrading matcher (adding Edit|Write for plan reminder)"
+      local tmp_cfg; tmp_cfg=$(mktemp)
+      jq '(.hooks.PostToolUse[] | select(.hooks[]?.command | test("memory-reminder"))).matcher = "'"$HOOK_MATCHER"'"' \
+        "$config_file" > "$tmp_cfg" && mv "$tmp_cfg" "$config_file"
+    else
+      info "$platform: already registered"
+    fi
     return
   fi
 

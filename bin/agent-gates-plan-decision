@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# agent-gates-plan-decision — generate plan decision artifacts (skip/trivial).
+#
+# Usage:
+#   agent-gates-plan-decision skip --reason "<reason>" --topic <name> [--dir <path>]
+#
+# Generates `.agent/plans/<topic>.skip.md` with machine metadata (branch, HEAD,
+# timestamp, GENERATED_BY) so the pre-commit gate can verify the decision was
+# made explicitly, not hand-fabricated.
+#
+# Source: https://github.com/mcdowell8023/agent-gates
+set -uo pipefail
+
+ACTION=""
+REASON=""
+TOPIC=""
+DIR="${PWD}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    skip)      ACTION="skip"; shift ;;
+    --reason)  [[ $# -ge 2 ]] || { echo "agent-gates-plan-decision: --reason requires a value" >&2; exit 1; }; REASON="$2"; shift 2 ;;
+    --topic)   [[ $# -ge 2 ]] || { echo "agent-gates-plan-decision: --topic requires a value" >&2; exit 1; }; TOPIC="$2"; shift 2 ;;
+    --dir)     [[ $# -ge 2 ]] || { echo "agent-gates-plan-decision: --dir requires a path" >&2; exit 1; }; DIR="$2"; shift 2 ;;
+    *)         echo "agent-gates-plan-decision: unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+if [[ -z "$ACTION" ]]; then
+  echo "Usage: agent-gates-plan-decision skip --reason \"<reason>\" --topic <name> [--dir <path>]" >&2
+  exit 1
+fi
+
+if [[ ! -d "$DIR/.agent/plans" ]]; then
+  echo "agent-gates-plan-decision: $DIR/.agent/plans/ not found — run init-project-gates first" >&2
+  exit 1
+fi
+
+case "$ACTION" in
+  skip)
+    if [[ -z "$REASON" ]]; then
+      echo "agent-gates-plan-decision: skip requires --reason" >&2
+      exit 1
+    fi
+    if [[ -z "$TOPIC" ]]; then
+      echo "agent-gates-plan-decision: skip requires --topic" >&2
+      exit 1
+    fi
+
+    BRANCH=$(cd "$DIR" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+    HEAD=$(cd "$DIR" && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    OUT_FILE="$DIR/.agent/plans/${TOPIC}.skip.md"
+    cat > "$OUT_FILE" <<EOF
+# Plan Decision: Skip
+
+GENERATED_BY: agent-gates
+TIMESTAMP: ${TIMESTAMP}
+BRANCH: ${BRANCH}
+HEAD: ${HEAD}
+TOPIC: ${TOPIC}
+REASON: ${REASON}
+
+This task was explicitly approved to skip the plan/design phase.
+EOF
+    echo "agent-gates-plan-decision: wrote $OUT_FILE" >&2
+    ;;
+  *)
+    echo "agent-gates-plan-decision: unknown action: $ACTION" >&2
+    exit 1
+    ;;
+esac
