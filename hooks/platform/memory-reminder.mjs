@@ -17,7 +17,8 @@
 // Matcher: "TodoWrite|todowrite|TaskUpdate|TaskCreate"
 // Source: https://github.com/mcdowell8023/agent-gates
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 // NOTE on readFileSync(0, 'utf8'):
 //   fd 0 = stdin. Hooks receive JSON payloads via stdin per platform protocol.
@@ -156,6 +157,78 @@ function detectPlanTimeTodos(payload) {
   return completed === 0 && inProgress <= 1 && pending >= 1 && unknown === 0;
 }
 
+// Plan decision reminder (v1.11.0): fires when agent edits/writes a source file
+// but `.agent/plans/` has no valid decision artifact (reviewed plan or approved skip).
+const SRC_EXTENSIONS = /\.(ts|tsx|js|jsx|py|java|kt|go|rs|rb|swift|c|cpp|h|hpp)$/;
+const TEST_PATTERNS = /(\.(test|spec)\.|_test\.|Test\.)/;
+
+const PLAN_ZH = `你正在编辑源码文件，但 .agent/plans/ 下没有经过审查的方案或授权的豁免记录。动手前先做决策：
+- 需要方案：写 .agent/plans/<topic>.md，然后跑 agent-gates-review --plan <plan>
+- 不需要方案：跑 agent-gates-plan-decision skip --reason "<理由>" --topic <name>
+- trivial 改动可忽略
+
+门禁(CHECK 3)会在 commit 时验证决策痕迹。`;
+
+const PLAN_EN = `You're editing source files but .agent/plans/ has no reviewed plan or approved skip record. Make a decision before continuing:
+- Need a plan: write .agent/plans/<topic>.md, then run agent-gates-review --plan <plan>
+- Skip plan: run agent-gates-plan-decision skip --reason "<reason>" --topic <name>
+- Trivial changes can be ignored
+
+The pre-commit gate (CHECK 3) will verify the decision artifact at commit time.`;
+
+function detectSourceEditWithoutDecision(payload) {
+  if (!payload) return false;
+  const toolName = String(payload.tool_name || payload.tool || '').toLowerCase();
+  if (!/^(edit|write)$/.test(toolName)) return false;
+
+  const input = payload.tool_input || payload.input || {};
+  const filePath = String(input.file_path || input.path || '');
+  if (!filePath) return false;
+  if (!SRC_EXTENSIONS.test(filePath)) return false;
+  if (TEST_PATTERNS.test(filePath)) return false;
+
+  // Find .agent/plans/ relative to the file being edited — walk up from filePath
+
+  let dir = dirname(filePath);
+  let plansDir = null;
+  for (let i = 0; i < 10; i++) {
+    const candidate = join(dir, '.agent', 'plans');
+    if (existsSync(candidate)) { plansDir = candidate; break; }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+
+  if (!plansDir) return false; // not an init'd project
+
+  // Check for valid decision artifact
+  try {
+    const files = readdirSync(plansDir);
+
+    // Reviewed plan: any .md (not .skip.md) with PLAN_REVIEW markers
+    const hasReviewedPlan = files.some(f => {
+      if (!f.endsWith('.md') || f.endsWith('.skip.md')) return false;
+      try {
+        const content = readFileSync(join(plansDir, f), 'utf8');
+        return content.includes('PLAN_REVIEW:') && content.includes('PLAN_REVIEW_TOOL:') && content.includes('PLAN_REVIEW_MODEL:');
+      } catch { return false; }
+    });
+    if (hasReviewedPlan) return false; // silent
+
+    // Approved skip: .skip.md with GENERATED_BY
+    const hasApprovedSkip = files.some(f => {
+      if (!f.endsWith('.skip.md')) return false;
+      try {
+        const content = readFileSync(join(plansDir, f), 'utf8');
+        return content.includes('GENERATED_BY: agent-gates');
+      } catch { return false; }
+    });
+    if (hasApprovedSkip) return false; // silent
+
+    return true; // no valid artifact → fire reminder
+  } catch { return false; }
+}
+
 // --- Main ---
 function main() {
   let stdin = '';
@@ -180,6 +253,15 @@ ${REMINDER_ZH}
 
 ---
 ${REMINDER_EN}
+</system-reminder>`;
+  } else if (detectSourceEditWithoutDecision(payload)) {
+    reminder = `<system-reminder>
+[AGENT-GATES: Plan Decision Reminder]
+
+${PLAN_ZH}
+
+---
+${PLAN_EN}
 </system-reminder>`;
   } else if (detectPlanTimeTodos(payload)) {
     reminder = `<system-reminder>
