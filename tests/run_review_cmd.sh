@@ -300,6 +300,280 @@ test_invalid_output_fallback
 test_l1_omc_plugin
 test_l1_codex_preferred
 
+# ============================================================
+# v1.12.0: review model selection integration tests
+# When review-capability.json contains "review_models" segment,
+# bin/agent-gates-review uses lib/review-selection.sh fallback chain
+# instead of old L0-L3 routing.
+# ============================================================
+echo ""
+echo "--- v1.12.0: review model selection integration ---"
+
+# Helper: create review-capability.json with review_models segment
+make_cap_v2() {
+  local coding_vendor="$1" primary="$2" panel_pool="$3" panel_mode="${4:-auto}"
+  CAP_DIR=$(mktemp -d)
+  cat > "$CAP_DIR/review-capability.json" <<CAP
+{
+  "level": "L3",
+  "preferred_route": "opencode",
+  "fallback_route": "codex",
+  "review_models": {
+    "coding_vendor": "$coding_vendor",
+    "primary": "$primary",
+    "panel_pool": [$panel_pool],
+    "panel_active": 2,
+    "panel_mode": "$panel_mode"
+  }
+}
+CAP
+}
+
+# Model-aware fake opencode that checks --pure flag and responds per model.
+# Models starting with "ok/" succeed; models starting with "fail/" fail.
+make_fake_opencode_v2() {
+  FAKE_DIR=$(mktemp -d)
+  cat > "$FAKE_DIR/opencode" <<'FAKE'
+#!/usr/bin/env bash
+# v1.12.0 model-aware fake opencode
+# Checks --pure flag; responds based on model name prefix.
+HAS_PURE=false
+MODEL=""
+for arg in "$@"; do
+  case "$arg" in
+    --pure) HAS_PURE=true ;;
+  esac
+done
+# Parse -m <model>
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -m) MODEL="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+# Record what was called (for assertion)
+echo "CALLED_MODEL=$MODEL PURE=$HAS_PURE" >> "${FAKE_CALL_LOG:-/dev/null}"
+
+# Models prefixed "ok/" succeed with valid review output
+if [[ "$MODEL" == ok/* ]]; then
+  echo '{"type":"text","part":{"type":"text","text":"VERDICT: PASS\nReview by '"$MODEL"'."}}'
+  exit 0
+fi
+# Models prefixed "fail/" fail
+if [[ "$MODEL" == fail/* ]]; then
+  exit 1
+fi
+# Default: check FAKE_MODE env (backward compat with existing tests)
+case "${FAKE_MODE:-ok}" in
+  ok)
+    echo '{"type":"step_start","part":{"type":"step-start"}}'
+    echo '{"type":"text","part":{"type":"text","text":"VERDICT: PASS\nNo issues found."}}'
+    echo '{"type":"step_finish","part":{"type":"step-finish"}}'
+    exit 0 ;;
+  fail) exit 1 ;;
+esac
+FAKE
+  chmod +x "$FAKE_DIR/opencode"
+}
+
+# T15: review_models present → new selection path (not old L0-L3)
+test_v2_new_routing_path() {
+  echo "T15: review_models present → uses new selection fallback chain"
+  make_cap_v2 "claude" "ok/gpt-5.5" '"ok/gemini-pro","ok/deepseek-pro"'
+  make_fake_opencode_v2
+  PROMPT_FILE=$(mktemp); echo "review this" > "$PROMPT_FILE"
+  FAKE_CALL_LOG=$(mktemp)
+  out=$(AGENT_GATES_DIR="$CAP_DIR" OC_REVIEW_OPENCODE="$FAKE_DIR/opencode" \
+    FAKE_CALL_LOG="$FAKE_CALL_LOG" \
+    bash "$REVIEW_CMD" "$PROMPT_FILE" 2>/dev/null)
+  rc=$?
+  assert "exit 0 (new path succeeded)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+  # Must use the primary from review_models, not the default AG_REVIEW_MODEL
+  assert "used primary from review_models (ok/gpt-5.5)" "$(grep -q 'CALLED_MODEL=ok/gpt-5.5' "$FAKE_CALL_LOG" && echo true || echo false)"
+  rm -rf "$FAKE_DIR" "$CAP_DIR" "$PROMPT_FILE" "$FAKE_CALL_LOG"
+}
+
+# T16: no review_models → backward compat (original L0-L3 routing)
+test_v2_backward_compat() {
+  echo "T16: no review_models → original L0-L3 routing (backward compat)"
+  make_cap "L3" "opencode" "codex"
+  make_fake_opencode ok
+  PROMPT_FILE=$(mktemp); echo "review this" > "$PROMPT_FILE"
+  out=$(AGENT_GATES_DIR="$CAP_DIR" OC_REVIEW_OPENCODE="$FAKE_DIR/opencode" FAKE_MODE=ok \
+    bash "$REVIEW_CMD" "$PROMPT_FILE" 2>/dev/null)
+  rc=$?
+  assert "exit 0 (old path still works)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+  assert "VERDICT present" "$(echo "$out" | grep -q 'VERDICT: PASS' && echo true || echo false)"
+  rm -rf "$FAKE_DIR" "$CAP_DIR" "$PROMPT_FILE"
+}
+
+# T17: primary fails → panel model used via fallback chain
+test_v2_fallback_to_panel() {
+  echo "T17: primary fails → panel[0] used via fallback chain"
+  make_cap_v2 "claude" "fail/gpt-5.5" '"ok/gemini-pro","ok/deepseek-pro"'
+  make_fake_opencode_v2
+  PROMPT_FILE=$(mktemp)
+  python3 -c "print('x' * 600)" > "$PROMPT_FILE"
+  FAKE_CALL_LOG=$(mktemp)
+  out=$(AGENT_GATES_DIR="$CAP_DIR" OC_REVIEW_OPENCODE="$FAKE_DIR/opencode" \
+    FAKE_CALL_LOG="$FAKE_CALL_LOG" \
+    bash "$REVIEW_CMD" "$PROMPT_FILE" 2>/dev/null)
+  rc=$?
+  assert "exit 0 (panel fallback succeeded)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+  assert "panel model was tried" "$(grep -q 'CALLED_MODEL=ok/gemini-pro' "$FAKE_CALL_LOG" && echo true || echo false)"
+  assert "marker shows panel model (not primary)" "$(echo "$out" | grep -q 'ok/gemini-pro' && echo true || echo false)"
+  rm -rf "$FAKE_DIR" "$CAP_DIR" "$PROMPT_FILE" "$FAKE_CALL_LOG"
+}
+
+# T18: all models fail → HETERO_EXHAUSTED marker written
+test_v2_hetero_exhausted() {
+  echo "T18: all models fail → HETERO_EXHAUSTED marker"
+  make_cap_v2 "claude" "fail/gpt-5.5" '"fail/gemini-pro","fail/deepseek-pro"'
+  make_fake_opencode_v2
+  PROMPT_FILE=$(mktemp); echo "review this" > "$PROMPT_FILE"
+  RESULT_FILE=$(mktemp)
+  out=$(AGENT_GATES_DIR="$CAP_DIR" OC_REVIEW_OPENCODE="$FAKE_DIR/opencode" \
+    bash "$REVIEW_CMD" "$PROMPT_FILE" --result "$RESULT_FILE" 2>&1)
+  rc=$?
+  # Should still exit non-zero (75 = tool failed) or write HETERO_EXHAUSTED
+  # The HETERO_EXHAUSTED marker must appear in the result file or stderr
+  local has_marker=false
+  if [[ -f "$RESULT_FILE" ]] && grep -q 'HETERO_EXHAUSTED' "$RESULT_FILE"; then
+    has_marker=true
+  elif echo "$out" | grep -q 'HETERO_EXHAUSTED'; then
+    has_marker=true
+  fi
+  assert "HETERO_EXHAUSTED marker present" "$has_marker"
+  rm -rf "$FAKE_DIR" "$CAP_DIR" "$PROMPT_FILE" "$RESULT_FILE"
+}
+
+# T19: --pure flag passed to opencode (bypasses OMO orchestration)
+test_v2_pure_flag() {
+  echo "T19: --pure flag passed in new selection path"
+  make_cap_v2 "claude" "ok/gpt-5.5" '"ok/gemini-pro"'
+  make_fake_opencode_v2
+  PROMPT_FILE=$(mktemp); echo "review this" > "$PROMPT_FILE"
+  FAKE_CALL_LOG=$(mktemp)
+  out=$(AGENT_GATES_DIR="$CAP_DIR" OC_REVIEW_OPENCODE="$FAKE_DIR/opencode" \
+    FAKE_CALL_LOG="$FAKE_CALL_LOG" \
+    bash "$REVIEW_CMD" "$PROMPT_FILE" 2>/dev/null)
+  assert "--pure was passed" "$(grep -q 'PURE=true' "$FAKE_CALL_LOG" && echo true || echo false)"
+  rm -rf "$FAKE_DIR" "$CAP_DIR" "$PROMPT_FILE" "$FAKE_CALL_LOG"
+}
+
+# T20: panel_mode=off → only primary tried, no panel
+test_v2_panel_mode_off() {
+  echo "T20: panel_mode=off → only primary, no panel models tried"
+  make_cap_v2 "claude" "fail/gpt-5.5" '"ok/gemini-pro","ok/deepseek-pro"' "off"
+  make_fake_opencode_v2
+  PROMPT_FILE=$(mktemp); echo "review this" > "$PROMPT_FILE"
+  FAKE_CALL_LOG=$(mktemp)
+  out=$(AGENT_GATES_DIR="$CAP_DIR" OC_REVIEW_OPENCODE="$FAKE_DIR/opencode" \
+    FAKE_CALL_LOG="$FAKE_CALL_LOG" \
+    bash "$REVIEW_CMD" "$PROMPT_FILE" 2>&1)
+  rc=$?
+  # Primary fails and panel_mode=off → should NOT try panel models
+  assert "panel models NOT tried" "$(grep -q 'gemini-pro\|deepseek-pro' "$FAKE_CALL_LOG" && echo false || echo true)"
+  # Should fail since primary failed and no panel fallback
+  assert "exits non-zero (no panel fallback)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+  rm -rf "$FAKE_DIR" "$CAP_DIR" "$PROMPT_FILE" "$FAKE_CALL_LOG"
+}
+
+# T21: panel_mode=always → panel tried even for trivial severity
+test_v2_panel_mode_always() {
+  echo "T21: panel_mode=always → panel models tried regardless of severity"
+  make_cap_v2 "claude" "ok/gpt-5.5" '"ok/gemini-pro","ok/deepseek-pro"' "always"
+  make_fake_opencode_v2
+  PROMPT_FILE=$(mktemp); echo "short" > "$PROMPT_FILE"
+  FAKE_CALL_LOG=$(mktemp)
+  out=$(AGENT_GATES_DIR="$CAP_DIR" OC_REVIEW_OPENCODE="$FAKE_DIR/opencode" \
+    FAKE_CALL_LOG="$FAKE_CALL_LOG" \
+    bash "$REVIEW_CMD" "$PROMPT_FILE" 2>/dev/null)
+  rc=$?
+  assert "exit 0" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+  # Even though this is a trivial/short prompt, panel_mode=always means panel should be tried
+  # (or at least the routing should pass panel models to fallback chain)
+  # The primary succeeds so panel may not be called, but the models should be available
+  # For this test: primary succeeds → just verify new path was taken (not old routing)
+  assert "used new selection path" "$(grep -q 'CALLED_MODEL=ok/gpt-5.5' "$FAKE_CALL_LOG" && echo true || echo false)"
+  rm -rf "$FAKE_DIR" "$CAP_DIR" "$PROMPT_FILE" "$FAKE_CALL_LOG"
+}
+
+# T22: empty primary → should exit non-zero, not crash
+test_v2_empty_primary() {
+  echo "T22: empty/missing primary → graceful failure"
+  make_cap_v2 "claude" "" '"ok/gemini-pro"'
+  make_fake_opencode_v2
+  PROMPT_FILE=$(mktemp); echo "review this" > "$PROMPT_FILE"
+  out=$(AGENT_GATES_DIR="$CAP_DIR" OC_REVIEW_OPENCODE="$FAKE_DIR/opencode" \
+    bash "$REVIEW_CMD" "$PROMPT_FILE" 2>&1)
+  rc=$?
+  assert "exits non-zero (no valid primary)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+  rm -rf "$FAKE_DIR" "$CAP_DIR" "$PROMPT_FILE"
+}
+
+# T23: T21 enhanced — panel_mode=always, primary fails → panel actually tried
+test_v2_panel_mode_always_panel_engaged() {
+  echo "T23: panel_mode=always, primary fails → panel model actually used"
+  make_cap_v2 "claude" "fail/gpt-5.5" '"ok/gemini-pro","ok/deepseek-pro"' "always"
+  make_fake_opencode_v2
+  PROMPT_FILE=$(mktemp); echo "review this" > "$PROMPT_FILE"
+  FAKE_CALL_LOG=$(mktemp)
+  out=$(AGENT_GATES_DIR="$CAP_DIR" OC_REVIEW_OPENCODE="$FAKE_DIR/opencode" \
+    FAKE_CALL_LOG="$FAKE_CALL_LOG" \
+    bash "$REVIEW_CMD" "$PROMPT_FILE" 2>/dev/null)
+  rc=$?
+  assert "exit 0 (panel fallback succeeded)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+  assert "panel model gemini-pro was tried" "$(grep -q 'CALLED_MODEL=ok/gemini-pro' "$FAKE_CALL_LOG" && echo true || echo false)"
+  rm -rf "$FAKE_DIR" "$CAP_DIR" "$PROMPT_FILE" "$FAKE_CALL_LOG"
+}
+
+# T24: panel_mode=auto, short prompt → panel NOT tried (severity=trivial)
+test_v2_panel_mode_auto_short_prompt() {
+  echo "T24: panel_mode=auto, short prompt → only primary (no panel for trivial)"
+  make_cap_v2 "claude" "fail/gpt-5.5" '"ok/gemini-pro","ok/deepseek-pro"' "auto"
+  make_fake_opencode_v2
+  PROMPT_FILE=$(mktemp); echo "short" > "$PROMPT_FILE"
+  FAKE_CALL_LOG=$(mktemp)
+  out=$(AGENT_GATES_DIR="$CAP_DIR" OC_REVIEW_OPENCODE="$FAKE_DIR/opencode" \
+    FAKE_CALL_LOG="$FAKE_CALL_LOG" \
+    bash "$REVIEW_CMD" "$PROMPT_FILE" 2>&1)
+  rc=$?
+  assert "panel NOT tried (short prompt)" "$(grep -q 'gemini-pro\|deepseek-pro' "$FAKE_CALL_LOG" && echo false || echo true)"
+  assert "exits non-zero (primary failed, no panel)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+  rm -rf "$FAKE_DIR" "$CAP_DIR" "$PROMPT_FILE" "$FAKE_CALL_LOG"
+}
+
+# T25: panel_mode=auto, long prompt → panel tried (severity=important)
+test_v2_panel_mode_auto_long_prompt() {
+  echo "T25: panel_mode=auto, long prompt → panel models tried"
+  make_cap_v2 "claude" "fail/gpt-5.5" '"ok/gemini-pro","ok/deepseek-pro"' "auto"
+  make_fake_opencode_v2
+  PROMPT_FILE=$(mktemp)
+  python3 -c "print('x' * 600)" > "$PROMPT_FILE"
+  FAKE_CALL_LOG=$(mktemp)
+  out=$(AGENT_GATES_DIR="$CAP_DIR" OC_REVIEW_OPENCODE="$FAKE_DIR/opencode" \
+    FAKE_CALL_LOG="$FAKE_CALL_LOG" \
+    bash "$REVIEW_CMD" "$PROMPT_FILE" 2>/dev/null)
+  rc=$?
+  assert "exit 0 (panel fallback succeeded)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+  assert "panel model was tried" "$(grep -q 'CALLED_MODEL=ok/gemini-pro' "$FAKE_CALL_LOG" && echo true || echo false)"
+  rm -rf "$FAKE_DIR" "$CAP_DIR" "$PROMPT_FILE" "$FAKE_CALL_LOG"
+}
+
+test_v2_new_routing_path
+test_v2_backward_compat
+test_v2_fallback_to_panel
+test_v2_hetero_exhausted
+test_v2_pure_flag
+test_v2_panel_mode_off
+test_v2_panel_mode_always
+test_v2_empty_primary
+test_v2_panel_mode_always_panel_engaged
+test_v2_panel_mode_auto_short_prompt
+test_v2_panel_mode_auto_long_prompt
+
 echo ""
 read -r PASS FAIL < "$RESULTS_FILE"; rm -f "$RESULTS_FILE"
 echo "$PASS pass · $FAIL fail"

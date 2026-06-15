@@ -57,13 +57,10 @@ if [[ ! -f "$CAP_FILE" ]]; then
   echo "agent-gates-review: review-capability.json not found at $CAP_FILE — run install.sh or doctor.sh first" >&2
   exit 69
 fi
-
-LEVEL=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['level'])" "$CAP_FILE" 2>/dev/null || echo "L0")
-PREFERRED=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['preferred_route'])" "$CAP_FILE" 2>/dev/null || echo "agent-tool")
-FALLBACK=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('fallback_route','agent-tool'))" "$CAP_FILE" 2>/dev/null || echo "agent-tool")
-
 PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
 PROMPT_LEN=${#PROMPT_CONTENT}
+
+LEVEL=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['level'])" "$CAP_FILE" 2>/dev/null || echo "L0")
 
 # --- Helpers ---
 
@@ -81,8 +78,6 @@ output_result() {
   fi
 }
 
-# Parse opencode --format json stream → extract plain text parts.
-# Matches the OC_PARSE pattern from 30-delegation.md / agent-review-protocol.
 parse_opencode_json() {
   python3 -c "
 import sys, json
@@ -98,12 +93,79 @@ for line in sys.stdin:
 "
 }
 
-# Check if review output contains a substantive conclusion (not just a plan/intent).
 has_valid_conclusion() {
   local text="$1"
   echo "$text" | grep -qiE '^VERDICT:\s*(PASS|REVISE|FAIL|ISSUES|APPROVED|REJECT)' && return 0
   return 1
 }
+
+# --- v1.12.0: review model selection (new fallback chain path) ---
+
+_has_review_models() {
+  python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if 'review_models' in d else 1)" "$CAP_FILE" 2>/dev/null
+}
+
+if _has_review_models; then
+  _BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  source "$_BIN_DIR/../lib/review-selection.sh"
+
+  _RM_PRIMARY=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['review_models']['primary'])" "$CAP_FILE" 2>/dev/null)
+  if [[ -z "$_RM_PRIMARY" ]]; then
+    echo "agent-gates-review: review_models.primary is empty or missing" >&2
+    exit 75
+  fi
+  _RM_PANEL_MODE=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['review_models'].get('panel_mode','auto'))" "$CAP_FILE" 2>/dev/null)
+  _RM_PANEL_CSV=""
+
+  _AUTO_PANEL_THRESHOLD=500
+  if [[ "$_RM_PANEL_MODE" == "always" ]] || \
+     { [[ "$_RM_PANEL_MODE" == "auto" ]] && [[ $PROMPT_LEN -ge $_AUTO_PANEL_THRESHOLD ]]; }; then
+    _RM_PANEL_CSV=$(python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+rm = d['review_models']
+pool = rm.get('panel_pool', [])[:rm.get('panel_active', 2)]
+print(','.join(pool))
+" "$CAP_FILE" 2>/dev/null)
+  fi
+
+  _err_file=$(mktemp)
+
+  if [[ "$_RM_PANEL_MODE" == "off" ]]; then
+    _raw_output=$(_try_review_model "$_RM_PRIMARY" "$PROMPT_CONTENT" 2>"$_err_file")
+    _rc=$?
+  else
+    _raw_output=$(run_fallback_chain \
+      --primary "$_RM_PRIMARY" \
+      --panel "$_RM_PANEL_CSV" \
+      --prompt "$PROMPT_CONTENT" 2>"$_err_file")
+    _rc=$?
+  fi
+
+  if [[ $_rc -eq 0 && -n "$_raw_output" ]]; then
+    _parsed=$(echo "$_raw_output" | parse_opencode_json)
+    if [[ -n "$_parsed" ]] && has_valid_conclusion "$_parsed"; then
+      _actual_model="${_REVIEW_MODEL_USED:-$_RM_PRIMARY}"
+      _result=$(append_marker "opencode" "$_actual_model" "$_parsed")
+      output_result "$_result"
+      rm -f "$_err_file"
+      exit 0
+    fi
+  fi
+
+  _hetero_err=$(cat "$_err_file")
+  rm -f "$_err_file"
+  if [[ -n "$RESULT_FILE" ]]; then
+    echo "<!-- HETERO_EXHAUSTED: primary=$_RM_PRIMARY, panel=$_RM_PANEL_CSV -->" > "$RESULT_FILE"
+  fi
+  echo "${_hetero_err:-HETERO_EXHAUSTED: all review models failed (primary=$_RM_PRIMARY)}" >&2
+  exit 75
+fi
+
+# --- Legacy L0-L3 routing (no review_models in cap) ---
+
+PREFERRED=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['preferred_route'])" "$CAP_FILE" 2>/dev/null || echo "agent-tool")
+FALLBACK=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('fallback_route','agent-tool'))" "$CAP_FILE" 2>/dev/null || echo "agent-tool")
 
 # --- Review runners ---
 

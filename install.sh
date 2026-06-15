@@ -439,7 +439,7 @@ create_symlinks() {
         local src="$TARGET_DIR/$skill"
         local dst="$dir/$skill"
         [[ -d "$src" ]] || continue
-        [[ -L "$dst" || ! -e "$dst" ]] && ln -sf "$src" "$dst" 2>/dev/null && \
+        [[ -L "$dst" || ! -e "$dst" ]] && ln -sfn "$src" "$dst" 2>/dev/null && \
           info "Symlinked: $dst"
       done
     done
