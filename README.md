@@ -10,6 +10,12 @@ Runtime quality gates for AI coding agents. One install gives your team TDD enfo
 
 ```
 agent-gates/
+├── lib/hetero/                      # v2.0.0 hetero-check subsystem
+│   ├── config.sh                    # Config loader (env > json > legacy > default)
+│   ├── select.sh                    # Model selection + effort + risk grading
+│   ├── dispatch.sh                  # 5-channel dispatch + process-group spawn + fail-closed
+│   ├── serve.sh                     # Shared opencode serve + .draining lock
+│   └── janitor.sh                   # Lifecycle: measure + budget + recycle + circuit-breaker
 ├── skills/                          # Agent skills (auto-loaded by platforms)
 │   ├── agent-workflow-rules/        # TDD, plan review, verification, anti-loop
 │   ├── agent-review-protocol/       # Three-Agent Review, cross-check pipeline
@@ -18,11 +24,18 @@ agent-gates/
 │   └── memory/                      # Memory skill, bundled from clawic/skills (MIT, v1.5.4+)
 ├── hooks/
 │   ├── git/
-│   │   └── agent-quality-gate.sh    # Pre-commit: test correspondence + review evidence
+│   │   └── agent-quality-gate.sh    # Pre-commit: CHECK 1-6 (test + review + verifier)
 │   └── platform/
 │       └── memory-reminder.mjs      # PostToolUse: Memory persistence enforcement
 ├── templates/
+│   ├── verifier.md                  # v2.0.0 Verifier custom agent config
 │   └── .agent/                      # Project directory template
+├── bin/
+│   ├── agent-gates-verify-ack       # v2.0.0 USER_ACK writer (diff-hash bound)
+│   ├── agent-gates-verify-strip     # v2.0.0 Strip USER_ACK from agent output
+│   ├── agent-gates-config-migrate   # v2.0.0 Config v1→v2 migration
+│   ├── oc-review                    # opencode cross-review with retry + fail-closed
+│   └── oc-reaper                    # Clean orphaned opencode serve processes
 └── install.sh                       # Multi-platform installer
 ```
 
@@ -133,6 +146,26 @@ While the agent works inside a session, agent-gates automatically:
 
 ## What's New
 
+### v2.0.0 — hetero-check subsystem + Verifier role (BREAKING)
+
+**Breaking**: `lib/review-selection.sh` → `lib/hetero/select.sh` (shim kept for one minor); `review-capability.json` → `hetero-check.json` (`agent-gates-config-migrate` auto-converts).
+
+**hetero-check subsystem** (`lib/hetero/`): Named, structured subsystem for heterogeneous quality checks — previously scattered across oc-serve, D6 doctor, Gate 2b, and reaper.
+
+- **5-channel dispatch**: Paseo → opencode (fail-closed) → codex → codebuddy → claude-agent, with automatic effort injection (`--variant`/`--thinking`/`-c model_reasoning_effort`) and risk-based grading (`is_high_risk_path` shared helper).
+- **Resource lifecycle layer**: Process-group spawn (`setsid`/`perl POSIX::setsid()`, macOS compatible) + PGID kill (NOT `pkill -P`) + `.draining` TOCTOU lock + wall-clock watcher + circuit-breaker with cold-start detection + `HETERO_SPAWNED` attribution. Prevents recurrence of two real OOM incidents (opencode serve stacking 2.7GB; codebuddy --acp crash-loop 12.5GB).
+- **Config**: `hetero-check.json` with lifecycle budgets, effort tiers, channel toggles — all overridable via env vars.
+
+**Verifier role**: Black-box product verification after Writer + Reviewer pass.
+
+- `templates/verifier.md`: Claude Code custom agent config — runs the product from user perspective, reports issues, never modifies code.
+- **CHECK 6** in pre-commit gate: Four-state verdict (PASS / FAIL / QUESTIONS / INCOMPLETE). FAIL blocks; QUESTIONS/INCOMPLETE require `USER_ACK` (human confirmation via `agent-gates-verify-ack`, bound to `staged-diff-hash + HEAD`). High-risk paths require `FULL` capability (Paseo agent); `EVIDENCE_ONLY` (opencode single-shot) is downgraded to INCOMPLETE for high-risk.
+- `bin/agent-gates-verify-ack`: Writes `.ack` file after human confirmation, with `AGENT_MODE` guard.
+- `bin/agent-gates-verify-strip`: Strips `USER_ACK` markers from agent output (defense-in-depth).
+- `.agent/verify/` directory: Isolated from `.agent/reviews/` to prevent CHECK 5/6 cross-contamination.
+
+**Migration**: `bin/agent-gates-config-migrate` converts v1 → v2 config. Old paths have deprecation shims. `install.sh` auto-runs migration on first upgrade.
+
 ### v1.9.0 — Global upgrade (per-project gates auto-upgrade)
 
 The per-project gate is now a **thin shim** that delegates to the global authority, so `install.sh --upgrade` upgrades **every project at once** — no more re-running `init project gates` in each repo on every release.
@@ -179,8 +212,11 @@ The per-project gate is now a **thin shim** that delegates to the global authori
 
 | Command | Purpose |
 |---------|---------|
-| `oc-review run -m <model> --dir <wd> "<prompt>"` | opencode cross-review with retry-on-empty; exits 75 → caller falls back to codex |
-| `oc-reaper [--apply]` | clean orphaned `opencode serve` processes (default dry-run) |
+| `oc-review run -m <model> --dir <wd> "<prompt>"` | opencode cross-review with retry-on-empty + fail-closed (no bare run) |
+| `oc-reaper [--apply]` | clean orphaned `opencode serve` processes (PGID kill, default dry-run) |
+| `agent-gates-verify-ack <run_id> [reason]` | Write USER_ACK for a verify run after human confirmation (v2.0.0) |
+| `agent-gates-verify-strip` | Pipe filter: strip USER_ACK markers from verifier output (v2.0.0) |
+| `agent-gates-config-migrate` | Migrate v1 `review-capability.json` → v2 `hetero-check.json` (v2.0.0) |
 | `agent-gates-migrate [--apply] <root>...` | bulk-migrate old per-project gates to the v1.9.0 shim |
 | `agent-gates-version [<root>...]` | show the global gate version; list per-project shim/stale status |
 
@@ -190,7 +226,8 @@ The per-project gate is now a **thin shim** that delegates to the global authori
 .agent/
 ├── PROGRESS.md      # Sprint tracking, decisions, blockers (git tracked)
 ├── GATES.md         # Quality gates checklist (git tracked)
-├── reviews/         # Cross-review evidence files (git tracked)
+├── reviews/         # Cross-review evidence files (git tracked, CHECK 5)
+├── verify/          # Verifier evidence + dispatch artifacts + .ack (v2.0.0, CHECK 6)
 ├── plans/           # Implementation plans (git tracked)
 └── memory/          # Session memory (.gitignored)
 ```
@@ -222,6 +259,8 @@ The pre-commit hook ONLY fires for agent sessions (`AGENT_MODE=1`). Human develo
 **Gate 1 — Test Correspondence**: Every new source file must have a corresponding test file.
 
 **Gate 2 — Cross-Review Evidence**: When commits exceed threshold (`LOGIC_FILES > 1 AND DIFF > 50` OR `SINGLE_FILE > 150 lines`), requires a review file in `.agent/reviews/` with `VERDICT: PASS`.
+
+**CHECK 6 — Verifier Evidence** (v2.0.0): Same threshold as Gate 2, plus high-risk path detection. Requires `.agent/verify/*.md` with `VERIFY_VERDICT`. PASS → proceed; FAIL → block (fix first); QUESTIONS/INCOMPLETE → requires `USER_ACK: PROCEED` in `.ack` file (human confirmation, diff-hash bound). High-risk + EVIDENCE_ONLY capability → forced INCOMPLETE (must use FULL black-box channel). `SKIP_VERIFY=1` bypass for emergencies.
 
 ### Memory Persistence Reminder
 
@@ -431,9 +470,17 @@ init-project-gates          ─── sets up project ───►  .agent/ + ho
        ▼
 agent-workflow-rules        ─── governs how agent works ───►  TDD / verification
        │
-       │ review enforcement
-       ▼
-agent-review-protocol       ─── cross-check pipeline ───►  .agent/reviews/
+       ├── review enforcement
+       │         ▼
+       │   agent-review-protocol  ─── cross-check pipeline ───►  .agent/reviews/ (CHECK 5)
+       │
+       ├── verifier enforcement (v2.0.0)
+       │         ▼
+       │   hetero-check subsystem ─── dispatch + lifecycle ───►  .agent/verify/ (CHECK 6)
+       │         │
+       │         ├── dispatch (paseo/opencode/codex/codebuddy/claude)
+       │         ├── janitor (measure/budget/recycle/circuit-breaker)
+       │         └── verifier.md (black-box product verification)
        │
        │ persistence enforcement
        ▼
