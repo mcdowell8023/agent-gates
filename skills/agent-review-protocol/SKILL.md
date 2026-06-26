@@ -10,6 +10,9 @@ Code review quality enforcement for AI-assisted development. This skill defines 
 **Companion skills:**
 - `init-project-gates` — one-time project setup (hook, AGENTS.md, PROGRESS.md)
 - `agent-workflow-rules` — runtime discipline (TDD, plan review, verification)
+- `verifier.md` (v2.0.0) — black-box product verification (third role, after Writer + Reviewer); see `agent-workflow-rules §9B` and CHECK 6
+
+> **v2.0.0 Verifier role**: runs the product from user perspective after Writer + Reviewer pass. Four-state verdict: PASS / FAIL / QUESTIONS / INCOMPLETE. FAIL blocks the commit; QUESTIONS/INCOMPLETE require `USER_ACK` human sign-off (written by `agent-gates-verify-ack`, diff-hash bound). Never modifies code. Details: `agent-workflow-rules §9B`, `templates/verifier.md`.
 
 ---
 
@@ -527,6 +530,24 @@ So on any machine with opencode/codex installed, a review file MUST carry a `<!-
 **How to fix L0**: Install at least one external review tool to reach L1+:
 - Fastest: `npm install -g @openai/codex` (L1 — GPT cross-review)
 - Best: install opencode CLI from https://opencode.ai (L2 — multi-provider)
+
+### hetero-check Dispatch (v2.0.0 — Verifier / CHECK 6)
+
+The Verifier (CHECK 6) is dispatched via `lib/hetero/dispatch.sh` — a five-channel waterfall separate from the review routing above:
+
+| Priority | Channel | Capability | Notes |
+| --- | --- | --- | --- |
+| 1 | **Paseo agent** | FULL | Required for high-risk paths (`is_high_risk_path`); interactive session |
+| 2 | **opencode run** (fail-closed) | EVIDENCE_ONLY | `oc-review` wrapper; exit 75 on failure → next channel |
+| 3 | **codex exec** | EVIDENCE_ONLY | Prompt via stdin; `-s read-only` sandbox |
+| 4 | **codebuddy** | EVIDENCE_ONLY | `--acp` disabled by default (crash-loop guard from 12.5 GB incident) |
+| 5 | **claude-agent** (same model) | EVIDENCE_ONLY | Forced INCOMPLETE on high-risk path |
+
+**Effort injection** (`lib/hetero/select.sh`): risk-graded tier → per-channel flag: `--variant` (opencode), `--thinking` (codex), `-c model_reasoning_effort` (codebuddy).
+
+**Shared serve** (`lib/hetero/serve.sh`): persistent `opencode serve --pure --port 4096` + `.draining` TOCTOU lock. Prevents per-run serve stacking (the 2.7 GB OOM incident). PGID kill (not `pkill -P`); wall-clock watcher; circuit-breaker with cold-start detection.
+
+**High-risk enforcement**: high-risk path + EVIDENCE_ONLY capability → forced INCOMPLETE → requires `USER_ACK: PROCEED` in `.ack` file. Human writes `.ack` via `agent-gates-verify-ack` after manual inspection.
 
 ---
 

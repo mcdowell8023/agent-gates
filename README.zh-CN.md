@@ -10,6 +10,12 @@
 
 ```
 agent-gates/
+├── lib/hetero/                      # v2.0.0 hetero-check 子系统
+│   ├── config.sh                    # 配置加载（env > json > legacy > default）
+│   ├── select.sh                    # 模型选择 + effort + 风险分级
+│   ├── dispatch.sh                  # 五通道 dispatch + 进程组 spawn + fail-closed
+│   ├── serve.sh                     # 共享 opencode serve + .draining 锁
+│   └── janitor.sh                   # 生命周期：measure + budget + recycle + circuit-breaker
 ├── skills/                          # Agent skills（被各平台自动加载）
 │   ├── agent-workflow-rules/        # TDD、计划审查、验证、防环
 │   ├── agent-review-protocol/       # 三 Agent 评审、交叉检查流水线
@@ -18,11 +24,18 @@ agent-gates/
 │   └── memory/                      # Memory skill，bundled 自 clawic/skills（MIT，v1.5.4+）
 ├── hooks/
 │   ├── git/
-│   │   └── agent-quality-gate.sh    # Pre-commit：测试对应 + 审查证据
+│   │   └── agent-quality-gate.sh    # Pre-commit：CHECK 1-6（测试 + 审查 + Verifier）
 │   └── platform/
 │       └── memory-reminder.mjs      # PostToolUse：Memory 持久化强制
 ├── templates/
+│   ├── verifier.md                  # v2.0.0 Verifier 自定义 agent 配置
 │   └── .agent/                      # 项目目录模板
+├── bin/
+│   ├── agent-gates-verify-ack       # v2.0.0 USER_ACK 写入（diff-hash 绑定）
+│   ├── agent-gates-verify-strip     # v2.0.0 从 agent 输出剥离 USER_ACK
+│   ├── agent-gates-config-migrate   # v2.0.0 Config v1→v2 迁移
+│   ├── oc-review                    # opencode 交叉审查 + 重试 + fail-closed
+│   └── oc-reaper                    # 清理孤儿 opencode serve 进程
 └── install.sh                       # 多平台安装器
 ```
 
@@ -133,6 +146,26 @@ agent 在 session 内开发时，agent-gates 自动：
 
 ## 新特性
 
+### v2.0.0 — hetero-check 子系统 + Verifier 角色（BREAKING）
+
+**BREAKING**：`lib/review-selection.sh` → `lib/hetero/select.sh`（兼容 shim 保留一个 minor 周期）；`review-capability.json` → `hetero-check.json`（`agent-gates-config-migrate` 自动转换）。
+
+**hetero-check 子系统**（`lib/hetero/`）：命名结构化子系统，整合原先散落在 oc-serve、D6 doctor、Gate 2b、reaper 中的逻辑。
+
+- **五通道 dispatch**：Paseo → opencode（fail-closed）→ codex → codebuddy → claude-agent，自动注入 effort（`--variant` / `--thinking` / `-c model_reasoning_effort`）并基于 `is_high_risk_path` 进行风险分级。
+- **资源生命周期层**：进程组 spawn（`setsid` / `perl POSIX::setsid()`，兼容 macOS）+ PGID kill（非 `pkill -P`）+ `.draining` TOCTOU 锁 + wall-clock watcher + circuit-breaker 含冷启动检测 + `HETERO_SPAWNED` 归因。防止两起真实 OOM 事故重现（opencode serve 叠加 2.7 GB；codebuddy --acp 崩溃循环 12.5 GB）。
+- **配置**：`hetero-check.json` 含生命周期预算、effort 分级、通道开关——全部可通过环境变量覆盖。
+
+**Verifier 角色**：Writer + Reviewer 通过后的黑盒产品验收。
+
+- `templates/verifier.md`：Claude Code custom agent 配置——以用户视角运行产品、报告问题，**永不修改代码**。
+- **CHECK 6** pre-commit 门控：四态裁决（PASS / FAIL / QUESTIONS / INCOMPLETE）。FAIL 阻断；QUESTIONS/INCOMPLETE 需要 `USER_ACK`（人工通过 `agent-gates-verify-ack` 确认，绑定 `staged-diff-hash + HEAD`）。高风险路径要求 FULL 能力（Paseo agent）；EVIDENCE_ONLY 通道对高风险路径强制降级为 INCOMPLETE。
+- `bin/agent-gates-verify-ack`：人工确认后写入 `.ack` 文件，含 `AGENT_MODE` 防守。
+- `bin/agent-gates-verify-strip`：从 verifier 输出中剥离 `USER_ACK` 标记（纵深防御）。
+- `.agent/verify/` 目录：与 `.agent/reviews/` 隔离，防止 CHECK 5/6 交叉污染。
+
+**迁移**：`bin/agent-gates-config-migrate` 转换 v1 → v2 配置。老路径有废弃 shim。`install.sh` 首次升级时自动执行迁移。
+
 ### v1.9.0 — 全局升级（项目门禁自动跟随）
 
 per-project 门禁现在是**瘦 shim**,委派全局权威 gate,所以 `install.sh --upgrade` **一次升级所有项目**——不再需要每个仓重跑 `init project gates`。
@@ -181,6 +214,9 @@ per-project 门禁现在是**瘦 shim**,委派全局权威 gate,所以 `install.
 |------|------|
 | `oc-review run -m <model> --dir <wd> "<prompt>"` | opencode 交叉审查 + 空输出重试;exit 75 → 调用方 fallback codex |
 | `oc-reaper [--apply]` | 清理孤儿 `opencode serve` 进程（默认 dry-run） |
+| `agent-gates-verify-ack <run_id> [reason]` | 人工确认后写入 USER_ACK（v2.0.0） |
+| `agent-gates-verify-strip` | 管道过滤器：剥离 verifier 输出中的 USER_ACK 标记（v2.0.0） |
+| `agent-gates-config-migrate` | 迁移 v1 `review-capability.json` → v2 `hetero-check.json`（v2.0.0） |
 | `agent-gates-migrate [--apply] <root>...` | 批量把老门禁迁到 v1.9.0 shim |
 | `agent-gates-version [<root>...]` | 查看全局门禁版本;列各项目 shim/stale 状态 |
 
@@ -190,7 +226,8 @@ per-project 门禁现在是**瘦 shim**,委派全局权威 gate,所以 `install.
 .agent/
 ├── PROGRESS.md      # Sprint 跟踪、决策、阻塞（git 跟踪）
 ├── GATES.md         # 质量门控清单（git 跟踪）
-├── reviews/         # 交叉审查证据文件（git 跟踪）
+├── reviews/         # 交叉审查证据文件（git 跟踪，CHECK 5）
+├── verify/          # Verifier 证据 + dispatch artifacts + .ack（v2.0.0，CHECK 6）
 ├── plans/           # 实现计划（git 跟踪）
 └── memory/          # 会话记忆（.gitignored）
 ```
@@ -222,6 +259,8 @@ pre-commit hook 只对 agent session（`AGENT_MODE=1`）生效。人类开发者
 **Gate 1 — Test Correspondence**：每个新源码文件必须有对应的测试文件。
 
 **Gate 2 — Cross-Review Evidence**：当 commit 超过阈值（`LOGIC_FILES > 1 AND DIFF > 50` 或 `SINGLE_FILE > 150 行`），要求 `.agent/reviews/` 内存在 `VERDICT: PASS` 的审查文件。
+
+**CHECK 6 — Verifier Evidence**（v2.0.0）：与 Gate 2 阈值相同，加高风险路径检测。要求 `.agent/verify/*.md` 含 `VERIFY_VERDICT`。PASS → 放行；FAIL → 阻断（先修复）；QUESTIONS/INCOMPLETE → 需要 `.ack` 文件中的 `USER_ACK: PROCEED`（人工确认，绑定 diff-hash）。高风险路径 + EVIDENCE_ONLY 能力 → 强制 INCOMPLETE（必须走 FULL 黑盒通道）。`SKIP_VERIFY=1` 紧急逃生。
 
 ### Memory 持久化提醒
 
@@ -431,9 +470,17 @@ init-project-gates          ─── 设置项目 ───►  .agent/ + hook
        ▼
 agent-workflow-rules        ─── 管控 agent 如何工作 ───►  TDD / 验证
        │
-       │ 审查强制
-       ▼
-agent-review-protocol       ─── 交叉检查流水线 ───►  .agent/reviews/
+       ├── 审查强制
+       │         ▼
+       │   agent-review-protocol  ─── 交叉检查流水线 ───►  .agent/reviews/（CHECK 5）
+       │
+       ├── verifier 强制（v2.0.0）
+       │         ▼
+       │   hetero-check 子系统 ─── dispatch + 生命周期 ───►  .agent/verify/（CHECK 6）
+       │         │
+       │         ├── dispatch（paseo/opencode/codex/codebuddy/claude）
+       │         ├── janitor（measure/budget/recycle/circuit-breaker）
+       │         └── verifier.md（黑盒产品验收）
        │
        │ 持久化强制
        ▼

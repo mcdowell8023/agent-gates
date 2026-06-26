@@ -48,11 +48,14 @@ flowchart TB
         H2[agent-quality-gate.sh<br/>git pre-commit: AGENT_MODE=1<br/>+ Gate 2b 异构审查强制]
     end
 
-    subgraph bin["4 个 CLI 工具（~/.agent-gates/bin/）"]
+    subgraph bin["7 个 CLI 工具（~/.agent-gates/bin/）"]
         B1[oc-review<br/>opencode 审查重试]
         B2[oc-reaper<br/>孤儿 serve 清理]
         B3[agent-gates-migrate<br/>批量迁移到 shim]
         B4[agent-gates-version<br/>全局版本 + 项目状态]
+        B5[agent-gates-verify-ack<br/>USER_ACK 写入]
+        B6[agent-gates-verify-strip<br/>USER_ACK 标记剥离]
+        B7[agent-gates-config-migrate<br/>Config v1→v2 迁移]
     end
 
     subgraph platforms["支持的 agent 平台"]
@@ -297,6 +300,7 @@ v1.5.0-v1.9.0 连续 15 个版本把 L1/L2/L3 三层从"约 1/3"推到了"约 95
 | L3 CHECK 3 — 测试对应 | 新增 src 必有对应 test 文件 | Gate 1（多语言 ts/js/py/java/kt/go），原有 | ✅ 100% |
 | L3 CHECK 4 — tests pass | 设计明确**不放 hook**，由 CI 负责 | hook 不跑测试（符合设计） | ✅ 设计本意 |
 | L3 CHECK 5 — Cross-Review 证据 | `.agent/reviews/` + VERDICT + 新鲜度 | Gate 2 + v1.6.0 跨平台审查路由 + v1.7.0 Gate 2b 异构审查物理强制 | ✅ 100% |
+| L3 CHECK 6 — Verifier 证据 | `.agent/verify/` + VERIFY_VERDICT + 四态 + USER_ACK | `agent-quality-gate.sh` CHECK 6 + hetero-check dispatch + `bin/agent-gates-verify-ack`（v2.0.0） | ✅ 100% |
 | L2 Memory persistence | PostToolUse hook + 存档 reminder | `memory-reminder.mjs` + `agent-workflow-rules` §13；Memory skill v1.5.4 起内置（bundled），无网络依赖 | ✅ 100% |
 | 运维 — `check_superpowers_install` | 检测上游 skill 是否安装 | `doctor.sh` 检测 `test-driven-development` / `brainstorming` / `verification-before-completion` / `opsx:explore`（v1.5.1） | ✅ 100% |
 | 运维 — 依赖自动安装 | install.sh 自动装 Memory + Superpowers + OpenSpec | Memory 内置 cp（v1.5.4）+ Superpowers clone（v1.5.2）+ OpenSpec 交互询问（v1.5.2） | ✅ 100% |
@@ -313,7 +317,7 @@ L1 OpenSpec 规划层：  ██████████████████
 L2 BDD 实现层：       ██████████████████░░  90%（§6 Gherkin + features 脚手架 + step_definitions）
 L2 TDD + Review：     ████████████████████  100%（§4 TDD + Three-Agent + 跨平台审查路由 + Gate 2b 异构强制）
 L2 Memory：           ████████████████████  100%（内置 skill + PostToolUse hook + Parallelism Reminder）
-L3 5 个 CHECK：       ██████████████████░░  90%（CHECK 1-3,5 全部实现；CHECK 4 by CI 符合设计）
+L3 6 个 CHECK：       ████████████████████  100%（CHECK 1-3,5,6 全部实现；CHECK 4 by CI 符合设计）
 运维基础设施：        ████████████████████  100%（三平台注册 + doctor + 审查路由 + opencode 可靠性 + 全局升级）
 ```
 
@@ -465,10 +469,66 @@ L3 5 个 CHECK：       ██████████████████�
 | **v1.7.1-v1.7.2** | 2026-06-02 | 版本号修复 | install banner / gate 版本从 `.version` 文件动态读取（消除硬编码残留） |
 | **v1.8.0** | 2026-06-02 | opencode 可靠性 | `oc-review`（opencode 空输出重试）+ `oc-reaper`（孤儿 serve 进程清理）+ doctor check_opencode_health |
 | **v1.9.0** | 2026-06-03 | 全局升级 | per-project gate 改瘦 shim（exec 全局权威）→ install --upgrade 一次升所有项目 / `agent-gates-migrate`（批量迁移老拷贝到 shim）/ `agent-gates-version`（全局版本+项目状态） |
+| **v2.0.0** | 2026-06-27 | hetero-check 子系统 + Verifier（BREAKING） | `lib/hetero/` 五模块（config/select/dispatch/serve/janitor）/ Verifier 四态裁决 + USER_ACK CHECK 6 / 资源生命周期层（防两起 OOM）/ effort 风险分级 / `hetero-check.json` 替代 `review-capability.json` / 三个新 bin/ 命令 |
 
 ---
 
-### 5.8 跟 agent-superpowers 怎么比
+### 5.8 v2.0.0 hetero-check 子系统与 Verifier 角色（BREAKING）
+
+**BREAKING**：`lib/review-selection.sh` → `lib/hetero/select.sh`（兼容 shim 保留一个 minor 周期）；`review-capability.json` → `hetero-check.json`（`agent-gates-config-migrate` 自动转换）。
+
+#### hetero-check 子系统（`lib/hetero/` 五模块）
+
+将原来分散在 oc-serve、D6 doctor、Gate 2b、reaper 中的逻辑归并为命名结构化子系统：
+
+| 模块 | 职责 |
+|---|---|
+| `config.sh` | 配置加载（env > json > legacy > default） |
+| `select.sh` | 模型选择 + effort 分级 + `is_high_risk_path` 风险判断 |
+| `dispatch.sh` | 五通道 dispatch + 进程组 spawn + fail-closed |
+| `serve.sh` | 共享 `opencode serve` + `.draining` TOCTOU 锁 |
+| `janitor.sh` | 资源生命周期：measure + budget + recycle + circuit-breaker |
+
+**五通道优先级**（Verifier / CHECK 6 专用 dispatch）：
+
+| 优先级 | 通道 | 能力级别 | 说明 |
+|---|---|---|---|
+| 1 | Paseo agent | FULL | 高风险路径必须用此通道；支持交互验收会话 |
+| 2 | opencode run（fail-closed） | EVIDENCE_ONLY | exit 75 失败→降级 |
+| 3 | codex exec | EVIDENCE_ONLY | 通过 stdin 传 prompt；`-s read-only` 沙箱 |
+| 4 | codebuddy | EVIDENCE_ONLY | `--acp` 默认禁用（防崩溃循环 12.5 GB 事故） |
+| 5 | claude-agent（同模型） | EVIDENCE_ONLY | 高风险路径强制 INCOMPLETE |
+
+#### 资源生命周期层（防两起 OOM 事故）
+
+- **进程组 spawn**：`setsid` / `perl POSIX::setsid()`（兼容 macOS），kill 用 PGID 而不是 `pkill -P`。
+- **共享 serve**：`lib/hetero/serve.sh` 维护持久 `opencode serve --pure --port 4096` + `.draining` TOCTOU 锁，防止 per-run serve 叠加（2.7 GB OOM 事故的根因）。
+- **wall-clock watcher + circuit-breaker**：含冷启动检测，防止 codebuddy `--acp` 崩溃循环（12.5 GB OOM 事故的根因）。
+- **HETERO_SPAWNED 归因**：子进程携带标记，janitor 可区分 hetero-check 产出与用户进程，避免误杀。
+
+#### effort 风险分级
+
+`lib/hetero/select.sh` 根据 `is_high_risk_path` 助手函数（共享）将 commit 路径分级：
+
+- 高风险（安全 / 认证 / 数据迁移 / 支付）→ `effort=high`，强制 FULL 能力通道（Paseo）
+- 普通路径 → `effort=medium`，EVIDENCE_ONLY 通道即可
+
+per-channel effort 注入：`--variant`（opencode）、`--thinking`（codex）、`-c model_reasoning_effort`（codebuddy）。
+
+#### Verifier 角色（四态 + USER_ACK）
+
+- **`templates/verifier.md`**：Claude Code custom agent 配置——以用户视角黑盒运行产品、报告问题，**永不修改代码**。
+- **CHECK 6 四态裁决**：
+  - `PASS` → 放行 commit
+  - `FAIL` → 阻断（先修复再提交）
+  - `QUESTIONS` → 需要 `USER_ACK: PROCEED`（人工确认）
+  - `INCOMPLETE` → 需要 `USER_ACK: PROCEED`（人工确认）
+- **USER_ACK 机制**：`bin/agent-gates-verify-ack <run_id>` 写入 `.ack` 文件，与 `staged-diff-hash + HEAD` 绑定，含 `AGENT_MODE` 防守——防止 agent 自己写 ACK 绕过人工审核。
+- **`.agent/verify/`**：与 `.agent/reviews/` 隔离，防止 CHECK 5/6 证据交叉污染。
+
+---
+
+### 5.9 跟 agent-superpowers 怎么比
 
 agent-superpowers 是 **L2 纪律规则的另一种交付形态**——它把规则做成一个 SKILL.md + 一段 AGENTS.md snippet，靠 agent 自觉遵守。agent-gates 与它**并列存在**：
 
@@ -508,7 +568,7 @@ cd agent-gates && ./install.sh
 1. 检测 agent 平台（OMC / OMO / OMX / cc-switch），找不到就装到默认 `~/.claude/skills/`
 2. 复制 5 个 skill 到对应平台的 skills 目录
 3. 部署 hook 文件（authority gate + gate-shim 源）到 `~/.agent-gates/hooks/`
-4. 部署 CLI 工具到 `~/.agent-gates/bin/`（oc-review / oc-reaper / agent-gates-migrate / agent-gates-version）
+4. 部署 CLI 工具到 `~/.agent-gates/bin/`（oc-review / oc-reaper / agent-gates-migrate / agent-gates-version / agent-gates-verify-ack / agent-gates-verify-strip / agent-gates-config-migrate）
 5. 注册 PostToolUse hook 到平台 settings.json / hooks.json
 6. 安装依赖（Memory 内置 / Superpowers clone / OpenSpec 询问）
 7. 检测异构审查工具 → `review-capability.json`
@@ -600,19 +660,28 @@ sequenceDiagram
 
 ```
 ~/.agent-gates/                          # 全局安装位置
-├── .version                             # 1.9.0
+├── .version                             # 2.0.0
 ├── doctor.sh                            # 体检工具
-├── review-capability.json               # 异构审查工具检测结果（v1.6.0+）
+├── hetero-check.json                    # 异构检查配置（v2.0.0+，替代 review-capability.json）
 ├── hooks/
 │   ├── platform/memory-reminder.mjs     # PostToolUse hook（Memory + Parallelism Reminder）
 │   └── git/
-│       ├── agent-quality-gate.sh        # 全局权威 gate（Gate 1 + 2 + 2b + CHECK 1/2）
+│       ├── agent-quality-gate.sh        # 全局权威 gate（Gate 1/2/2b + CHECK 1/2/6）
 │       └── gate-shim.sh                 # shim 源（init 时复制到项目，v1.9.0+）
+├── lib/hetero/                          # v2.0.0 异构检查子系统
+│   ├── config.sh
+│   ├── select.sh
+│   ├── dispatch.sh
+│   ├── serve.sh
+│   └── janitor.sh
 └── bin/
     ├── oc-review                        # opencode 审查重试（v1.8.0+）
     ├── oc-reaper                        # 孤儿 opencode serve 清理（v1.8.0+）
     ├── agent-gates-migrate              # 批量迁移老拷贝到 shim（v1.9.0+）
-    └── agent-gates-version              # 全局版本 + 项目状态查看（v1.9.0+）
+    ├── agent-gates-version              # 全局版本 + 项目状态查看（v1.9.0+）
+    ├── agent-gates-verify-ack           # USER_ACK 写入（v2.0.0+）
+    ├── agent-gates-verify-strip         # USER_ACK 标记剥离（v2.0.0+）
+    └── agent-gates-config-migrate       # Config v1→v2 迁移（v2.0.0+）
 
 ~/.claude/skills/                        # OMC skills（或对应平台路径）
 ├── init-project-gates/SKILL.md
@@ -628,7 +697,8 @@ sequenceDiagram
 <project>/.agent/                        # 仓库内（init-project-gates 创建）
 ├── PROGRESS.md                          # Sprint 进度（git 跟踪）
 ├── GATES.md                             # 质量门 checklist
-├── reviews/                             # 交叉审查证据（git 跟踪）
+├── reviews/                             # 交叉审查证据（git 跟踪，CHECK 5）
+├── verify/                              # Verifier 证据 + .ack（git 跟踪，CHECK 6，v2.0.0+）
 ├── plans/                               # 实现计划（git 跟踪）
 └── memory/                              # 会话 memory（.gitignored）
 
@@ -658,7 +728,7 @@ sequenceDiagram
 ## 9. 资源
 
 - GitHub: <https://github.com/mcdowell8023/agent-gates>
-- 当前版本：v1.9.0（2026-06-03）
+- 当前版本：v2.0.0（2026-06-27）
 - 许可：MIT
 - 平台 hook 协议详解：[docs/platform-hooks.md](./platform-hooks.md)
 - 体检工具：`~/.agent-gates/doctor.sh --help`
