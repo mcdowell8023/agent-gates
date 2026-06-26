@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# bin/agent-gates-config-migrate — v1→v2 configuration migration tool.
+# Reads $AGENT_GATES_DIR/review-capability.json (v1), writes hetero-check.json (v2).
+# Preserves old file as review-capability.json.v1bak (never deleted).
+# Usage: agent-gates-config-migrate [--dry-run]
+
+set -euo pipefail
+
+GATES_DIR="${AGENT_GATES_DIR:-$HOME/.agent-gates}"
+OLD_FILE="$GATES_DIR/review-capability.json"
+NEW_FILE="$GATES_DIR/hetero-check.json"
+BAK_FILE="$GATES_DIR/review-capability.json.v1bak"
+DRY_RUN=0
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+info()  { echo -e "${GREEN}✓${NC} $1"; }
+warn()  { echo -e "${YELLOW}⚠${NC} $1"; }
+fail()  { echo -e "${RED}✗${NC} $1" >&2; exit 1; }
+
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=1 ;;
+    -h|--help)
+      echo "Usage: agent-gates-config-migrate [--dry-run]"
+      echo "  Migrates v1 review-capability.json to v2 hetero-check.json."
+      echo "  review_models → hetero_models; adds lifecycle/effort/verifier/channels defaults."
+      echo "  Preserves old file as review-capability.json.v1bak."
+      exit 0 ;;
+    *) fail "Unknown option: $arg" ;;
+  esac
+done
+
+command -v python3 &>/dev/null || fail "python3 required for config migration"
+
+# Fresh install: no v1 config found
+if [[ ! -f "$OLD_FILE" ]]; then
+  echo "No v1 config found, creating fresh hetero-check.json"
+  [[ "$DRY_RUN" -eq 1 ]] && { warn "Dry-run: would create $NEW_FILE"; exit 0; }
+  mkdir -p "$GATES_DIR"
+  python3 - "$NEW_FILE" <<'PYEOF'
+import json, os, sys
+new_file = sys.argv[1]
+cfg = {
+    "version": "2.0.0", "level": "L0", "coding_vendor": "claude",
+    "hetero_models": {"primary": "", "panel_pool": [], "panel_active": 1, "panel_mode": "auto"},
+    "effort": {
+        "reviewer": {"normal": "medium", "high_risk": "high"},
+        "verifier": {"normal": "medium", "high_risk": "high"}
+    },
+    "lifecycle": {
+        "opencode": {"rss_max_mb": 1500, "max_age_s": 7200, "max_runs": 50},
+        "agent_max_wall_s": 600, "crash_loop_max": 3, "cold_start_s": 10,
+        "cooldown_s": 300, "janitor_cron": False
+    },
+    "verifier": {"self_repair_max": 0, "default_supervised": False, "hetero_preferred": True},
+    "channels": {
+        "paseo": {"enabled": True, "verifier_role": "audit"},
+        "opencode": {"enabled": True}, "codex": {"enabled": True}, "codebuddy": {"enabled": True}
+    }
+}
+tmp = new_file + ".tmp." + str(os.getpid())
+with open(tmp, 'w') as f:
+    json.dump(cfg, f, indent=2); f.write('\n')
+os.rename(tmp, new_file)
+PYEOF
+  info "Created: $NEW_FILE (default config)"
+  exit 0
+fi
+
+# v1 migration
+echo "Migrating v1 config: $OLD_FILE → $NEW_FILE"
+[[ "$DRY_RUN" -eq 1 ]] && { warn "Dry-run: would migrate $OLD_FILE → $NEW_FILE (backup: $BAK_FILE)"; exit 0; }
+
+python3 - "$OLD_FILE" "$NEW_FILE" "$BAK_FILE" <<'PYEOF'
+import json, os, sys, shutil
+old_file, new_file, bak_file = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(old_file) as f:
+    v1 = json.load(f)
+default_models = {"primary": "", "panel_pool": [], "panel_active": 1, "panel_mode": "auto"}
+v2 = {
+    "version": "2.0.0",
+    "level": v1.get("level", "L0"),
+    "coding_vendor": "claude",
+    "hetero_models": v1.get("hetero_models") or v1.get("review_models") or default_models,
+    "effort": {
+        "reviewer": {"normal": "medium", "high_risk": "high"},
+        "verifier": {"normal": "medium", "high_risk": "high"}
+    },
+    "lifecycle": {
+        "opencode": {"rss_max_mb": 1500, "max_age_s": 7200, "max_runs": 50},
+        "agent_max_wall_s": 600, "crash_loop_max": 3, "cold_start_s": 10,
+        "cooldown_s": 300, "janitor_cron": False
+    },
+    "verifier": {"self_repair_max": 0, "default_supervised": False, "hetero_preferred": True},
+    "channels": {
+        "paseo": {"enabled": True, "verifier_role": "audit"},
+        "opencode": {"enabled": True}, "codex": {"enabled": True}, "codebuddy": {"enabled": True}
+    }
+}
+tmp = new_file + ".tmp." + str(os.getpid())
+with open(tmp, 'w') as f:
+    json.dump(v2, f, indent=2); f.write('\n')
+os.rename(tmp, new_file)
+shutil.copy2(old_file, bak_file)
+PYEOF
+
+info "Migrated: $NEW_FILE"
+info "Backup:   $BAK_FILE"

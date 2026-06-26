@@ -1,21 +1,64 @@
 #!/usr/bin/env bash
-# oc-review — opencode run with retry-on-empty.
+# oc-review — opencode run with retry-on-empty + shared serve (v1.13.0).
 # Mitigates the "P2" failure mode where `opencode run` exits 0 but produces EMPTY
 # output (observed in both bare and --attach modes). Detects empty output and retries;
 # if still empty after retries, exits 75 (EX_TEMPFAIL) with an `oc-review:`-prefixed
 # stderr line so the caller can fall back to a different reviewer (e.g. codex) per
-# agent-review-protocol §8 — WITHOUT relying on a bare exit code that could collide
-# with opencode's own.
+# agent-review-protocol §8.
 #
-# Usage:  oc-review run -m <model> --dir <wd> "<prompt>"   (args passed straight to `opencode run`)
+# v1.13.0: auto-manages a shared `opencode serve --pure --port 4096` and injects
+# `--attach` to route all runs through it, eliminating per-run serve stacking.
+# Set OC_SERVE_DISABLED=1 to skip serve integration.
+#
+# Usage:  oc-review run -m <model> --dir <wd> "<prompt>"
 # Env:
 #   OC_REVIEW_RETRIES   extra attempts after the first (default 2 → up to 3 total)
 #   OC_REVIEW_OPENCODE  opencode binary (default "opencode"; overridable for tests)
+#   OC_SERVE_DISABLED   set to 1 to skip shared serve integration
 # Source: https://github.com/mcdowell8023/agent-gates
 set -uo pipefail
 
 RETRIES="${OC_REVIEW_RETRIES:-2}"
 OPENCODE="${OC_REVIEW_OPENCODE:-opencode}"
+
+# v1.13.0: shared serve integration
+_SERVE_ATTACH=()
+_OC_SERVE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/hetero/serve.sh"
+if [[ -z "${OC_SERVE_DISABLED:-}" ]]; then
+  # F8 fix: if serve integration is expected (OC_SERVE_DISABLED not set) but
+  # serve.sh is missing, fail-closed rather than silently bare-running opencode.
+  if [[ ! -f "$_OC_SERVE_LIB" ]]; then
+    echo "oc-review: serve.sh missing at $_OC_SERVE_LIB — fail-closed; set OC_SERVE_DISABLED=1 to allow bare-run" >&2
+    exit 75
+  fi
+  source "$_OC_SERVE_LIB"
+  if oc_serve_ensure 2>/dev/null; then
+    # R4: check if --attach already present in args
+    _has_attach=false
+    for _a in "$@"; do [[ "$_a" == "--attach" ]] && _has_attach=true; done
+    if [[ "$_has_attach" == false ]]; then
+      _SERVE_ATTACH=(--attach "$OC_SERVE_URL")
+    fi
+  else
+    # fail-closed: serve integration attempted but failed — do NOT bare-run opencode.
+    # Exit 75 (EX_TEMPFAIL) so the caller can fall back to a different reviewer.
+    echo "oc-review: serve integration failed (oc_serve_ensure returned non-zero) — fail-closed, not bare-running opencode; caller should fall back per agent-review-protocol §8" >&2
+    exit 75
+  fi
+fi
+
+_build_args() {
+  local found_run=false
+  for arg in "$@"; do
+    printf '%s\0' "$arg"
+    if [[ "$found_run" == false && "$arg" == "run" ]]; then
+      found_run=true
+      if [[ ${#_SERVE_ATTACH[@]} -gt 0 ]]; then
+        printf '%s\0' "${_SERVE_ATTACH[@]}"
+      fi
+    fi
+  done
+}
 
 tmp=$(mktemp); errtmp=$(mktemp)
 trap 'rm -f "$tmp" "$errtmp"' EXIT
@@ -23,16 +66,19 @@ trap 'rm -f "$tmp" "$errtmp"' EXIT
 attempt=0
 while :; do
   attempt=$((attempt + 1))
-  # Capture BOTH opencode's exit code and stderr — do NOT `|| true` (that would hide
-  # a real error: non-zero+output would look like success, non-zero+empty would be
-  # misreported as the P2 empty-flake).
-  "$OPENCODE" "$@" > "$tmp" 2>"$errtmp"
+
+  if [[ ${#_SERVE_ATTACH[@]} -gt 0 ]]; then
+    args=()
+    while IFS= read -r -d '' a; do args+=("$a"); done < <(_build_args "$@")
+    "$OPENCODE" "${args[@]}" > "$tmp" 2>"$errtmp"
+  else
+    "$OPENCODE" "$@" > "$tmp" 2>"$errtmp"
+  fi
   rc=$?
 
   has_output=0
   if [[ -s "$tmp" ]] && grep -q '[^[:space:]]' "$tmp"; then has_output=1; fi
 
-  # Success = clean exit AND meaningful output. (The P2 flake is rc==0 + empty.)
   if [[ "$rc" -eq 0 && "$has_output" -eq 1 ]]; then
     cat "$tmp"
     exit 0
@@ -45,7 +91,7 @@ while :; do
     else
       echo "oc-review: opencode produced empty output after $attempt attempt(s) — likely the P2 flake; caller should fall back (e.g. codex) per agent-review-protocol §8" >&2
     fi
-    exit 75   # EX_TEMPFAIL — caller should fall back to a different reviewer
+    exit 75
   fi
   if [[ "$rc" -ne 0 ]]; then
     echo "oc-review: opencode exit $rc, retrying ($attempt/$RETRIES)..." >&2

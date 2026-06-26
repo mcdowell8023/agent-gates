@@ -248,7 +248,11 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
         # (no opencode/codex) is exempt: there is no heterogeneous alternative.
         if [[ "${SKIP_HETERO_CHECK:-0}" != "1" ]]; then
           HETERO_DIR="${AGENT_GATES_DIR:-$HOME/.agent-gates}"
-          CAP_FILE="$HETERO_DIR/review-capability.json"
+          if [[ -f "$HETERO_DIR/hetero-check.json" ]]; then
+            CAP_FILE="$HETERO_DIR/hetero-check.json"
+          else
+            CAP_FILE="$HETERO_DIR/review-capability.json"
+          fi
           if [[ -f "$CAP_FILE" ]]; then
             CAP_LEVEL=$(grep -oE '"level"[[:space:]]*:[[:space:]]*"L[0-3]"' "$CAP_FILE" 2>/dev/null | grep -oE 'L[0-3]' | head -1 || true)
             if [[ "$CAP_LEVEL" == "L1" || "$CAP_LEVEL" == "L2" || "$CAP_LEVEL" == "L3" ]]; then
@@ -260,9 +264,17 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
                 echo "        then add a header line to the review file: <!-- REVIEW_LEVEL: L1 -->  (or higher)."
                 echo "   Override (genuine exception, e.g. stale config): SKIP_HETERO_CHECK=1"
               elif [[ "$RLEVEL" == "L0" ]]; then
-                fail "Review is same-model (REVIEW_LEVEL: L0) but machine supports heterogeneous ($CAP_LEVEL)"
-                echo "   Fix: re-run cross-review via a different model (opencode/codex — §8)."
-                echo "   Override (genuine exception): SKIP_HETERO_CHECK=1"
+                # v1.13.0 Gate 2b: HETERO_EXHAUSTED exception — all heterogeneous
+                # models failed, agent-gates-review fell back to agent-tool L0.
+                # R6: require BOTH html comment format AND L0 level to prevent bypass.
+                if grep -q '<!-- HETERO_EXHAUSTED:' "$REVIEW_FILE" 2>/dev/null; then
+                  echo "⚠️  Gate 2b: HETERO_EXHAUSTED — all heterogeneous review models failed; degrading to warn"
+                  echo "   Review was completed with agent-tool (L0) as last resort."
+                else
+                  fail "Review is same-model (REVIEW_LEVEL: L0) but machine supports heterogeneous ($CAP_LEVEL)"
+                  echo "   Fix: re-run cross-review via a different model (opencode/codex — §8)."
+                  echo "   Override (genuine exception): SKIP_HETERO_CHECK=1"
+                fi
               fi
             fi
           fi
@@ -271,6 +283,151 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
     fi
   elif [[ ! -d .agent ]]; then
     echo "⚠️  No .agent/ directory — cross-review check skipped (run init-project-gates)."
+  fi
+fi
+
+# === CHECK 6: Verifier 验收 (v2.0.0) ===
+# Triggered when change is substantial (mirrors CHECK 5 thresholds) or touches a
+# high-risk path (shared is_high_risk_path helper from lib/hetero/select.sh §3.2).
+# Reads VERIFY_VERDICT from .agent/verify/<date>-<topic>.md (directory isolated from
+# .agent/reviews/ used by CHECK 5). High-risk + EVIDENCE_ONLY capability downgrades
+# PASS to INCOMPLETE requiring USER_ACK (§5.3 required_capability).
+if [[ "${SKIP_VERIFY:-0}" != "1" ]]; then
+  NEEDS_VERIFY=0
+  [[ "$LOGIC_FILES" -gt 1 && "$DIFF_LINES" -gt 50 ]] && NEEDS_VERIFY=1
+  [[ "$MAX_SINGLE_FILE_LINES" -gt 150 ]] && NEEDS_VERIFY=1
+
+  # Source shared high-risk helper located relative to this script (BASH_SOURCE[0])
+  IS_HIGH_RISK=0
+  _GATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  _VERIFY_SELECT_SH="$_GATE_DIR/../../lib/hetero/select.sh"
+  if [[ -f "$_VERIFY_SELECT_SH" ]]; then
+    # shellcheck disable=SC1090
+    source "$_VERIFY_SELECT_SH"
+    _VERIFY_HR=$(is_high_risk_path 2>/dev/null || echo "0")
+    if [[ "$_VERIFY_HR" == "1" ]]; then
+      IS_HIGH_RISK=1
+      NEEDS_VERIFY=1
+    fi
+  fi
+
+  if [[ "$NEEDS_VERIFY" -eq 1 ]]; then
+    if [[ -d .agent && ! -d .agent/verify ]]; then
+      fail "No verifier evidence (.agent/verify/ missing)"
+      echo "   Fix: Run verifier agent, save output to .agent/verify/<date>-<topic>.md"
+    elif [[ -d .agent/verify ]]; then
+      # Pick the newest verify file by mtime (within 4h); mirrors Gate 2 selection logic
+      VERIFY_FILE=""
+      VERIFY_NEWEST_MTIME=0
+      while IFS= read -r vf; do
+        [[ -z "$vf" || ! -f "$vf" ]] && continue
+        vf_mtime=$(stat -f %m "$vf" 2>/dev/null || stat -c %Y "$vf" 2>/dev/null || echo "0")
+        if [[ "$vf_mtime" -gt "$VERIFY_NEWEST_MTIME" ]]; then
+          VERIFY_NEWEST_MTIME="$vf_mtime"
+          VERIFY_FILE="$vf"
+        fi
+      done < <(find .agent/verify/ -name "*.md" -mmin -240 2>/dev/null)
+
+      if [[ -z "$VERIFY_FILE" ]]; then
+        fail "Verifier evidence missing or stale (>4h old)"
+        echo "   Fix: Run verifier agent, save to .agent/verify/\$(date +%Y-%m-%d)-<topic>.md"
+      else
+        VERIFY_VERDICT=$(grep -oiE '^VERIFY_VERDICT:[[:space:]]*(PASS|FAIL|QUESTIONS|INCOMPLETE)' \
+          "$VERIFY_FILE" 2>/dev/null \
+          | grep -oiE 'PASS|FAIL|QUESTIONS|INCOMPLETE' | head -1 | tr '[:lower:]' '[:upper:]' \
+          || echo "")
+
+        if [[ -z "$VERIFY_VERDICT" ]]; then
+          fail "Verifier file missing VERIFY_VERDICT line: $VERIFY_FILE"
+          echo "   Fix: Add 'VERIFY_VERDICT: PASS' (or FAIL/QUESTIONS/INCOMPLETE) to the file"
+        else
+          VERIFY_RUN_ID=$(basename "$VERIFY_FILE" .md)
+          DISPATCH_FILE=".agent/verify/${VERIFY_RUN_ID}.dispatch.json"
+          VERIFY_CAP=""
+          if [[ -f "$DISPATCH_FILE" ]]; then
+            VERIFY_CAP=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d.get('capability', ''))
+except Exception:
+    pass
+" "$DISPATCH_FILE" 2>/dev/null || echo "")
+          else
+            fail "No dispatch artifact for verify run $VERIFY_RUN_ID"
+          fi
+
+          # High-risk + EVIDENCE_ONLY: downgrade PASS to INCOMPLETE (§5.3 required_capability)
+          if [[ "$IS_HIGH_RISK" -eq 1 && "$VERIFY_CAP" == "EVIDENCE_ONLY" && "$VERIFY_VERDICT" == "PASS" ]]; then
+            VERIFY_VERDICT="INCOMPLETE"
+            echo "⚠️  CHECK 6: high-risk path + EVIDENCE_ONLY capability — downgraded to INCOMPLETE (needs USER_ACK)"
+          fi
+
+          case "$VERIFY_VERDICT" in
+            PASS)
+              # Freshness: post-verify source changes ≤ 20 lines (mirrors Gate 2 post-review check)
+              VERIFY_MTIME=$(stat -f %m "$VERIFY_FILE" 2>/dev/null || stat -c %Y "$VERIFY_FILE" 2>/dev/null || echo "0")
+              POST_VERIFY_LINES=0
+              while IFS= read -r sf; do
+                [[ -z "$sf" || ! -f "$sf" ]] && continue
+                SF_MTIME=$(stat -f %m "$sf" 2>/dev/null || stat -c %Y "$sf" 2>/dev/null || echo "0")
+                if [[ "$SF_MTIME" -gt "$VERIFY_MTIME" ]]; then
+                  sf_lines=$(git diff --cached -- "$sf" | grep -c '^+[^+]' 2>/dev/null || echo "0")
+                  POST_VERIFY_LINES=$((POST_VERIFY_LINES + sf_lines))
+                fi
+              done < <(git diff --cached --name-only --diff-filter=ACMR \
+                | grep -vE '(\.(lock|md|json|yaml|yml)$|generated/|migrations/|\.d\.ts$)')
+              if [[ "$POST_VERIFY_LINES" -gt 20 ]]; then
+                fail "Significant changes ($POST_VERIFY_LINES lines) made AFTER verification — re-verify required"
+              fi
+              ;;
+            FAIL)
+              fail "Verifier found real defects — fix before commit"
+              echo "   Review: $VERIFY_FILE"
+              ;;
+            QUESTIONS|INCOMPLETE)
+              ACK_FILE=".agent/verify/${VERIFY_RUN_ID}.ack"
+              if [[ -f "$ACK_FILE" ]]; then
+                _ACK_MTIME=$(stat -f %m "$ACK_FILE" 2>/dev/null || stat -c %Y "$ACK_FILE" 2>/dev/null || echo "0")
+                _V6_NOW=$(date +%s)
+                _ACK_AGE=$(( _V6_NOW - _ACK_MTIME ))
+                if [[ "$_ACK_AGE" -le 14400 ]] && grep -q 'USER_ACK: PROCEED' "$ACK_FILE" 2>/dev/null; then
+                  # Hash binding: if staged_diff_hash is present in .ack, verify it matches
+                  # current staged diff (excluding .agent/verify/ to avoid chicken-and-egg).
+                  # Missing hash field = old-style .ack without binding, skip check (backward compat).
+                  _ACK_HASH=$(grep '^staged_diff_hash:' "$ACK_FILE" 2>/dev/null | awk '{print $2}' | head -1 || true)
+                  _ACK_HEAD=$(grep '^HEAD:' "$ACK_FILE" 2>/dev/null | awk '{print $2}' | head -1 || true)
+                  if [[ -n "$_ACK_HASH" ]]; then
+                    if command -v sha256sum >/dev/null 2>&1; then
+                      _CURRENT_HASH=$(git diff --cached -- ':!.agent/verify' | sha256sum | cut -d' ' -f1)
+                    else
+                      _CURRENT_HASH=$(git diff --cached -- ':!.agent/verify' | shasum -a 256 | cut -d' ' -f1)
+                    fi
+                    _CURRENT_HEAD=$(git rev-parse HEAD 2>/dev/null || echo "")
+                    if [[ "$_ACK_HASH" != "$_CURRENT_HASH" ]]; then
+                      fail "Verifier ACK stale — staged diff changed since ACK was written (re-run verifier + confirm)"
+                      echo "   ACK hash:     $_ACK_HASH"
+                      echo "   Current hash: $_CURRENT_HASH"
+                    elif [[ -n "$_ACK_HEAD" && "$_ACK_HEAD" != "$_CURRENT_HEAD" ]]; then
+                      fail "Verifier ACK stale — HEAD changed since ACK was written (new commit since confirmation)"
+                    fi
+                  fi
+                  # else: no hash field — backward-compat, skip hash check
+                else
+                  fail "Verifier needs user confirmation (stale or invalid .ack)"
+                  echo "   Fix: Re-run verifier workflow to regenerate .agent/verify/${VERIFY_RUN_ID}.ack"
+                fi
+              else
+                fail "Verifier needs user confirmation (no .ack file)"
+                echo "   Fix: After reviewing verifier output, confirm via workflow to create .agent/verify/${VERIFY_RUN_ID}.ack"
+              fi
+              ;;
+          esac
+        fi
+      fi
+    elif [[ ! -d .agent ]]; then
+      echo "⚠️  No .agent/ directory — verify check skipped (run init-project-gates)."
+    fi
   fi
 fi
 

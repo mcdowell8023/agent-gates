@@ -497,6 +497,22 @@ install_hook_files() {
     cp "$REPO_DIR/hooks/shell/codegraph-chpwd.zsh" "$INSTALL_DIR/hooks/shell/codegraph-chpwd.zsh"
     info "Installed: codegraph-chpwd.zsh (opt-in; see --codegraph-hook)"
   fi
+
+  # v2.0.0: deploy lib/ (includes hetero/ subdirectory) and data/ directories
+  for dir in lib data; do
+    if [[ -d "$REPO_DIR/$dir" ]]; then
+      mkdir -p "$INSTALL_DIR/$dir"
+      cp -R "$REPO_DIR/$dir"/. "$INSTALL_DIR/$dir/" 2>/dev/null || true
+      info "Installed: $dir/"
+    fi
+  done
+
+  # v2.0.0: deploy templates/
+  if [[ -d "$REPO_DIR/templates" ]]; then
+    mkdir -p "$INSTALL_DIR/templates"
+    cp -R "$REPO_DIR/templates"/. "$INSTALL_DIR/templates/" 2>/dev/null || true
+    info "Installed: templates/"
+  fi
 }
 
 # --- Hook configuration constants ---
@@ -721,6 +737,19 @@ detect_review_capability() {
   esc_codex_path=$(printf '%s' "$codex_path" | sed 's/["\]/\\&/g')
   esc_codex_version=$(printf '%s' "$codex_version" | sed 's/["\]/\\&/g')
 
+  # R2: preserve existing review_models from prior doctor.sh D6 run
+  local existing_review_models=""
+  if [[ -f "$out_file" ]] && command -v python3 &>/dev/null; then
+    existing_review_models=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    rm = d.get('review_models')
+    if rm: print(json.dumps(rm))
+except: pass
+" "$out_file" 2>/dev/null || true)
+  fi
+
   cat > "$tmp_file" <<RCEOF
 {
   "detected_at": "${detected_at}",
@@ -739,6 +768,17 @@ detect_review_capability() {
   "ultimate_fallback": "agent-tool"
 }
 RCEOF
+
+  # R2: merge back preserved review_models
+  if [[ -n "$existing_review_models" ]]; then
+    python3 -c "
+import json, sys
+with open(sys.argv[1]) as f: d = json.load(f)
+d['review_models'] = json.loads(sys.argv[2])
+with open(sys.argv[1], 'w') as f: json.dump(d, f, indent=2)
+    " "$tmp_file" "$existing_review_models" 2>/dev/null || true
+  fi
+
   mv "$tmp_file" "$out_file"
 
   # -- report --
@@ -837,6 +877,18 @@ main() {
   [[ "$CODEGRAPH_HOOK" -eq 1 ]] && register_codegraph_hook
   install_external_deps
   detect_review_capability
+
+  # v2.0.0: auto-migrate v1 config to hetero-check.json
+  if [[ -f "$INSTALL_DIR/hetero-check.json" ]]; then
+    info "hetero-check.json exists, skipping migrate"
+  elif [[ -x "$INSTALL_DIR/bin/agent-gates-config-migrate" && -f "$INSTALL_DIR/review-capability.json" ]]; then
+    section "Migrating v1 config → hetero-check.json"
+    if AGENT_GATES_DIR="$INSTALL_DIR" "$INSTALL_DIR/bin/agent-gates-config-migrate" 2>/dev/null; then
+      info "Config migrated: $INSTALL_DIR/hetero-check.json"
+    else
+      warn "Config migration failed — run manually: AGENT_GATES_DIR=$INSTALL_DIR agent-gates-config-migrate"
+    fi
+  fi
 
   section "Done!"
   echo ""

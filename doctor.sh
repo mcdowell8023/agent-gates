@@ -445,10 +445,33 @@ check_cross_review_capability() {
     fallback=""
   fi
 
+  # -- D6: build review_models when opencode available --
+  local review_models_json=""
+  if [[ "$opencode_available" == "true" ]]; then
+    local selection_lib="$INSTALL_DIR/lib/hetero/select.sh"
+    local rec_file="$INSTALL_DIR/data/review-model-recommendations.json"
+    if [[ -f "$selection_lib" ]]; then
+      # shellcheck disable=SC1090
+      source "$selection_lib"
+      local d6_platform
+      d6_platform="${AGENT_GATES_PLATFORM:-}"
+      if [[ -z "$d6_platform" ]]; then
+        if [[ -f "$HOME/.claude/settings.json" ]]; then d6_platform="omc"
+        elif [[ -f "$HOME/.config/opencode/hooks.json" ]]; then d6_platform="omo"
+        else d6_platform="unknown"; fi
+      fi
+      local rm_json
+      if rm_json=$(build_review_models "$d6_platform" "$rec_file" 2>/dev/null); then
+        review_models_json=",
+  \"review_models\": $rm_json"
+      fi
+    fi
+  fi
+
   # -- persist to JSON (atomic write, escaped values) --
   local detected_at out_file tmp_file
   detected_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%S" || true)
-  out_file="$INSTALL_DIR/review-capability.json"
+  out_file="$INSTALL_DIR/hetero-check.json"
   tmp_file="${out_file}.tmp.$$"
 
   local esc_opencode_path esc_codex_path esc_codex_version
@@ -471,10 +494,11 @@ check_cross_review_capability() {
   ],
   "preferred_route": "${preferred}",
   "fallback_route": "${fallback:-agent-tool}",
-  "ultimate_fallback": "agent-tool"
+  "ultimate_fallback": "agent-tool"${review_models_json}
 }
 RCEOF
   mv "$tmp_file" "$out_file"
+  cp "$out_file" "$INSTALL_DIR/review-capability.json"
 
   # -- report --
   if [[ "$level" == "L3" ]]; then
@@ -533,6 +557,26 @@ check_opencode_health() {
   else
     pass "opencode serve health: $total active, 0 orphaned"
   fi
+
+  # v1.13.0: shared serve health + RSS
+  local serve_port="${OC_SERVE_PORT:-${OC_REVIEW_PORT:-4096}}"
+  local serve_pid
+  serve_pid=$(pgrep -f "opencode serve.*port ${serve_port}" 2>/dev/null | head -1)
+  if [[ -n "$serve_pid" ]]; then
+    local serve_rss rss_mb
+    serve_rss=$(ps -o rss= -p "$serve_pid" 2>/dev/null | tr -d ' ')
+    rss_mb=$(( (${serve_rss:-0} + 512) / 1024 ))
+    if [[ $rss_mb -gt 1024 ]]; then
+      warn "shared serve :${serve_port} RSS=${rss_mb}MB — restart recommended (oc-reaper or manual)"
+    elif [[ $rss_mb -gt 512 ]]; then
+      warn "shared serve :${serve_port} RSS=${rss_mb}MB — elevated, monitor"
+    else
+      pass "shared serve :${serve_port} healthy (RSS=${rss_mb}MB, pid=$serve_pid)"
+    fi
+  else
+    note "shared serve :${serve_port} not running"
+  fi
+
   return 0
 }
 

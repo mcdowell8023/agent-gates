@@ -1,0 +1,11 @@
+{
+  "version": "1.13.0",
+  "vendors": {
+    "gpt": ["github-copilot/gpt-5.5"],
+    "gemini": ["github-copilot/gemini-3.1-pro-preview"],
+    "deepseek": ["bailian/deepseek-v4-pro"],
+    "kimi": ["bailian/kimi-k2.6"],
+    "qwen": ["bailian/qwen3.7-max"]
+  },
+  "excluded_patterns": ["flash", "glm"]
+}

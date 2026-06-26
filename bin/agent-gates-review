@@ -31,7 +31,11 @@
 set -uo pipefail
 
 GATES_DIR="${AGENT_GATES_DIR:-$HOME/.agent-gates}"
-CAP_FILE="$GATES_DIR/review-capability.json"
+if [[ -f "$GATES_DIR/hetero-check.json" ]]; then
+  CAP_FILE="$GATES_DIR/hetero-check.json"
+else
+  CAP_FILE="$GATES_DIR/review-capability.json"
+fi
 CODEX="${AG_REVIEW_CODEX:-codex}"
 MODEL="${AG_REVIEW_MODEL:-github-copilot/gpt-5.5}"
 MAX_CHARS="${AG_REVIEW_MAX_CHARS:-800}"
@@ -102,19 +106,32 @@ has_valid_conclusion() {
 # --- v1.12.0: review model selection (new fallback chain path) ---
 
 _has_review_models() {
-  python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if 'review_models' in d else 1)" "$CAP_FILE" 2>/dev/null
+  python3 -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+sys.exit(0 if ('hetero_models' in d or 'review_models' in d) else 1)
+" "$CAP_FILE" 2>/dev/null
+}
+
+_get_review_models_key() {
+  python3 -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+print('hetero_models' if 'hetero_models' in d else 'review_models')
+" "$CAP_FILE" 2>/dev/null
 }
 
 if _has_review_models; then
   _BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  source "$_BIN_DIR/../lib/review-selection.sh"
+  source "$_BIN_DIR/../lib/hetero/select.sh"
+  _RM_KEY=$(_get_review_models_key)
 
-  _RM_PRIMARY=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['review_models']['primary'])" "$CAP_FILE" 2>/dev/null)
+  _RM_PRIMARY=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d[sys.argv[2]]['primary'])" "$CAP_FILE" "$_RM_KEY" 2>/dev/null)
   if [[ -z "$_RM_PRIMARY" ]]; then
     echo "agent-gates-review: review_models.primary is empty or missing" >&2
     exit 75
   fi
-  _RM_PANEL_MODE=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['review_models'].get('panel_mode','auto'))" "$CAP_FILE" 2>/dev/null)
+  _RM_PANEL_MODE=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d[sys.argv[2]].get('panel_mode','auto'))" "$CAP_FILE" "$_RM_KEY" 2>/dev/null)
   _RM_PANEL_CSV=""
 
   _AUTO_PANEL_THRESHOLD=500
@@ -123,10 +140,10 @@ if _has_review_models; then
     _RM_PANEL_CSV=$(python3 -c "
 import json, sys
 d = json.load(open(sys.argv[1]))
-rm = d['review_models']
+rm = d[sys.argv[2]]
 pool = rm.get('panel_pool', [])[:rm.get('panel_active', 2)]
 print(','.join(pool))
-" "$CAP_FILE" 2>/dev/null)
+" "$CAP_FILE" "$_RM_KEY" 2>/dev/null)
   fi
 
   _err_file=$(mktemp)
@@ -178,7 +195,15 @@ run_opencode() {
     raw=$("$oc_review" run -m "$MODEL" --dir "${PWD}" --format json "$PROMPT_CONTENT" 2>/dev/null)
     rc=$?
   else
-    raw=$("$opencode_bin" run -m "$MODEL" --dir "${PWD}" --format json "$PROMPT_CONTENT" 2>/dev/null)
+    local _ro_script_dir
+    _ro_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [[ -z "${_OC_SERVE_SOURCED:-}" && -f "$_ro_script_dir/../lib/hetero/serve.sh" ]]; then
+      source "$_ro_script_dir/../lib/hetero/serve.sh"
+    fi
+    if ! oc_serve_ensure 2>/dev/null; then
+      return 1
+    fi
+    raw=$("$opencode_bin" run --attach "$OC_SERVE_URL" -m "$MODEL" --dir "${PWD}" --format json "$PROMPT_CONTENT" 2>/dev/null)
     rc=$?
   fi
 

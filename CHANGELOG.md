@@ -2,6 +2,51 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.0.0 — hetero-check 异构检查子系统 + Verifier
+
+### Breaking Changes
+- `lib/review-selection.sh` → `lib/hetero/select.sh`（shim 保留一个 minor）
+- `lib/oc-serve.sh` → `lib/hetero/serve.sh`（shim 保留）
+- `review-capability.json` → `hetero-check.json`（`agent-gates-config-migrate` 自动转换）
+- `review_models` 字段 → `hetero_models`
+
+### Added
+- **Verifier 角色**：`templates/verifier.md` + CHECK 6 gate（四态 PASS/FAIL/QUESTIONS/INCOMPLETE + USER_ACK 方案 A）
+- **hetero-check 子系统** `lib/hetero/`：config / discover / select / dispatch / serve / janitor
+- **资源生命周期层**：进程组 spawn(setsid/perl) + PGID kill + .draining 回收 + 熔断 + 墙钟 watcher + 归因
+- **effort 维度**：`(model, effort)` 二元组，按风险分级
+- **opencode fail-closed**：无 attach URL 禁裸跑（防事故 1 复发）
+- `bin/agent-gates-verify-ack`：USER_ACK 写入工具（绑 diff-hash + HEAD）
+- `bin/agent-gates-verify-strip`：strip agent 输出的 USER_ACK 串
+- `bin/agent-gates-config-migrate`：v1→v2 配置迁移
+
+### Fixed
+- macOS `pkill -P` 不杀孙进程 → 进程组 `kill -TERM/-KILL -- -<PGID>`
+- opencode serve 堆叠 OOM（事故 1）→ fail-closed + 共享 serve
+- codebuddy --acp 崩溃循环（事故 2）→ janitor 熔断 + 整树清理
+
+## [1.13.0] - 2026-06-16
+
+### Added (共享 serve + D6 选型 + HETERO_EXHAUSTED)
+
+- **`lib/oc-serve.sh` 共享 serve 库** — 常驻 `opencode serve --pure --port 4096`，所有审查通过 `--attach` 复用，消除 per-run serve 堆叠（P1 内存泄漏，实测 2.7GB RSS 导致 kernel panic）。`mkdir` 原子锁 + PID 写入检测死进程，ensure 失败降级裸 run 不阻断审查。`OC_SERVE_DISABLED=1` 跳过集成。
+- **`bin/oc-review` v2** — 自动管理共享 serve，启动时 `oc_serve_ensure()`，注入 `--attach` 到 `run` 子命令后。R4: 检查参数是否已有 `--attach` 避免重复。null-delimited `_build_args()` 安全传参。
+- **`data/review-model-recommendations.json`** — 静态模型推荐：gpt/gemini/deepseek/kimi/qwen vendors，excluded_patterns (flash, glm)。
+- **`lib/review-selection.sh` D6 选型** — `detect_available_models()` + `build_review_models()` + `_probe_model()`：vendor 归组 → 剔除 flash/coding 同源 → 交集推荐列表 → 实测可达 → 输出 review_models JSON。`_try_review_model()` 改用 `--attach` 复用共享 serve。
+- **`doctor.sh` D6 集成** — `check_cross_review_capability()` 调 `build_review_models()`，结果写入 review-capability.json `review_models` 段。`check_opencode_health()` 增加共享 serve RSS/运行时长监控（>512MB warn，>1024MB restart）。
+- **Gate 2b HETERO_EXHAUSTED** — 全异构模型失败 → agent-tool L0 → Gate 2b 不再死锁。双条件防绕过：`<!-- HETERO_EXHAUSTED:` HTML 注释格式 + `REVIEW_LEVEL: L0` 同时满足才放行。
+- **`bin/oc-reaper` 增强** — pgrep 增加 `opencode run.*attach.*:${port}` 辅助信号，精确识别 `--attach` 客户端。
+- **`install.sh` R3 修复** — 部署 `lib/` 和 `data/` 目录（v1.12.0 预存 bug：安装态缺 review-selection.sh）。
+- **`install.sh` R2 修复** — `detect_review_capability()` 保留已有 `review_models` 段，不再覆盖 doctor.sh 的 D6 输出。
+- **`agent-review-protocol` SKILL.md** — 所有 `opencode run` 模板加 `--pure`，§8 Route 1 描述更新为共享 serve + D6 model selection。
+
+### Why / 背景
+
+- 根因（实证 2026-06-16）：Paseo 管理的 `opencode serve` 每次 run 新起随机端口 serve，20000+ timeline items 堆到 2.7GB RSS，触发 macOS kernel panic。v1.8.0 的 reaper 不覆盖 Paseo 管的 serve。
+- 方案：常驻共享 serve + `--attach` 复用，Phase 0 验证 `--attach --pure` 兼容性通过。
+- D6 选型算法：解决 doctor.sh 只检测工具存在不选模型的问题，反向异构（coding vendor 是 Claude → primary 选 GPT/Gemini）+ 推荐列表交集 + 实测可达。
+- HETERO_EXHAUSTED：解决全异构失败时 Gate 2b block 死锁（agent-tool L0 是唯一出路但 gate 不允许 L0）。
+
 ## [1.9.0] - 2026-06-03
 
 ### Added (全局升级 — 终结"每个项目手动升级"的黑暗时刻)

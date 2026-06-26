@@ -5,7 +5,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SELECTION_LIB="$SCRIPT_DIR/../lib/review-selection.sh"
+SELECTION_LIB="$SCRIPT_DIR/../lib/hetero/select.sh"
 RESULTS_FILE=$(mktemp); echo "0 0" > "$RESULTS_FILE"
 
 assert() {

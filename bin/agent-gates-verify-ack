@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# agent-gates-verify-ack — write USER_ACK for a verify run after human confirmation.
+# Usage: agent-gates-verify-ack <verify_run_id> [reason]
+#
+# Writes .agent/verify/<verify_run_id>.ack binding the current staged diff hash and
+# HEAD so the gate can detect stale ACKs when code changes after confirmation.
+# The .ack file is NOT git-staged (gate reads it from the working tree).
+
+set -euo pipefail
+
+PROG="$(basename "$0")"
+usage() {
+  echo "Usage: $PROG <verify_run_id> [reason]"
+  echo ""
+  echo "  verify_run_id  Basename of the verify document (without .md extension)"
+  echo "  reason         Optional description of why user is confirming (default: 'user confirmed')"
+  exit 1
+}
+
+[[ $# -lt 1 ]] && usage
+
+VERIFY_RUN_ID="$1"
+REASON="${2:-user confirmed}"
+VERIFY_DIR=".agent/verify"
+
+if [[ "${AGENT_MODE:-}" == "1" && "${ASK_USER_CONFIRMED:-}" != "1" ]]; then
+  echo "agent-gates-verify-ack: ACK must be triggered by human confirmation (ASK_USER_CONFIRMED=1), not agent" >&2
+  exit 1
+fi
+
+# Validate verify document exists
+if ! find "$VERIFY_DIR" -maxdepth 1 -name "${VERIFY_RUN_ID}*.md" 2>/dev/null | grep -q .; then
+  echo "Error: No verify document matching '${VERIFY_RUN_ID}' found in ${VERIFY_DIR}/" >&2
+  echo "       Expected: ${VERIFY_DIR}/${VERIFY_RUN_ID}.md" >&2
+  exit 1
+fi
+
+# Compute staged diff hash — exclude .agent/verify/ to avoid chicken-and-egg
+# (writing the .ack would change what it's supposed to bind)
+if command -v sha256sum >/dev/null 2>&1; then
+  STAGED_DIFF_HASH=$(git diff --cached -- ':!.agent/verify' | sha256sum | cut -d' ' -f1)
+else
+  STAGED_DIFF_HASH=$(git diff --cached -- ':!.agent/verify' | shasum -a 256 | cut -d' ' -f1)
+fi
+
+# Current HEAD commit
+HEAD=$(git rev-parse HEAD 2>/dev/null || echo "")
+
+# ISO 8601 timestamp
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%SZ")
+
+ACK_FILE="${VERIFY_DIR}/${VERIFY_RUN_ID}.ack"
+ACK_TMP="${ACK_FILE}.tmp.$$"
+
+# Atomic write: write to tmp then rename
+cat > "$ACK_TMP" <<EOF
+USER_ACK: PROCEED
+verify_run_id: ${VERIFY_RUN_ID}
+staged_diff_hash: ${STAGED_DIFF_HASH}
+HEAD: ${HEAD}
+reason: ${REASON}
+timestamp: ${TIMESTAMP}
+EOF
+
+mv "$ACK_TMP" "$ACK_FILE"
+
+echo "✅ ACK written: $ACK_FILE"
+echo "   run_id:  $VERIFY_RUN_ID"
+echo "   hash:    $STAGED_DIFF_HASH"
+echo "   HEAD:    $HEAD"
+echo "   reason:  $REASON"

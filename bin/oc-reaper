@@ -22,6 +22,11 @@ APPLY=0
 MIN_AGE="${OC_REAPER_MIN_AGE:-120}"
 KEEP_PORT="${OC_REVIEW_PORT:-}"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${SCRIPT_DIR}/../lib/hetero/dispatch.sh" ]]; then
+  source "${SCRIPT_DIR}/../lib/hetero/dispatch.sh"
+fi
+
 if ! command -v lsof >/dev/null 2>&1; then
   echo "oc-reaper: lsof not found — connection check unavailable; aborting to stay safe" >&2
   exit 69   # EX_UNAVAILABLE
@@ -50,10 +55,12 @@ while IFS= read -r pid; do
   if [[ "$age" -lt "$MIN_AGE" ]]; then kept=$((kept+1)); continue; fi
   # in-use? (conservative: keep if either signal says so)
   if lsof -nP -iTCP:"$port" -sTCP:ESTABLISHED >/dev/null 2>&1; then kept=$((kept+1)); continue; fi
-  if pgrep -f "opencode run.*${port}" >/dev/null 2>&1; then kept=$((kept+1)); continue; fi
+  if pgrep -f "opencode run.*--port ${port}" >/dev/null 2>&1; then kept=$((kept+1)); continue; fi
+  if pgrep -f "opencode run.*attach.*:${port}" >/dev/null 2>&1; then kept=$((kept+1)); continue; fi
   # orphan
   if [[ "$APPLY" -eq 1 ]]; then
-    kill -9 "$pid" 2>/dev/null && echo "reaped serve :$port pid=$pid (age ${age}s)"
+    reap_pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+    hetero_kill_tree "${reap_pgid:-$pid}" 0 2>/dev/null && echo "reaped serve :$port pid=$pid (age ${age}s)"
   else
     echo "[dry-run] would reap serve :$port pid=$pid (age ${age}s, no client)"
   fi

@@ -185,6 +185,76 @@ test_main_flow_calls_install_external_deps() {
   )
 }
 
+# --- v2.0.0: deploy tests ---
+
+# Helper: build a minimal mock repo that install_hook_files() can process.
+_make_mock_repo() {
+  local repo="$1"
+  mkdir -p "$repo/bin" "$repo/lib/hetero" "$repo/hooks/platform" \
+           "$repo/hooks/git" "$repo/data" "$repo/templates"
+  printf '2.0.0\n' > "$repo/.version"
+  printf '#!/usr/bin/env bash\n# __AGENT_GATES_VERSION__\necho gate\n' > "$repo/hooks/git/agent-quality-gate.sh"
+  touch "$repo/hooks/platform/memory-reminder.mjs"
+  printf '#!/usr/bin/env bash\n: dispatch stub\n' > "$repo/lib/hetero/dispatch.sh"
+  printf '#!/usr/bin/env bash\n: select stub\n'   > "$repo/lib/hetero/select.sh"
+  printf '#!/usr/bin/env bash\necho shim >&2\n'   > "$repo/lib/review-selection.sh"
+  printf '#!/usr/bin/env bash\necho shim >&2\n'   > "$repo/lib/oc-serve.sh"
+  printf '#!/usr/bin/env bash\necho mock-config-migrate\n' > "$repo/bin/agent-gates-config-migrate"
+  chmod +x "$repo/bin/agent-gates-config-migrate"
+  printf '# verifier\n' > "$repo/templates/verifier.md"
+  printf '#!/usr/bin/env bash\necho doctor\n' > "$repo/doctor.sh"
+}
+
+# T-I1: install_hook_files deploys lib/hetero/dispatch.sh
+test_hetero_deployed() {
+  echo "T-I1: install_hook_files deploys lib/hetero/dispatch.sh"
+  (
+    MOCK_REPO=$(mktemp -d); MOCK_HOME=$(mktemp -d)
+    export HOME="$MOCK_HOME"
+    _make_mock_repo "$MOCK_REPO"
+    source_install_no_main
+    # Disable install.sh's cleanup trap to prevent it from deleting /tmp on subshell exit.
+    trap -- '' EXIT
+    REPO_DIR="$MOCK_REPO"; INSTALL_DIR="$MOCK_HOME/.agent-gates"
+    install_hook_files 2>/dev/null || true
+    assert "lib/hetero/dispatch.sh deployed" "$([[ -f "$INSTALL_DIR/lib/hetero/dispatch.sh" ]] && echo true || echo false)"
+    rm -rf "$MOCK_REPO" "$MOCK_HOME"
+  )
+}
+
+# T-I2: shim lib/review-selection.sh deployed (source-safe check)
+test_shim_deployed() {
+  echo "T-I2: shim lib/review-selection.sh deployed after install"
+  (
+    MOCK_REPO=$(mktemp -d); MOCK_HOME=$(mktemp -d)
+    export HOME="$MOCK_HOME"
+    _make_mock_repo "$MOCK_REPO"
+    source_install_no_main
+    trap -- '' EXIT
+    REPO_DIR="$MOCK_REPO"; INSTALL_DIR="$MOCK_HOME/.agent-gates"
+    install_hook_files 2>/dev/null || true
+    assert "lib/review-selection.sh deployed" "$([[ -f "$INSTALL_DIR/lib/review-selection.sh" ]] && echo true || echo false)"
+    rm -rf "$MOCK_REPO" "$MOCK_HOME"
+  )
+}
+
+# T-I3: bin/agent-gates-config-migrate deployed and executable
+test_config_migrate_deployed() {
+  echo "T-I3: bin/agent-gates-config-migrate deployed and executable"
+  (
+    MOCK_REPO=$(mktemp -d); MOCK_HOME=$(mktemp -d)
+    export HOME="$MOCK_HOME"
+    _make_mock_repo "$MOCK_REPO"
+    source_install_no_main
+    trap -- '' EXIT
+    REPO_DIR="$MOCK_REPO"; INSTALL_DIR="$MOCK_HOME/.agent-gates"
+    install_hook_files 2>/dev/null || true
+    assert "bin/agent-gates-config-migrate deployed" "$([[ -f "$INSTALL_DIR/bin/agent-gates-config-migrate" ]] && echo true || echo false)"
+    assert "bin/agent-gates-config-migrate executable" "$([[ -x "$INSTALL_DIR/bin/agent-gates-config-migrate" ]] && echo true || echo false)"
+    rm -rf "$MOCK_REPO" "$MOCK_HOME"
+  )
+}
+
 echo "=== install.sh --with-openspec + v1.5.2 auto-deps tests ==="
 echo ""
 
@@ -198,6 +268,9 @@ test_check_memory_bundled
 test_check_superpowers_installed
 test_help_mentions_skip_deps
 test_main_flow_calls_install_external_deps
+test_hetero_deployed
+test_shim_deployed
+test_config_migrate_deployed
 
 echo ""
 read -r PASS_COUNT FAIL_COUNT < "$RESULTS_FILE"

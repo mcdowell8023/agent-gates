@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# agent-gates-verify-strip — strip USER_ACK markers from verifier output.
+# Usage: cat verifier_output.md | agent-gates-verify-strip > clean.md
+#
+# Prevents verifier agent output from containing USER_ACK markers that could
+# be mistaken for legitimate human confirmation. The gate only accepts USER_ACK
+# from the separate .ack file written by agent-gates-verify-ack.
+
+sed '/^USER_ACK:/d; /USER_ACK: PROCEED/d'

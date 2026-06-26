@@ -40,7 +40,7 @@ Cross-check MUST use a different model/vendor. Priority order:
 
 | Priority | Tool | When to use |
 | --- | --- | --- |
-| 1. **opencode CLI + heterogeneous model** (首选) | `opencode run -m <provider/model> --dir <workdir> --format json "<prompt>"` (⚠️ `-p` 是 `--password`；prompt 是位置参数放最后；**必须 `--format json`** 否则非 TTY 无输出) | Default for all cross-checks |
+| 1. **opencode CLI + heterogeneous model** (首选) | `opencode run --pure -m <provider/model> --dir <workdir> --format json "<prompt>"` (⚠️ `--pure` 绕过 OMO 注入；`-p` 是 `--password`；prompt 是位置参数放最后；**必须 `--format json`** 否则非 TTY 无输出) | Default for all cross-checks |
 | 2. **codex CLI + GPT-5 series** (备选) | Two sub-commands (see below) | When opencode unavailable or prompt too long |
 | 3. **code-reviewer / critic agent** (兜底) | Same Claude model, different agent role | **Only when 1+2 are genuinely unavailable** (true L0 machine). NOT a shortcut when opencode/codex is installed — see §8 "L0 Fallback is a VIOLATION When L1+ is Available". |
 
@@ -76,7 +76,7 @@ for line in sys.stdin:
 Short prompt (inline, recommended — keep ≤200 chars):
 
 ```bash
-opencode run -m github-copilot/gpt-5.5 --dir <workdir> --format json "<short prompt>" 2>&1 | eval "$OC_PARSE"
+opencode run --pure -m github-copilot/gpt-5.5 --dir <workdir> --format json "<short prompt>" 2>&1 | eval "$OC_PARSE"
 ```
 
 - Prompt file: `~/AgentWorkspace/tmp/<task>-prompt.md`
@@ -92,6 +92,7 @@ opencode run -m github-copilot/gpt-5.5 --dir <workdir> --format json "<short pro
 | `> result.md` empty | default format is interactive, no output in non-TTY | add `--format json` + pipe through `OC_PARSE` |
 | result contains JSON fragments | redirected without parsing | pipe through `OC_PARSE` before redirect |
 | Long prompt (~800+ chars) | GPT-5.5 hangs/times out in non-interactive mode | Keep ≤200 chars; let model read files itself |
+| Missing `--pure` | OMO Hephaestus injects intent detection + subtask dispatch | Always add `--pure` on both `serve` and `run` |
 
 ### codex Command Template (v1.10.1)
 
@@ -309,7 +310,7 @@ Return: PASS or ISSUES with file:line references. Max 500 words.
 EOF
 
 # 2. Run with heterogeneous model
-opencode run -m github-copilot/gpt-5.5 --dir <workdir> --format json "$(cat ~/AgentWorkspace/tmp/crosscheck-prompt.md)" 2>&1 | eval "$OC_PARSE" > ~/AgentWorkspace/tmp/crosscheck-result.md &
+opencode run --pure -m github-copilot/gpt-5.5 --dir <workdir> --format json "$(cat ~/AgentWorkspace/tmp/crosscheck-prompt.md)" 2>&1 | eval "$OC_PARSE" > ~/AgentWorkspace/tmp/crosscheck-result.md &
 ```
 
 ### Three-Agent Pipeline Roles via oracle (same-model, for structured review)
@@ -448,7 +449,9 @@ Routes are tried top-to-bottom. A higher-priority route that is available and he
 
 Note: L0/L1/L2/L3 refer to capability levels set by `doctor.sh`, not route priority numbers. L3 = opencode + codex, L2 = opencode, L1 = codex or OMC plugin, L0 = none.
 
-**Route 1 — use `oc-review`, not bare `opencode run`** (v1.8.0): `~/.agent-gates/bin/oc-review` wraps `opencode run` with **retry-on-empty** (opencode intermittently exits 0 with empty output — the "P2" flake). On persistent empty output it exits **75** with an `oc-review:`-prefixed stderr line → treat as route failure and fall through to route 2 (codex). It does NOT spawn or manage a shared server; per-run `opencode serve` leaks are swept separately by `~/.agent-gates/bin/oc-reaper --apply` (also surfaced by `doctor.sh` → `check_opencode_health`).
+**Route 1 — use `oc-review`, not bare `opencode run`** (v1.13.0): `~/.agent-gates/bin/oc-review` wraps `opencode run` with **retry-on-empty** and **shared serve** management. It auto-starts a persistent `opencode serve --pure --port 4096` and injects `--attach` to route all runs through it, eliminating per-run serve stacking (the P1 memory leak that caused kernel panic). On persistent empty output it exits **75** with an `oc-review:`-prefixed stderr line → treat as route failure and fall through to route 2 (codex). Set `OC_SERVE_DISABLED=1` to skip serve integration. Orphaned serves are swept by `~/.agent-gates/bin/oc-reaper --apply`.
+
+**Model selection (v1.13.0 D6)**: `doctor.sh` runs the D6 algorithm to detect available models, exclude flash/coding-vendor duplicates, probe reachability, and persist `review_models` in `review-capability.json`. Fields: `coding_vendor` (inferred from platform), `primary` (reverse-heterogeneous pick), `panel_pool` (verified alternative models), `panel_active` (concurrent reviewers). Static recommendations live in `~/.agent-gates/data/review-model-recommendations.json`.
 
 **Route 2 — codex prompt MUST go via stdin** (`< prompt-file`), NOT as a positional arg. `codex exec "..."` blocks on "Reading additional input from stdin..." in non-TTY/background contexts. `-s read-only` sandboxes the reviewer so it physically cannot modify files.
 
