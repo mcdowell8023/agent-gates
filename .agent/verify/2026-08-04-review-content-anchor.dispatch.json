@@ -1,0 +1,5 @@
+{
+  "capability": "FULL",
+  "channel": "opencode",
+  "model": "github-copilot/gemini-3.1-pro-preview"
+}

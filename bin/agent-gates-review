@@ -68,9 +68,81 @@ LEVEL=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['le
 
 # --- Helpers ---
 
+sha256_stream() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  else
+    shasum -a 256 | awk '{print $1}'
+  fi
+}
+
+review_staged_files() {
+  git -c core.quotePath=true diff --cached --name-only --diff-filter=ACMRD -- \
+    . \
+    ':(exclude).agent/reviews/**' \
+    ':(exclude).agent/verify/**' \
+    ':(exclude).agent/plans/**'
+}
+
+review_staged_diff_sha256() {
+  git diff --cached --binary -- \
+    . \
+    ':(exclude).agent/reviews/**' \
+    ':(exclude).agent/verify/**' \
+    ':(exclude).agent/plans/**' \
+    | sha256_stream
+}
+
+REVIEW_ANCHOR_ENABLED=0
+REVIEW_ANCHOR_HEAD=""
+REVIEW_ANCHOR_FILES=""
+REVIEW_ANCHOR_FILES_SHA256=""
+REVIEW_ANCHOR_DIFF_SHA256=""
+
+capture_review_anchor() {
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+
+  local files
+  files=$(review_staged_files)
+  [[ -n "$files" ]] || return 0
+
+  REVIEW_ANCHOR_ENABLED=1
+  REVIEW_ANCHOR_HEAD=$(git rev-parse HEAD 2>/dev/null || echo "")
+  REVIEW_ANCHOR_FILES="$files"
+  REVIEW_ANCHOR_FILES_SHA256=$(printf '%s\n' "$files" | sha256_stream)
+  REVIEW_ANCHOR_DIFF_SHA256=$(review_staged_diff_sha256)
+}
+
+review_anchor_is_unchanged() {
+  [[ "$REVIEW_ANCHOR_ENABLED" -eq 1 ]] || return 0
+
+  local current_head current_files current_files_sha256 current_diff_sha256
+  current_head=$(git rev-parse HEAD 2>/dev/null || echo "")
+  current_files=$(review_staged_files)
+  current_files_sha256=$(printf '%s\n' "$current_files" | sha256_stream)
+  current_diff_sha256=$(review_staged_diff_sha256)
+
+  if [[ "$current_head" != "$REVIEW_ANCHOR_HEAD" \
+     || "$current_files_sha256" != "$REVIEW_ANCHOR_FILES_SHA256" \
+     || "$current_diff_sha256" != "$REVIEW_ANCHOR_DIFF_SHA256" ]]; then
+    echo "agent-gates-review: staged content changed while review was running — refusing stale evidence" >&2
+    return 74
+  fi
+}
+
 append_marker() {
   local tool="$1" model="$2" content="$3"
+  review_anchor_is_unchanged || return $?
+
   printf '%s\n\n<!-- REVIEW_TOOL: %s -->\n<!-- REVIEW_MODEL: %s -->\n<!-- REVIEW_LEVEL: %s -->\n' "$content" "$tool" "$model" "$LEVEL"
+  if [[ "$REVIEW_ANCHOR_ENABLED" -eq 1 ]]; then
+    printf '<!-- REVIEW_HEAD: %s -->\n' "$REVIEW_ANCHOR_HEAD"
+    while IFS= read -r reviewed_file; do
+      printf '<!-- REVIEW_FILE: %s -->\n' "$reviewed_file"
+    done <<< "$REVIEW_ANCHOR_FILES"
+    printf '<!-- REVIEW_FILES_SHA256: %s -->\n' "$REVIEW_ANCHOR_FILES_SHA256"
+    printf '<!-- REVIEW_DIFF_SHA256: %s -->\n' "$REVIEW_ANCHOR_DIFF_SHA256"
+  fi
 }
 
 output_result() {
@@ -102,6 +174,8 @@ has_valid_conclusion() {
   echo "$text" | grep -qiE '^VERDICT:\s*(PASS|REVISE|FAIL|ISSUES|APPROVED|REJECT)' && return 0
   return 1
 }
+
+capture_review_anchor
 
 # --- v1.12.0: review model selection (new fallback chain path) ---
 
@@ -164,6 +238,8 @@ print(','.join(pool))
     if [[ -n "$_parsed" ]] && has_valid_conclusion "$_parsed"; then
       _actual_model="${_REVIEW_MODEL_USED:-$_RM_PRIMARY}"
       _result=$(append_marker "opencode" "$_actual_model" "$_parsed")
+      _marker_rc=$?
+      [[ $_marker_rc -eq 0 ]] || exit "$_marker_rc"
       output_result "$_result"
       rm -f "$_err_file"
       exit 0
@@ -225,6 +301,8 @@ run_opencode() {
 
   local result
   result=$(append_marker "opencode" "$MODEL" "$parsed")
+  local marker_rc=$?
+  [[ $marker_rc -eq 0 ]] || return "$marker_rc"
   output_result "$result"
   return 0
 }
@@ -236,6 +314,8 @@ run_codex() {
   if [[ $rc -eq 0 && -n "$raw" ]]; then
     local result
     result=$(append_marker "codex" "gpt-5-series" "$raw")
+    local marker_rc=$?
+    [[ $marker_rc -eq 0 ]] || return "$marker_rc"
     output_result "$result"
     return 0
   fi
@@ -254,13 +334,22 @@ case "$LEVEL" in
   L3)
     if prompt_too_long_for_opencode; then
       echo "agent-gates-review: prompt too long for opencode (${PROMPT_LEN} > ${MAX_CHARS} chars), routing to codex" >&2
-      if run_codex; then exit 0; fi
+      run_codex
+      _route_rc=$?
+      [[ $_route_rc -eq 0 ]] && exit 0
+      [[ $_route_rc -eq 74 ]] && exit 74
       echo "agent-gates-review: codex also failed" >&2
       exit 75
     fi
-    if run_opencode; then exit 0; fi
+    run_opencode
+    _route_rc=$?
+    [[ $_route_rc -eq 0 ]] && exit 0
+    [[ $_route_rc -eq 74 ]] && exit 74
     echo "agent-gates-review: opencode failed, falling back to codex" >&2
-    if run_codex; then exit 0; fi
+    run_codex
+    _route_rc=$?
+    [[ $_route_rc -eq 0 ]] && exit 0
+    [[ $_route_rc -eq 74 ]] && exit 74
     echo "agent-gates-review: both opencode and codex failed" >&2
     exit 75
     ;;
@@ -269,7 +358,10 @@ case "$LEVEL" in
       echo "agent-gates-review: prompt too long for opencode (${PROMPT_LEN} > ${MAX_CHARS} chars) and no codex fallback (L2). Shorten prompt to ≤${MAX_CHARS} chars or install codex for L3." >&2
       exit 76
     fi
-    if run_opencode; then exit 0; fi
+    run_opencode
+    _route_rc=$?
+    [[ $_route_rc -eq 0 ]] && exit 0
+    [[ $_route_rc -eq 74 ]] && exit 74
     echo "agent-gates-review: opencode failed (L2, no codex fallback)" >&2
     exit 75
     ;;
@@ -279,7 +371,10 @@ case "$LEVEL" in
       echo "  Use the OMC codex plugin directly: /ask codex or codex:codex-rescue agent." >&2
       exit 78
     fi
-    if run_codex; then exit 0; fi
+    run_codex
+    _route_rc=$?
+    [[ $_route_rc -eq 0 ]] && exit 0
+    [[ $_route_rc -eq 74 ]] && exit 74
     echo "agent-gates-review: codex failed (L1)" >&2
     exit 75
     ;;

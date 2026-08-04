@@ -193,88 +193,128 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
     fail "Project has .agent/ but missing .agent/reviews/ directory"
     echo "   Fix: mkdir -p .agent/reviews"
   elif [[ -d .agent/reviews ]]; then
-    # Pick the NEWEST review by mtime — NOT `sort -r` (which sorts by filename,
-    # so an old but alphabetically-later file would shadow a freshly-written one).
-    REVIEW_FILE=""
-    REVIEW_NEWEST_MTIME=0
+    gate_sha256_stream() {
+      if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | awk '{print $1}'
+      else
+        shasum -a 256 | awk '{print $1}'
+      fi
+    }
+
+    CURRENT_REVIEW_HEAD=$(git rev-parse HEAD 2>/dev/null || echo "")
+    CURRENT_REVIEW_FILES=$(git -c core.quotePath=true diff --cached --name-only --diff-filter=ACMRD -- \
+      . \
+      ':(exclude).agent/reviews/**' \
+      ':(exclude).agent/verify/**' \
+      ':(exclude).agent/plans/**')
+    CURRENT_REVIEW_DIFF_SHA256=$(git diff --cached --binary -- \
+      . \
+      ':(exclude).agent/reviews/**' \
+      ':(exclude).agent/verify/**' \
+      ':(exclude).agent/plans/**' \
+      | gate_sha256_stream)
+
+    ANCHORED_REVIEW_COUNT=0
+    HEAD_MATCH_COUNT=0
+    COVERING_REVIEW_COUNT=0
+    PASS_REVIEW_FILE=""
+    NEGATIVE_REVIEW_FILE=""
+    REVIEW_DIFF_MATCH=0
+
     while IFS= read -r rf; do
       [[ -z "$rf" || ! -f "$rf" ]] && continue
-      rf_mtime=$(stat -f %m "$rf" 2>/dev/null || stat -c %Y "$rf" 2>/dev/null || echo "0")
-      if [[ "$rf_mtime" -gt "$REVIEW_NEWEST_MTIME" ]]; then
-        REVIEW_NEWEST_MTIME="$rf_mtime"
-        REVIEW_FILE="$rf"
-      fi
-    done < <(find .agent/reviews/ -name "*.md" -mmin -240 2>/dev/null)
-    if [[ -z "$REVIEW_FILE" ]]; then
-      fail "Cross-review evidence missing or stale (>4h old)"
-      echo "   Fix: Run cross-review, save to .agent/reviews/$(date +%Y-%m-%d)-<topic>.md"
-      echo "   File MUST end with: VERDICT: PASS (or VERDICT: ISSUES)"
-    else
-      # Verdict validation: require explicit VERDICT line
-      if ! grep -qiE '^VERDICT:\s*(PASS|APPROVED)' "$REVIEW_FILE"; then
-        if grep -qiE '^VERDICT:\s*(ISSUES|FAIL|REJECT)' "$REVIEW_FILE"; then
-          fail "Review verdict is ISSUES/FAIL — resolve before committing"
-        else
-          fail "Review file missing explicit verdict line: $REVIEW_FILE"
-          echo "   Fix: Add 'VERDICT: PASS' or 'VERDICT: ISSUES' at the end of review file."
-        fi
-      else
-        # Freshness gate: skip if post-review changes are minor (<20 lines)
-        # KNOWN LIMITATION: mtime is second-granularity (macOS `stat -f %m`). A source
-        # edit made in the SAME second as (but after) the review write escapes this `>`
-        # comparison. Using `>=` would over-trigger normal flow (review written right
-        # after the last edit), so we accept the rare same-second race. See CHANGELOG
-        # v1.7.0 known limitations; a sub-second fix is not portably available.
-        REVIEW_MTIME=$(stat -f %m "$REVIEW_FILE" 2>/dev/null || stat -c %Y "$REVIEW_FILE" 2>/dev/null || echo "0")
-        POST_REVIEW_LINES=0
-        while IFS= read -r sf; do
-          [[ -z "$sf" || ! -f "$sf" ]] && continue
-          SF_MTIME=$(stat -f %m "$sf" 2>/dev/null || stat -c %Y "$sf" 2>/dev/null || echo "0")
-          if [[ "$SF_MTIME" -gt "$REVIEW_MTIME" ]]; then
-            sf_lines=$(git diff --cached -- "$sf" | grep -c '^+[^+]' 2>/dev/null || echo "0")
-            POST_REVIEW_LINES=$((POST_REVIEW_LINES + sf_lines))
-          fi
-        done < <(git diff --cached --name-only --diff-filter=ACMR \
-          | grep -vE '(\.(lock|md|json|yaml|yml)$|generated/|migrations/|\.d\.ts$)')
-        if [[ "$POST_REVIEW_LINES" -gt 20 ]]; then
-          fail "Significant changes ($POST_REVIEW_LINES lines) made AFTER review — re-review required"
-          echo "   Fix: Re-run cross-review covering your latest changes."
-        fi
 
-        # === Gate 2b (v1.7.0): heterogeneous-review enforcement ===
-        # If this machine can do heterogeneous review (review-capability.json
-        # level >= L1), a same-model (L0) or unmarked review does NOT satisfy
-        # 红线 #8's "different model" requirement — block it. A true L0 machine
-        # (no opencode/codex) is exempt: there is no heterogeneous alternative.
-        if [[ "${SKIP_HETERO_CHECK:-0}" != "1" ]]; then
-          HETERO_DIR="${AGENT_GATES_DIR:-$HOME/.agent-gates}"
-          if [[ -f "$HETERO_DIR/hetero-check.json" ]]; then
-            CAP_FILE="$HETERO_DIR/hetero-check.json"
-          else
-            CAP_FILE="$HETERO_DIR/review-capability.json"
-          fi
-          if [[ -f "$CAP_FILE" ]]; then
-            CAP_LEVEL=$(grep -oE '"level"[[:space:]]*:[[:space:]]*"L[0-3]"' "$CAP_FILE" 2>/dev/null | grep -oE 'L[0-3]' | head -1 || true)
-            if [[ "$CAP_LEVEL" == "L1" || "$CAP_LEVEL" == "L2" || "$CAP_LEVEL" == "L3" ]]; then
-              RLEVEL=$(grep -oE 'REVIEW_LEVEL:[[:space:]]*L[0-3]' "$REVIEW_FILE" 2>/dev/null | grep -oE 'L[0-3]' | head -1 || true)
-              if [[ -z "$RLEVEL" ]]; then
-                fail "Review has no REVIEW_LEVEL marker, but this machine supports heterogeneous review ($CAP_LEVEL)"
-                echo "   Same-model review (e.g. Opus reviewing Opus) does NOT satisfy the different-model requirement."
-                echo "   Fix: run cross-review via a DIFFERENT model (opencode/codex — agent-review-protocol §8),"
-                echo "        then add a header line to the review file: <!-- REVIEW_LEVEL: L1 -->  (or higher)."
-                echo "   Override (genuine exception, e.g. stale config): SKIP_HETERO_CHECK=1"
-              elif [[ "$RLEVEL" == "L0" ]]; then
-                # v1.13.0 Gate 2b: HETERO_EXHAUSTED exception — all heterogeneous
-                # models failed, agent-gates-review fell back to agent-tool L0.
-                # R6: require BOTH html comment format AND L0 level to prevent bypass.
-                if grep -q '<!-- HETERO_EXHAUSTED:' "$REVIEW_FILE" 2>/dev/null; then
-                  echo "⚠️  Gate 2b: HETERO_EXHAUSTED — all heterogeneous review models failed; degrading to warn"
-                  echo "   Review was completed with agent-tool (L0) as last resort."
-                else
-                  fail "Review is same-model (REVIEW_LEVEL: L0) but machine supports heterogeneous ($CAP_LEVEL)"
-                  echo "   Fix: re-run cross-review via a different model (opencode/codex — §8)."
-                  echo "   Override (genuine exception): SKIP_HETERO_CHECK=1"
-                fi
+      rf_head=$(sed -n 's/^<!-- REVIEW_HEAD: \(.*\) -->$/\1/p' "$rf" | head -1)
+      [[ -n "$rf_head" ]] || continue
+      ANCHORED_REVIEW_COUNT=$((ANCHORED_REVIEW_COUNT + 1))
+
+      rf_files=$(sed -n 's/^<!-- REVIEW_FILE: \(.*\) -->$/\1/p' "$rf")
+      rf_files_sha256=$(sed -n 's/^<!-- REVIEW_FILES_SHA256: \([0-9a-fA-F]*\) -->$/\1/p' "$rf" | head -1 | tr '[:upper:]' '[:lower:]')
+      rf_diff_sha256=$(sed -n 's/^<!-- REVIEW_DIFF_SHA256: \([0-9a-fA-F]*\) -->$/\1/p' "$rf" | head -1 | tr '[:upper:]' '[:lower:]')
+      [[ -n "$rf_files" && -n "$rf_files_sha256" && -n "$rf_diff_sha256" ]] || continue
+
+      computed_files_sha256=$(printf '%s\n' "$rf_files" | gate_sha256_stream)
+      [[ "$computed_files_sha256" == "$rf_files_sha256" ]] || continue
+      [[ "$rf_head" == "$CURRENT_REVIEW_HEAD" ]] || continue
+      HEAD_MATCH_COUNT=$((HEAD_MATCH_COUNT + 1))
+
+      review_covers_current=1
+      while IFS= read -r current_file; do
+        [[ -z "$current_file" ]] && continue
+        if ! grep -Fqx -- "$current_file" <<< "$rf_files"; then
+          review_covers_current=0
+          break
+        fi
+      done <<< "$CURRENT_REVIEW_FILES"
+      [[ "$review_covers_current" -eq 1 ]] || continue
+      COVERING_REVIEW_COUNT=$((COVERING_REVIEW_COUNT + 1))
+
+      if grep -qiE '^VERDICT:[[:space:]]*(ISSUES|FAIL|REJECT)' "$rf"; then
+        NEGATIVE_REVIEW_FILE="$rf"
+      elif grep -qiE '^VERDICT:[[:space:]]*(PASS|APPROVED)' "$rf"; then
+        if [[ "$rf_diff_sha256" == "$CURRENT_REVIEW_DIFF_SHA256" ]]; then
+          PASS_REVIEW_FILE="$rf"
+          REVIEW_DIFF_MATCH=1
+        elif [[ -z "$PASS_REVIEW_FILE" ]]; then
+          PASS_REVIEW_FILE="$rf"
+        fi
+      fi
+    done < <(find .agent/reviews/ -type f -name "*.md" -print 2>/dev/null | sort)
+
+    REVIEW_FILE="$PASS_REVIEW_FILE"
+    if [[ -n "$NEGATIVE_REVIEW_FILE" ]]; then
+      fail "Applicable review verdict is ISSUES/FAIL — resolve before committing"
+      echo "   Review: $NEGATIVE_REVIEW_FILE"
+    elif [[ -z "$PASS_REVIEW_FILE" ]]; then
+      if [[ "$ANCHORED_REVIEW_COUNT" -eq 0 ]]; then
+        fail "No content-anchored review evidence covers the staged change"
+        echo "   Legacy review files without REVIEW_HEAD/REVIEW_FILE anchors are historical only; filesystem mtime is ignored."
+        echo "   Fix: Run cross-review with the current agent-gates-review command."
+      elif [[ "$HEAD_MATCH_COUNT" -eq 0 ]]; then
+        fail "Review HEAD does not match current HEAD ($CURRENT_REVIEW_HEAD)"
+        echo "   Fix: Re-run cross-review on the current base commit."
+      elif [[ "$COVERING_REVIEW_COUNT" -eq 0 ]]; then
+        fail "Staged file set is not covered by any review's REVIEW_FILE list"
+        echo "   Unreviewed staged files are not allowed. Current staged files:"
+        while IFS= read -r current_file; do
+          [[ -n "$current_file" ]] && echo "     - $current_file"
+        done <<< "$CURRENT_REVIEW_FILES"
+      else
+        fail "Content-anchored review is missing an explicit PASS/APPROVED verdict"
+      fi
+    else
+      if [[ "$REVIEW_DIFF_MATCH" -ne 1 ]]; then
+        echo "⚠️  GATE WARNING: reviewed files changed after cross-review; explicit confirmation is required by continuing this commit."
+        echo "   No unreviewed files were added. Inspect the staged diff summary:"
+        git diff --cached --stat -- \
+          . \
+          ':(exclude).agent/reviews/**' \
+          ':(exclude).agent/verify/**' \
+          ':(exclude).agent/plans/**'
+      fi
+
+      # === Gate 2b (v1.7.0): heterogeneous-review enforcement ===
+      if [[ "${SKIP_HETERO_CHECK:-0}" != "1" ]]; then
+        HETERO_DIR="${AGENT_GATES_DIR:-$HOME/.agent-gates}"
+        if [[ -f "$HETERO_DIR/hetero-check.json" ]]; then
+          CAP_FILE="$HETERO_DIR/hetero-check.json"
+        else
+          CAP_FILE="$HETERO_DIR/review-capability.json"
+        fi
+        if [[ -f "$CAP_FILE" ]]; then
+          CAP_LEVEL=$(grep -oE '"level"[[:space:]]*:[[:space:]]*"L[0-3]"' "$CAP_FILE" 2>/dev/null | grep -oE 'L[0-3]' | head -1 || true)
+          if [[ "$CAP_LEVEL" == "L1" || "$CAP_LEVEL" == "L2" || "$CAP_LEVEL" == "L3" ]]; then
+            RLEVEL=$(grep -oE 'REVIEW_LEVEL:[[:space:]]*L[0-3]' "$REVIEW_FILE" 2>/dev/null | grep -oE 'L[0-3]' | head -1 || true)
+            if [[ -z "$RLEVEL" ]]; then
+              fail "Review has no REVIEW_LEVEL marker, but this machine supports heterogeneous review ($CAP_LEVEL)"
+              echo "   Same-model review does NOT satisfy the different-model requirement."
+              echo "   Fix: run cross-review via a DIFFERENT model, then add <!-- REVIEW_LEVEL: L1 --> (or higher)."
+            elif [[ "$RLEVEL" == "L0" ]]; then
+              if grep -q '<!-- HETERO_EXHAUSTED:' "$REVIEW_FILE" 2>/dev/null; then
+                echo "⚠️  Gate 2b: HETERO_EXHAUSTED — all heterogeneous review models failed; degrading to warn"
+              else
+                fail "Review is same-model (REVIEW_LEVEL: L0) but machine supports heterogeneous ($CAP_LEVEL)"
+                echo "   Fix: re-run cross-review via a different model."
               fi
             fi
           fi

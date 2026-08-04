@@ -52,6 +52,12 @@ If their normal commit path succeeds without relying on legacy evidence, no time
 
 The transition must not treat all historical review files as fresh merely because a worktree was created.
 
+### Migration decision (2026-08-04)
+
+No time-based legacy grace is added. The repaired authority gate was used for a real commit in a detached worktree of each installed-hook repository. Each commit modified one existing TypeScript source file and its corresponding existing test; both followed the existing trivial-change path and succeeded (`crm-center` log count `146 → 147`, `msg-management-center` `269 → 270`). Therefore the next normal small commit is not blocked merely because the repositories contain legacy reviews.
+
+For non-trivial changes, legacy files remain historical-only and a new anchored review is required. This is intentional: filename/content correlation would still let an old verdict authorize new semantics, while the real compatibility test showed no operational need for that relaxation.
+
 ## Verification
 
 - TDD regression: a historical PASS review becomes fresh by worktree checkout under the old gate but cannot cover unrelated staged files under the repaired gate.

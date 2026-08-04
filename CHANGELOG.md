@@ -24,6 +24,7 @@ All notable changes to agent-gates will be documented in this file.
 - macOS `pkill -P` 不杀孙进程 → 进程组 `kill -TERM/-KILL -- -<PGID>`
 - opencode serve 堆叠 OOM（事故 1）→ fail-closed + 共享 serve
 - codebuddy --acp 崩溃循环（事故 2）→ janitor 熔断 + 整树清理
+- **审查证据不再使用文件 mtime**：`agent-gates-review` 写入 `REVIEW_HEAD`、逐文件 `REVIEW_FILE`、文件清单摘要与 staged binary diff 摘要，并在审查前后快照变化时拒绝生成有效证据。gate 对 HEAD/未审查文件执行 BLOCK，对覆盖文件的后续字节变化打印 diff 摘要并 WARN 放行；任一适用负 verdict 优先。旧格式 review 仅保留为历史记录，不按 checkout 刷新的 mtime 复活。
 
 ## [1.13.0] - 2026-06-16
 

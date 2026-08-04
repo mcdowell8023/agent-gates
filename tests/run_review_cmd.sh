@@ -35,6 +35,11 @@ case "$MODE_FILE" in
   plan_not_conclusion)
     echo '{"type":"text","part":{"type":"text","text":"I will now review this by dispatching sub-agents..."}}'
     exit 0 ;;
+  mutate_staged)
+    printf '// changed during review\n' >> src.ts
+    git add src.ts
+    echo '{"type":"text","part":{"type":"text","text":"VERDICT: PASS\nNo issues found."}}'
+    exit 0 ;;
   empty) echo ""; exit 0 ;;
   fail)  echo "error" >&2; exit 1 ;;
 esac
@@ -50,6 +55,11 @@ make_fake_codex() {
 #!/usr/bin/env bash
 case "$mode" in
   ok)   echo "CODEX REVIEW: PASS"; exit 0 ;;
+  mutate_staged)
+    printf '// changed during review\\n' >> src.ts
+    git add src.ts
+    echo "CODEX REVIEW: PASS"
+    exit 0 ;;
   fail) exit 1 ;;
 esac
 FAKE
@@ -285,6 +295,70 @@ test_l1_codex_preferred() {
   rm -rf "$FAKE_DIR_CODEX" "$CAP_DIR" "$PROMPT_FILE"
 }
 
+# --- v2.0.1: staged-content review anchors ---
+
+setup_staged_review_repo() {
+  REVIEW_REPO=$(mktemp -d)
+  git -C "$REVIEW_REPO" init -q
+  git -C "$REVIEW_REPO" config user.email test@test.com
+  git -C "$REVIEW_REPO" config user.name Test
+  printf 'export const value = 1\n' > "$REVIEW_REPO/src.ts"
+  printf 'test value\n' > "$REVIEW_REPO/src.test.ts"
+  git -C "$REVIEW_REPO" add src.ts src.test.ts
+  git -C "$REVIEW_REPO" commit -q -m init
+  printf 'export const value = 2\n' > "$REVIEW_REPO/src.ts"
+  printf 'test changed value\n' > "$REVIEW_REPO/src.test.ts"
+  git -C "$REVIEW_REPO" add src.ts src.test.ts
+}
+
+test_staged_review_emits_content_anchors() {
+  echo "T-ANCHOR1: staged review emits HEAD/file/diff anchors"
+  setup_staged_review_repo
+  make_cap "L1" "codex" "agent-tool"
+  make_fake_codex ok
+  PROMPT_FILE=$(mktemp); echo "review staged change" > "$PROMPT_FILE"
+  out=$(
+    cd "$REVIEW_REPO" || exit 1
+    AGENT_GATES_DIR="$CAP_DIR" AG_REVIEW_CODEX="$FAKE_DIR_CODEX/codex" \
+      bash "$REVIEW_CMD" "$PROMPT_FILE" 2>/dev/null
+  )
+  rc=$?
+  expected_head=$(git -C "$REVIEW_REPO" rev-parse HEAD)
+  assert "exit 0" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+  assert "REVIEW_HEAD matches HEAD" "$(echo "$out" | grep -q "REVIEW_HEAD: $expected_head" && echo true || echo false)"
+  assert "REVIEW_FILE includes source" "$(echo "$out" | grep -q 'REVIEW_FILE: src.ts' && echo true || echo false)"
+  assert "REVIEW_FILE includes test" "$(echo "$out" | grep -q 'REVIEW_FILE: src.test.ts' && echo true || echo false)"
+  assert "REVIEW_FILES_SHA256 present" "$(echo "$out" | grep -qE 'REVIEW_FILES_SHA256: [0-9a-f]{64}' && echo true || echo false)"
+  assert "REVIEW_DIFF_SHA256 present" "$(echo "$out" | grep -qE 'REVIEW_DIFF_SHA256: [0-9a-f]{64}' && echo true || echo false)"
+  rm -rf "$REVIEW_REPO" "$FAKE_DIR_CODEX" "$CAP_DIR" "$PROMPT_FILE"
+}
+
+test_staged_change_during_review_is_rejected() {
+  echo "T-ANCHOR2: staged change during review rejects evidence"
+  setup_staged_review_repo
+  make_cap "L1" "codex" "agent-tool"
+  make_fake_codex mutate_staged
+  PROMPT_FILE=$(mktemp); echo "review staged change" > "$PROMPT_FILE"
+  out=$(
+    cd "$REVIEW_REPO" || exit 1
+    AGENT_GATES_DIR="$CAP_DIR" AG_REVIEW_CODEX="$FAKE_DIR_CODEX/codex" \
+      bash "$REVIEW_CMD" "$PROMPT_FILE" 2>&1
+  )
+  rc=$?
+  assert "exits non-zero when staged content changes" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+  assert "no usable REVIEW_HEAD emitted" "$(echo "$out" | grep -q 'REVIEW_HEAD:' && echo false || echo true)"
+  rm -rf "$REVIEW_REPO" "$FAKE_DIR_CODEX" "$CAP_DIR" "$PROMPT_FILE"
+}
+
+if [[ "${RUN_ANCHOR_TESTS_ONLY:-0}" == "1" ]]; then
+  test_staged_review_emits_content_anchors
+  test_staged_change_during_review_is_rejected
+  echo ""
+  read -r PASS FAIL < "$RESULTS_FILE"; rm -f "$RESULTS_FILE"
+  echo "$PASS pass · $FAIL fail"
+  [[ "$FAIL" -eq 0 ]] && exit 0 || exit 1
+fi
+
 test_l3_opencode_json_parsed
 test_l3_fallback_codex
 test_l1_codex
@@ -299,6 +373,8 @@ test_short_prompt_ok
 test_invalid_output_fallback
 test_l1_omc_plugin
 test_l1_codex_preferred
+test_staged_review_emits_content_anchors
+test_staged_change_during_review_is_rejected
 
 # ============================================================
 # v1.12.0: review model selection integration tests

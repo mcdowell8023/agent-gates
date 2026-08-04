@@ -250,14 +250,8 @@ setup_review_scenario() {
   CAPDIR=$(mktemp -d)
   printf '{\n  "level": "%s"\n}\n' "$cap_level" > "$CAPDIR/review-capability.json"
   export AGENT_GATES_DIR="$CAPDIR"
-  # Create review file LAST so its mtime is newest (passes freshness gate)
   mkdir -p .agent/reviews .agent/verify
-  {
-    [[ -n "$review_marker" ]] && echo "<!-- REVIEW_LEVEL: $review_marker -->"
-    echo "# Cross-review"
-    echo "Looks correct, no issues."
-    echo "VERDICT: PASS"
-  } > .agent/reviews/2099-01-01-test.md
+  write_anchored_review .agent/reviews/2099-01-01-test.md PASS "$review_marker"
   # CHECK 6: provide passing verify stub so these CHECK-5 tests are not blocked
   printf 'VERIFY_VERDICT: PASS\n' > .agent/verify/2099-01-01-test.md
   printf '{"capability":"FULL","channel":"paseo"}\n' > .agent/verify/2099-01-01-test.dispatch.json
@@ -334,11 +328,9 @@ test_hetero_skip_override() {
   )
 }
 
-# T16: gate must pick the NEWEST review by mtime, not by filename.
-# Bug: `find | sort -r | head -1` sorts by filename, so an old but
-# alphabetically-later file (e.g. zzz) shadows the freshly-written one (aaa).
+# T16: an applicable negative verdict cannot be shadowed by a PASS file.
 test_review_picks_newest_by_mtime() {
-  echo "T16: gate picks newest review by mtime, not filename"
+  echo "T16: applicable negative verdict takes precedence over PASS"
   (
     setup_mock_repo
     local i n
@@ -356,14 +348,12 @@ test_review_picks_newest_by_mtime() {
     mkdir -p .agent/reviews .agent/verify
     printf 'VERIFY_VERDICT: PASS\n' > .agent/verify/2099-01-01-auto.md
     printf '{"capability":"FULL","channel":"paseo"}\n' > .agent/verify/2099-01-01-auto.dispatch.json
-    # OLD file, alphabetically LAST, BAD verdict
-    printf '# old\nVERDICT: ISSUES\n' > .agent/reviews/zzz-old.md
+    write_anchored_review .agent/reviews/zzz-issues.md ISSUES L0
     sleep 1
-    # NEW file, alphabetically FIRST, GOOD verdict
-    printf '# new\nVERDICT: PASS\n' > .agent/reviews/aaa-new.md
+    write_anchored_review .agent/reviews/aaa-pass.md PASS L0
     output=$(bash "$GATE" 2>&1)
     rc=$?
-    assert "picks newest (aaa=PASS), not alphabetical-last (zzz=ISSUES)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+    assert "ISSUES blocks even when PASS has newer mtime" "$([[ $rc -ne 0 ]] && echo true || echo false)"
     rm -rf "${CAPDIR:-}"
     teardown_mock_repo
   )
@@ -393,7 +383,7 @@ test_check3_plan_with_review() {
     CAPDIR=$(mktemp -d); printf '{ "level": "L0" }\n' > "$CAPDIR/review-capability.json"
     export AGENT_GATES_DIR="$CAPDIR"
     mkdir -p .agent/reviews .agent/plans .agent/verify
-    printf 'VERDICT: PASS\n' > .agent/reviews/r.md
+    write_anchored_review .agent/reviews/r.md PASS L0
     printf 'VERIFY_VERDICT: PASS\n' > .agent/verify/2099-01-01-auto.md
     printf '{"capability":"FULL","channel":"paseo"}\n' > .agent/verify/2099-01-01-auto.dispatch.json
     printf '# Plan\n<!-- PLAN_REVIEW: L1 -->\n<!-- PLAN_REVIEW_TOOL: codex -->\n<!-- PLAN_REVIEW_MODEL: gpt-5 -->\n' > .agent/plans/design.md
@@ -412,7 +402,7 @@ test_check3_no_plan() {
     CAPDIR=$(mktemp -d); printf '{ "level": "L0" }\n' > "$CAPDIR/review-capability.json"
     export AGENT_GATES_DIR="$CAPDIR"
     mkdir -p .agent/reviews .agent/plans
-    printf 'VERDICT: PASS\n' > .agent/reviews/r.md
+    write_anchored_review .agent/reviews/r.md PASS L0
     # no plan file
     output=$(bash "$GATE" 2>&1); rc=$?
     assert "FAIL without plan" "$([[ $rc -ne 0 ]] && echo true || echo false)"
@@ -429,7 +419,7 @@ test_check3_plan_no_marker_l1() {
     CAPDIR=$(mktemp -d); printf '{ "level": "L1", "preferred_route": "codex" }\n' > "$CAPDIR/review-capability.json"
     export AGENT_GATES_DIR="$CAPDIR"
     mkdir -p .agent/reviews .agent/plans
-    printf 'VERDICT: PASS\n<!-- REVIEW_LEVEL: L1 -->\n' > .agent/reviews/r.md
+    write_anchored_review .agent/reviews/r.md PASS L1
     printf '# Plan\nSome design notes without markers\n' > .agent/plans/design.md
     output=$(bash "$GATE" 2>&1); rc=$?
     assert "FAIL plan without PLAN_REVIEW on L1" "$([[ $rc -ne 0 ]] && echo true || echo false)"
@@ -446,7 +436,7 @@ test_check3_l0_plan_no_marker() {
     CAPDIR=$(mktemp -d); printf '{ "level": "L0" }\n' > "$CAPDIR/review-capability.json"
     export AGENT_GATES_DIR="$CAPDIR"
     mkdir -p .agent/reviews .agent/plans .agent/verify
-    printf 'VERDICT: PASS\n' > .agent/reviews/r.md
+    write_anchored_review .agent/reviews/r.md PASS L0
     printf 'VERIFY_VERDICT: PASS\n' > .agent/verify/2099-01-01-auto.md
     printf '{"capability":"FULL","channel":"paseo"}\n' > .agent/verify/2099-01-01-auto.dispatch.json
     printf '# Plan\nSome design notes\n' > .agent/plans/design.md
@@ -465,7 +455,7 @@ test_check3_skip_approved() {
     CAPDIR=$(mktemp -d); printf '{ "level": "L0" }\n' > "$CAPDIR/review-capability.json"
     export AGENT_GATES_DIR="$CAPDIR"
     mkdir -p .agent/reviews .agent/plans .agent/verify
-    printf 'VERDICT: PASS\n' > .agent/reviews/r.md
+    write_anchored_review .agent/reviews/r.md PASS L0
     printf 'VERIFY_VERDICT: PASS\n' > .agent/verify/2099-01-01-auto.md
     printf '{"capability":"FULL","channel":"paseo"}\n' > .agent/verify/2099-01-01-auto.dispatch.json
     printf 'GENERATED_BY: agent-gates\nTIMESTAMP: 2026-06-10T00:00:00Z\nBRANCH: main\nHEAD: abc1234\nREASON: trivial config\n' > .agent/plans/config.skip.md
@@ -484,7 +474,7 @@ test_check3_skip_handwritten() {
     CAPDIR=$(mktemp -d); printf '{ "level": "L0" }\n' > "$CAPDIR/review-capability.json"
     export AGENT_GATES_DIR="$CAPDIR"
     mkdir -p .agent/reviews .agent/plans
-    printf 'VERDICT: PASS\n' > .agent/reviews/r.md
+    write_anchored_review .agent/reviews/r.md PASS L0
     printf 'I skip this\n' > .agent/plans/fake.skip.md
     output=$(bash "$GATE" 2>&1); rc=$?
     assert "FAIL hand-written skip" "$([[ $rc -ne 0 ]] && echo true || echo false)"
@@ -501,7 +491,7 @@ test_check3_skip_env() {
     CAPDIR=$(mktemp -d); printf '{ "level": "L0" }\n' > "$CAPDIR/review-capability.json"
     export AGENT_GATES_DIR="$CAPDIR"
     mkdir -p .agent/reviews .agent/plans .agent/verify
-    printf 'VERDICT: PASS\n' > .agent/reviews/r.md
+    write_anchored_review .agent/reviews/r.md PASS L0
     printf 'VERIFY_VERDICT: PASS\n' > .agent/verify/2099-01-01-auto.md
     printf '{"capability":"FULL","channel":"paseo"}\n' > .agent/verify/2099-01-01-auto.dispatch.json
     # no plan, no skip — would normally fail
@@ -512,10 +502,213 @@ test_check3_skip_env() {
 }
 
 # =====================================================================
+# v2.0.1: review evidence content anchors
+# =====================================================================
+
+test_sha256_stream() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  else
+    shasum -a 256 | awk '{print $1}'
+  fi
+}
+
+test_review_staged_files() {
+  git -c core.quotePath=true diff --cached --name-only --diff-filter=ACMRD -- \
+    . \
+    ':(exclude).agent/reviews/**' \
+    ':(exclude).agent/verify/**' \
+    ':(exclude).agent/plans/**'
+}
+
+test_review_diff_sha256() {
+  git diff --cached --binary -- \
+    . \
+    ':(exclude).agent/reviews/**' \
+    ':(exclude).agent/verify/**' \
+    ':(exclude).agent/plans/**' \
+    | test_sha256_stream
+}
+
+write_anchored_review() {
+  local review_file="$1" verdict="$2" review_level="${3:-L0}" head files files_sha256 diff_sha256
+  head=$(git rev-parse HEAD)
+  files=$(test_review_staged_files)
+  files_sha256=$(printf '%s\n' "$files" | test_sha256_stream)
+  diff_sha256=$(test_review_diff_sha256)
+  {
+    [[ -n "$review_level" ]] && printf '<!-- REVIEW_LEVEL: %s -->\n' "$review_level"
+    printf '<!-- REVIEW_HEAD: %s -->\n' "$head"
+    while IFS= read -r reviewed_file; do
+      printf '<!-- REVIEW_FILE: %s -->\n' "$reviewed_file"
+    done <<< "$files"
+    printf '<!-- REVIEW_FILES_SHA256: %s -->\n' "$files_sha256"
+    printf '<!-- REVIEW_DIFF_SHA256: %s -->\n' "$diff_sha256"
+    echo '# Anchored review'
+    printf 'VERDICT: %s\n' "$verdict"
+  } > "$review_file"
+}
+
+setup_content_anchor_scenario() {
+  setup_mock_repo
+  local i n
+  for i in 1 2; do
+    printf 'export const f%s = () => {\n' "$i" > "mod$i.ts"
+    for n in $(seq 1 30); do echo "  // line $n" >> "mod$i.ts"; done
+    echo "}" >> "mod$i.ts"
+    echo "test('f$i', () => {})" > "mod$i.test.ts"
+  done
+  git add mod1.ts mod2.ts mod1.test.ts mod2.test.ts
+  CAPDIR=$(mktemp -d)
+  printf '{ "level": "L0" }\n' > "$CAPDIR/review-capability.json"
+  export AGENT_GATES_DIR="$CAPDIR"
+  mkdir -p .agent/reviews .agent/plans .agent/verify
+  printf '# Plan\n<!-- PLAN_REVIEW: L1 -->\n<!-- PLAN_REVIEW_TOOL: fixture -->\n<!-- PLAN_REVIEW_MODEL: fixture -->\n' > .agent/plans/content-anchor.md
+  printf 'VERIFY_VERDICT: PASS\n' > .agent/verify/content-anchor.md
+  printf '{"capability":"FULL","channel":"fixture"}\n' > .agent/verify/content-anchor.dispatch.json
+  write_anchored_review .agent/reviews/content-anchor-pass.md PASS
+}
+
+test_content_anchor_exact_match_passes() {
+  echo "T-CA1: exact content anchor → PASS"
+  (
+    setup_content_anchor_scenario
+    output=$(bash "$GATE" 2>&1); rc=$?
+    assert "exact anchored review passes" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+    rm -rf "$CAPDIR"; teardown_mock_repo
+  )
+}
+
+test_content_anchor_unreviewed_file_blocks() {
+  echo "T-CA2: staged file outside review coverage → BLOCK"
+  (
+    setup_content_anchor_scenario
+    printf 'export const extra = 1\n' > extra.ts
+    printf "test('extra', () => {})\n" > extra.test.ts
+    git add extra.ts extra.test.ts
+    output=$(bash "$GATE" 2>&1); rc=$?
+    assert "unreviewed staged file blocks" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+    assert "output identifies unreviewed file coverage" "$(echo "$output" | grep -qiE 'unreviewed|not covered|coverage|REVIEW_FILE' && echo true || echo false)"
+    rm -rf "$CAPDIR"; teardown_mock_repo
+  )
+}
+
+test_content_anchor_byte_change_warns() {
+  echo "T-CA3: covered file byte change → WARN and PASS"
+  (
+    setup_content_anchor_scenario
+    sleep 1
+    printf '// formatting follow-up\n' >> mod1.ts
+    git add mod1.ts
+    touch .agent/verify/content-anchor.md
+    output=$(bash "$GATE" 2>&1); rc=$?
+    assert "covered byte change does not block" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+    assert "output prints byte-change warning" "$(echo "$output" | grep -qiE 'WARN|warning|diff.*changed|byte.*changed|reviewed.*changed' && echo true || echo false)"
+    assert "output prints staged diff summary" "$(echo "$output" | grep -qE 'files? changed|insertion|deletion|mod1.ts' && echo true || echo false)"
+    rm -rf "$CAPDIR"; teardown_mock_repo
+  )
+}
+
+test_content_anchor_any_exact_pass_suppresses_warning() {
+  echo "T-CA4: any exact PASS among multiple reviews → PASS without WARN"
+  (
+    setup_content_anchor_scenario
+    printf '// reviewed follow-up\n' >> mod1.ts
+    git add mod1.ts
+    write_anchored_review .agent/reviews/zz-content-anchor-exact-pass.md PASS
+    touch .agent/verify/content-anchor.md
+    output=$(bash "$GATE" 2>&1); rc=$?
+    assert "an exact PASS review allows the commit" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+    assert "an older non-exact PASS does not cause a false warning" "$(! echo "$output" | grep -q 'GATE WARNING' && echo true || echo false)"
+    rm -rf "$CAPDIR"; teardown_mock_repo
+  )
+}
+
+test_content_anchor_head_mismatch_blocks() {
+  echo "T-CA5: reviewed HEAD differs from current HEAD → BLOCK"
+  (
+    setup_content_anchor_scenario
+    git commit -q -m reviewed-snapshot
+    for n in $(seq 1 30); do printf '// next head %s\n' "$n" >> mod1.ts; done
+    for n in $(seq 1 30); do printf '// next head %s\n' "$n" >> mod2.ts; done
+    git add mod1.ts mod2.ts
+    touch .agent/reviews/content-anchor-pass.md .agent/verify/content-anchor.md
+    output=$(bash "$GATE" 2>&1); rc=$?
+    assert "HEAD mismatch blocks" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+    assert "output identifies HEAD mismatch" "$(echo "$output" | grep -qiE 'HEAD|base commit' && echo true || echo false)"
+    rm -rf "$CAPDIR"; teardown_mock_repo
+  )
+}
+
+test_content_anchor_negative_verdict_wins() {
+  echo "T-CA6: applicable ISSUES verdict overrides PASS"
+  (
+    setup_content_anchor_scenario
+    write_anchored_review .agent/reviews/content-anchor-issues.md ISSUES
+    sleep 1
+    touch .agent/reviews/content-anchor-pass.md
+    output=$(bash "$GATE" 2>&1); rc=$?
+    assert "applicable ISSUES verdict blocks" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+    assert "output identifies negative verdict" "$(echo "$output" | grep -qiE 'ISSUES|FAIL|REJECT' && echo true || echo false)"
+    rm -rf "$CAPDIR"; teardown_mock_repo
+  )
+}
+
+test_worktree_refreshed_legacy_review_does_not_pass() {
+  echo "T-CA7: worktree-refreshed legacy review → not relevant"
+  (
+    setup_mock_repo
+    local i n linked
+    for i in 1 2; do
+      printf 'export const f%s = () => {\n}\n' "$i" > "mod$i.ts"
+      echo "test('f$i', () => {})" > "mod$i.test.ts"
+    done
+    mkdir -p .agent/reviews .agent/plans .agent/verify
+    printf '# Historical review\nVERDICT: PASS\n' > .agent/reviews/legacy-pass.md
+    printf '# Plan\n<!-- PLAN_REVIEW: L1 -->\n<!-- PLAN_REVIEW_TOOL: fixture -->\n<!-- PLAN_REVIEW_MODEL: fixture -->\n' > .agent/plans/legacy.md
+    printf 'VERIFY_VERDICT: PASS\n' > .agent/verify/legacy.md
+    printf '{"capability":"FULL","channel":"fixture"}\n' > .agent/verify/legacy.dispatch.json
+    git add .
+    git commit -q -m legacy-review
+    touch -t 202608010101 .agent/reviews/legacy-pass.md
+    linked="${MOCK_REPO}-linked"
+    git worktree add -q "$linked" -b test/legacy-worktree
+    cd "$linked" || exit 1
+    for n in $(seq 1 35); do printf '// unrelated %s\n' "$n" >> mod1.ts; done
+    for n in $(seq 1 35); do printf '// unrelated %s\n' "$n" >> mod2.ts; done
+    git add mod1.ts mod2.ts
+    CAPDIR=$(mktemp -d)
+    printf '{ "level": "L0" }\n' > "$CAPDIR/review-capability.json"
+    export AGENT_GATES_DIR="$CAPDIR"
+    output=$(bash "$GATE" 2>&1); rc=$?
+    assert "checkout-refreshed legacy review cannot authorize change" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+    assert "output requests anchored/migrated review" "$(echo "$output" | grep -qiE 'anchor|legacy|review evidence' && echo true || echo false)"
+    cd "$MOCK_REPO" || exit 1
+    git worktree remove --force "$linked"
+    rm -rf "$CAPDIR"; teardown_mock_repo
+  )
+}
+
+# =====================================================================
 # Run all tests
 # =====================================================================
 echo "=== agent-quality-gate.sh tests ==="
 echo ""
+
+if [[ "${RUN_CONTENT_ANCHOR_TESTS_ONLY:-0}" == "1" ]]; then
+  test_content_anchor_exact_match_passes
+  test_content_anchor_unreviewed_file_blocks
+  test_content_anchor_byte_change_warns
+  test_content_anchor_any_exact_pass_suppresses_warning
+  test_content_anchor_head_mismatch_blocks
+  test_content_anchor_negative_verdict_wins
+  test_worktree_refreshed_legacy_review_does_not_pass
+  echo ""
+  read -r PASS_COUNT FAIL_COUNT < "$RESULTS_FILE"
+  rm -f "$RESULTS_FILE"
+  echo "$PASS_COUNT pass · $FAIL_COUNT fail"
+  [[ "$FAIL_COUNT" -eq 0 ]] && exit 0 || exit 1
+fi
 
 test_check1_pass_with_active_change
 test_check1_fail_no_active_change
@@ -549,7 +742,7 @@ test_check3_dangerous_skip_rejected() {
     CAPDIR=$(mktemp -d); printf '{ "level": "L0" }\n' > "$CAPDIR/review-capability.json"
     export AGENT_GATES_DIR="$CAPDIR"
     mkdir -p .agent/reviews .agent/plans
-    printf 'VERDICT: PASS\n' > .agent/reviews/r.md
+    write_anchored_review .agent/reviews/r.md PASS L0
     printf 'GENERATED_BY: agent-gates\nTIMESTAMP: 2026-06-10\nBRANCH: main\nHEAD: abc\nREASON: quick fix\n' > .agent/plans/migration.skip.md
     output=$(bash "$GATE" 2>&1); rc=$?
     assert "FAIL dangerous + skip" "$([[ $rc -ne 0 ]] && echo true || echo false)"
@@ -573,7 +766,7 @@ test_check3_dangerous_with_plan() {
     CAPDIR=$(mktemp -d); printf '{ "level": "L0" }\n' > "$CAPDIR/review-capability.json"
     export AGENT_GATES_DIR="$CAPDIR"
     mkdir -p .agent/reviews .agent/plans
-    printf 'VERDICT: PASS\n' > .agent/reviews/r.md
+    write_anchored_review .agent/reviews/r.md PASS L0
     printf '# Migration Plan\n<!-- PLAN_REVIEW: L1 -->\n<!-- PLAN_REVIEW_TOOL: codex -->\n<!-- PLAN_REVIEW_MODEL: gpt -->\n' > .agent/plans/migration.md
     output=$(bash "$GATE" 2>&1); rc=$?
     assert "PASS dangerous + reviewed plan" "$([[ $rc -eq 0 ]] && echo true || echo false)"
@@ -609,13 +802,10 @@ setup_hetero_exhausted_scenario() {
   printf '{\n  "level": "%s"\n}\n' "$cap_level" > "$CAPDIR/review-capability.json"
   export AGENT_GATES_DIR="$CAPDIR"
   mkdir -p .agent/reviews .agent/verify
-  {
-    [[ -n "$review_level" ]] && echo "<!-- REVIEW_LEVEL: $review_level -->"
-    [[ "$add_marker" == "true" ]] && echo "<!-- HETERO_EXHAUSTED: all models failed -->"
-    echo "# Cross-review"
-    echo "Looks correct, no issues."
-    echo "VERDICT: PASS"
-  } > .agent/reviews/2099-01-01-test.md
+  write_anchored_review .agent/reviews/2099-01-01-test.md PASS "$review_level"
+  if [[ "$add_marker" == "true" ]]; then
+    printf '<!-- HETERO_EXHAUSTED: all models failed -->\n' >> .agent/reviews/2099-01-01-test.md
+  fi
   # CHECK 6: provide passing verify stub so these HETERO_EXHAUSTED tests are not blocked
   printf 'VERIFY_VERDICT: PASS\n' > .agent/verify/2099-01-01-test.md
   printf '{"capability":"FULL","channel":"paseo"}\n' > .agent/verify/2099-01-01-test.dispatch.json
@@ -666,12 +856,8 @@ test_hetero_exhausted_bad_format_blocks() {
     printf '{\n  "level": "L3"\n}\n' > "$CAPDIR/review-capability.json"
     export AGENT_GATES_DIR="$CAPDIR"
     mkdir -p .agent/reviews
-    {
-      echo "<!-- REVIEW_LEVEL: L0 -->"
-      echo "HETERO_EXHAUSTED: all models failed"
-      echo "# Cross-review"
-      echo "VERDICT: PASS"
-    } > .agent/reviews/2099-01-01-test.md
+    write_anchored_review .agent/reviews/2099-01-01-test.md PASS L0
+    printf 'HETERO_EXHAUSTED: all models failed\n' >> .agent/reviews/2099-01-01-test.md
     output=$(bash "$GATE" 2>&1)
     rc=$?
     assert "exits 1 (hand-written marker rejected)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
@@ -720,7 +906,7 @@ setup_check6_base() {
   mkdir -p .agent/plans .agent/reviews
   printf '# Plan\n<!-- PLAN_REVIEW: L1 -->\n<!-- PLAN_REVIEW_TOOL: codex -->\n<!-- PLAN_REVIEW_MODEL: gpt-5 -->\n' \
     > .agent/plans/design.md
-  printf '# Review\nAll good.\nVERDICT: PASS\n' > .agent/reviews/2099-01-01-review.md
+  write_anchored_review .agent/reviews/2099-01-01-review.md PASS L0
 }
 
 # T-V1: verify-*.md + VERIFY_VERDICT: PASS → gate 通过
