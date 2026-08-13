@@ -37,6 +37,53 @@ It reads `~/.agent-gates/review-capability.json`, routes to the best available h
 
 **Use this command instead of spawning a Claude subagent for review.** On L1+ machines, using a same-model subagent violates the heterogeneous-review requirement (红线 #8).
 
+#### ⛔ 审查失败时：先读 `review-fail[<模型>]:` 那一行
+
+v2.0.2 起每种失败单独报一行。`HETERO_EXHAUSTED` 只是汇总，**本身不含任何原因**——2026-08-13 就是因为把它当原因，花了一整天去查一个不存在的通道 bug。
+
+| 报错行 | 真实原因 | 处置 |
+|---|---|---|
+| `answered N chars but produced no VERDICT line` | 模型正常答了，输出里没有可识别的结论行。**占比最高**。报错里带模型输出前 200 字符，可自行确认它答了 | 改 prompt（见下）。通道、模型、网络都没问题，别往那边查 |
+| `opencode exited 0 but produced empty output` | 传输层抖动 | 重试；持续出现用 `oc-reaper` 查共享 serve |
+| `opencode timed out after Ns` | 撞上 `AG_REVIEW_TIMEOUT`（默认 300s） | 收窄 prompt 的探索范围。「找出所有引用 X 的地方」等于放模型爬整个仓 |
+| `shared opencode serve unhealthy at <url>` | fail-closed，刻意拒绝裸跑 | `oc-reaper --apply` 清掉卡死 serve，再重试 |
+| `opencode exited N` / `codex timed out` | 审查进程本身失败 | 手工跑同一条命令看 stderr |
+
+**⛔ 失败时不许做的四件事**（都是伪造通过，不是解决）：
+- 手工填 `REVIEW_HEAD` / `REVIEW_FILES_SHA256` / `REVIEW_DIFF_SHA256`——绕掉的正是「审查前捕获、审查后校验 staged 未变」这个时序保证
+- 自签 `.agent/verify/*.ack`（gate 只校验内容与时效，分不出谁写的）
+- `SKIP_VERIFY=1` / `SKIP_REVIEW=1` / `--no-verify`
+- 不带 `AGENT_MODE=1` 提交（gate 会静默放行，「commit 成功」≠「gate 跑了」）
+
+审查确实跑不起来时，如实说明并停下。
+
+#### prompt 结尾必须要求结论行
+
+审查 prompt 末尾放这段，否则模型答得再好都会被判为失败：
+
+```
+最后一行必须是下列之一，且只有这一行内容：
+VERDICT: PASS
+VERDICT: ISSUES
+VERDICT: FAIL
+```
+
+v2.0.2 起装饰不影响判定，下面这些全部接受：
+
+```
+**VERDICT: PASS**    ## VERDICT: PASS    - VERDICT: PASS
+> VERDICT: PASS      `VERDICT: PASS`     VERDICT: **PASS**
+  VERDICT: PASS      VERDICT：PASS（中文冒号）
+```
+
+⚠️ 仍会被拒的三种：
+
+- 取值不在枚举内（`VERDICT: OK`、`VERDICT: NEEDS_WORK`）
+- **结论行带限定词**——`PASS_WITH_ISSUES`、`PASS-WITH-ISSUES`、`PASS.WITH.ISSUES`、`PASS WITH NOTES` 全部拒。有保留就写 `VERDICT: ISSUES`，保留写进正文；把有遗留问题的审查读成干净通过会让结论反过来
+- 整段回答没有结论行
+
+⚠️ 装饰容忍是 v2.0.2 才有的。**目标机器上 `~/.agent-gates/.version` 若低于 2.0.2，必须写裸行**——把 VERDICT 包在反引号里被拒过，是真实踩过的坑。
+
 ### Tool Priority (⛔ Hard Constraint)
 
 Cross-check MUST use a different model/vendor. Priority order:
@@ -58,7 +105,12 @@ Cross-check MUST use a different model/vendor. Priority order:
 
 ### opencode Command Template
 
-**⚠️ Prompt length limit (v1.10.1)**: opencode run 非交互模式 prompt 超 ~800 字符可能卡死（GPT-5.5 实测 800 字挂 22 分钟，短 prompt 秒回）。`agent-gates-review` 自动检测并在 L3 降级 codex、L2 拒绝。手动调用时**控制 prompt ≤200 字符**，背景让模型从代码自己读。
+**⚠️ Prompt length (v1.10.1 记录，v2.0.2 修正了适用范围)**：opencode run 非交互模式 prompt 超 ~800 字符曾观察到卡死（GPT-5.5 实测 800 字挂 22 分钟，短 prompt 秒回）。手动调用时仍建议**控制 prompt ≤200 字符**，背景让模型从 `--dir` 自己读代码——短 prompt 也更省 token。
+
+⚠️ 两处需要知道的实际行为：
+
+- `MAX_CHARS`（默认 800）的自动降级**只在 legacy L0-L3 路由生效**。配置里有 `review_models` / `hetero_models` 时走 hetero 分支，该分支不检查 prompt 长度，长 prompt 会照样发给 opencode。
+- v2.0.2 起所有调用都有超时（`AG_REVIEW_TIMEOUT`，默认 300s），所以即使撞上这个现象，也是**一条明确的 timeout 报错**而不是无限期挂住。看到 `opencode timed out` 时，先怀疑 prompt 的探索范围没边界，再怀疑长度。
 
 Parse script (extract plain text from `--format json` stream):
 

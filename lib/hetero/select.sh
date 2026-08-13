@@ -131,27 +131,86 @@ _try_review_model() {
 
   local opencode_bin="${OC_REVIEW_OPENCODE:-opencode}"
   if ! command -v "$opencode_bin" &>/dev/null; then
+    echo "review-fail[$model]: opencode binary not found ($opencode_bin)" >&2
     return 1
   fi
 
   # v1.13.0: route through shared serve when available.
-  # Fail-closed: if serve is not available/healthy, refuse to run bare.
+  # Fail-closed: if serve is not available/startable, refuse to run bare.
+  #
+  # v2.0.2: ensure, not merely probe. This used to call oc_serve_health_check, so once the
+  # shared serve died the opencode channel was permanently unavailable — every review fell
+  # through to codex, and the caller-facing message did not say why. Note the asymmetry
+  # this fixes: the legacy run_opencode path has always used oc_serve_ensure, so the
+  # hetero path was strictly more fragile than the one it replaced. oc_serve_ensure still
+  # yields an attach URL or fails, so the fail-closed guarantee is unchanged.
   local attach_args=()
   local _oc_serve_lib="${BASH_SOURCE[0]%/*}/serve.sh"
   if [[ -f "$_oc_serve_lib" ]]; then
     source "$_oc_serve_lib"
-    if oc_serve_health_check 2>/dev/null; then
+    if oc_serve_ensure 2>/dev/null; then
       attach_args=(--attach "$OC_SERVE_URL")
     else
-      return 1  # serve not healthy — fail-closed, don't run bare
+      echo "review-fail[$model]: shared opencode serve is down and could not be started (${OC_SERVE_URL:-unset}) — refusing to run bare (fail-closed). Try: oc-reaper --apply, then retry" >&2
+      return 1
     fi
   else
-    return 1  # serve.sh not found — fail-closed, don't run bare
+    echo "review-fail[$model]: serve.sh not found at $_oc_serve_lib — refusing to run bare (fail-closed)" >&2
+    return 1
   fi
 
-  local raw
-  raw=$("$opencode_bin" run "${attach_args[@]}" --pure -m "$model" --dir "${PWD}" --format json "$prompt" 2>/dev/null)
-  [[ $? -ne 0 || -z "$raw" ]] && return 1
+  # v2.0.2: bound every invocation. bin/with-timeout.mjs shipped since v1.x but was
+  # never wired to any call site, so a request that never came back hung the whole
+  # review chain — one observed run burned 80 minutes and produced nothing.
+  local _wt="${BASH_SOURCE[0]%/*}/../../bin/with-timeout.mjs"
+  local _timeout_secs="${AG_REVIEW_TIMEOUT:-300}"
+  if [[ ! -f "$_wt" ]] || ! command -v node >/dev/null 2>&1; then
+    # fail-closed, same posture as the serve guard above. Degrading to an unbounded run
+    # would silently drop the guarantee this block exists to provide, and an unbounded
+    # run is exactly how a review once went 80 minutes and produced nothing.
+    echo "review-fail[$model]: timeout wrapper unavailable ($_wt, node required) — refusing to run unbounded (fail-closed)" >&2
+    return 1
+  fi
+  local timeout_cmd=(node "$_wt" "$_timeout_secs")
+
+  # Neither array can actually be empty at this point: the check above fails closed so
+  # timeout_cmd is always populated, and the serve guard populates attach_args on the only
+  # path that reaches here (every other branch returns). The guarded expansion is kept on
+  # timeout_cmd regardless — bash 3.2 (macOS default) errors under `set -u` on "${arr[@]}"
+  # for an empty array, and staying safe against a future edit costs nothing here.
+  local raw rc
+  raw=$(${timeout_cmd[@]+"${timeout_cmd[@]}"} "$opencode_bin" run "${attach_args[@]}" --pure -m "$model" --dir "${PWD}" --format json "$prompt" 2>/dev/null)
+  rc=$?
+  if [[ $rc -eq 124 ]]; then
+    echo "review-fail[$model]: opencode timed out after ${_timeout_secs}s (raise AG_REVIEW_TIMEOUT, or narrow the prompt — an unbounded 'go find everything' prompt makes the model crawl the repo)" >&2
+    return 1
+  fi
+  if [[ $rc -ne 0 ]]; then
+    echo "review-fail[$model]: opencode exited $rc" >&2
+    return 1
+  fi
+  if [[ -z "$raw" ]]; then
+    echo "review-fail[$model]: opencode exited 0 but produced empty output" >&2
+    return 1
+  fi
+
+  # v2.0.2: judge usability here, so an answer that cannot be used falls through to
+  # the next model instead of dead-ending in the caller. Both helpers are defined in
+  # bin/agent-gates-review; when select.sh is sourced elsewhere they may be absent,
+  # in which case skip the check rather than fail.
+  if declare -f parse_opencode_json >/dev/null 2>&1; then
+    local parsed
+    parsed=$(printf '%s' "$raw" | parse_opencode_json)
+    if [[ -z "${parsed//[[:space:]]/}" ]]; then
+      echo "review-fail[$model]: opencode returned ${#raw} bytes but NDJSON parsed to empty text" >&2
+      return 1
+    fi
+    if declare -f has_valid_conclusion >/dev/null 2>&1 && ! has_valid_conclusion "$parsed"; then
+      echo "review-fail[$model]: answered ${#parsed} chars but produced no VERDICT line — the prompt must require a line matching 'VERDICT: PASS|REVISE|FAIL|ISSUES|APPROVED|REJECT'. Model said: $(printf '%.200s' "$parsed" | tr '\n' ' ')" >&2
+      return 1
+    fi
+  fi
+
   echo "$raw"
   return 0
 }

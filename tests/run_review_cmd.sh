@@ -7,6 +7,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REVIEW_CMD="$SCRIPT_DIR/../bin/agent-gates-review"
 RESULTS_FILE=$(mktemp); echo "0 0" > "$RESULTS_FILE"
 
+# v2.0.2: the hetero branch now falls back to codex once its models are exhausted. Point
+# codex at a nonexistent path by default so the exhaustion cases below never reach a real
+# codex on the developer's machine — that turned this file into a multi-minute timeout.
+# Cases that want the fallback exercised pass AG_REVIEW_CODEX inline, which wins.
+export AG_REVIEW_CODEX="${AG_REVIEW_CODEX:-/nonexistent/codex}"
+
 assert() {
   local name="$1" cond="$2" p f
   read -r p f < "$RESULTS_FILE"

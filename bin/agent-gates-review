@@ -25,7 +25,11 @@
 #   OC_REVIEW_RETRIES     oc-review retry count
 #   AG_REVIEW_CODEX       codex binary (default "codex")
 #   AG_REVIEW_MODEL       opencode model (default "github-copilot/gpt-5.5")
-#   AG_REVIEW_MAX_CHARS   opencode prompt char limit (default 800)
+#   AG_REVIEW_MAX_CHARS   opencode prompt char limit (default 800). Legacy L0-L3 routing
+#                         only — the hetero branch does not gate on prompt length.
+#   AG_REVIEW_TIMEOUT     seconds allowed per reviewer invocation (default 300). Applies
+#                         to opencode and codex alike; exceeding it is reported as a
+#                         timeout rather than left to hang.
 #
 # Source: https://github.com/mcdowell8023/agent-gates
 set -uo pipefail
@@ -39,6 +43,19 @@ fi
 CODEX="${AG_REVIEW_CODEX:-codex}"
 MODEL="${AG_REVIEW_MODEL:-github-copilot/gpt-5.5}"
 MAX_CHARS="${AG_REVIEW_MAX_CHARS:-800}"
+
+# v2.0.2: every external reviewer invocation is bounded. bin/with-timeout.mjs shipped
+# since v1.x but had zero call sites, so a reviewer that never returned hung the whole
+# gate — one observed run burned 80 minutes and produced nothing at exit 0.
+_WT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/with-timeout.mjs"
+TIMEOUT_SECS="${AG_REVIEW_TIMEOUT:-300}"
+if [[ ! -f "$_WT" ]] || ! command -v node >/dev/null 2>&1; then
+  # fail-closed rather than fail-open: silently dropping the timeout would restore the
+  # original hang risk while the code still claims every invocation is bounded.
+  echo "agent-gates-review: timeout wrapper unavailable ($_WT, node required) — refusing to run reviewers unbounded (fail-closed)" >&2
+  exit 75
+fi
+TIMEOUT_CMD=(node "$_WT" "$TIMEOUT_SECS")
 
 PROMPT_FILE=""
 RESULT_FILE=""
@@ -169,9 +186,30 @@ for line in sys.stdin:
 "
 }
 
+# Accept a VERDICT line even when the model wraps it in ordinary markdown. Models
+# routinely emit `**VERDICT: PASS**`, `## VERDICT: PASS`, a list item, a blockquote,
+# backticks, or a full-width colon in Chinese contexts. Before v2.0.2 every one of
+# those was rejected and then reported as "all review models failed", which pointed
+# troubleshooting at the transport instead of the formatting and cost a full day.
+#
+# Tolerated: leading blanks, any run of # > * _ ` - before the keyword, ASCII ':' or
+# full-width '：', and * _ ` around the value.
+#
+# Accepted values are listed in full rather than matched as prefixes, and the line must
+# carry nothing but the value. Prefix matching reads as harmless — it lets `FAILED` count
+# as `FAIL` — but it also lets `VERDICT: PASS_WITH_ISSUES` count as a clean PASS, which
+# inverts the review's meaning. A mere word boundary is not enough either: it still admits
+# `PASS-WITH-ISSUES` and `PASS.WITH.ISSUES`, the same inversion with different punctuation.
+# So after the value only decoration is allowed (* ` blanks, a trailing period) up to end
+# of line. That matches what the docs ask the prompt for — a line that is *only* the
+# verdict — and a qualified verdict now fails loudly instead of silently reading as PASS.
+#
+# Still rejected: values outside the list (VERDICT: OK, VERDICT: NEEDS_WORK), qualified
+# verdicts of any punctuation, and text with no VERDICT line.
+# POSIX classes only — \s is a GNU extension and this ships to other platforms.
 has_valid_conclusion() {
   local text="$1"
-  echo "$text" | grep -qiE '^VERDICT:\s*(PASS|REVISE|FAIL|ISSUES|APPROVED|REJECT)' && return 0
+  echo "$text" | grep -qiE '^[[:blank:]]*[#>*_`[:blank:]-]*VERDICT[[:blank:]]*(:|：)[[:blank:]]*[*`]*(PASS|PASSED|REVISE|REVISED|FAIL|FAILED|ISSUES|ISSUES_FOUND|APPROVED|APPROVE|REJECT|REJECTED)[*`[:blank:].]*$' && return 0
   return 1
 }
 
@@ -195,7 +233,11 @@ print('hetero_models' if 'hetero_models' in d else 'review_models')
 " "$CAP_FILE" 2>/dev/null
 }
 
-if _has_review_models; then
+# v2.0.2: wrapped in a function so it runs AFTER PREFERRED/FALLBACK and
+# run_opencode/run_codex exist. It used to execute inline right here, which is the
+# real reason the hetero path could never reach the codex fallback — run_codex is
+# defined further down the file and simply did not exist yet at this point.
+run_hetero_review() {
   _BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   source "$_BIN_DIR/../lib/hetero/select.sh"
   _RM_KEY=$(_get_review_models_key)
@@ -248,12 +290,36 @@ print(','.join(pool))
 
   _hetero_err=$(cat "$_err_file")
   rm -f "$_err_file"
+
+  # Per-model reasons first: each `review-fail[<model>]:` line says which model failed
+  # and why (timed out / exited N / empty output / no VERDICT line, with the model's own
+  # words quoted). The HETERO_EXHAUSTED summary still follows it, so anything already
+  # grepping for that keyword keeps working.
+  [[ -n "$_hetero_err" ]] && printf '%s\n' "$_hetero_err" >&2
+  # run_fallback_chain already emits its own HETERO_EXHAUSTED line, so only add the summary
+  # when that path was bypassed — panel_mode=off calls _try_review_model directly and it
+  # reports per-model reasons only. Printing unconditionally duplicated the line.
+  if ! printf '%s' "$_hetero_err" | grep -q 'HETERO_EXHAUSTED'; then
+    echo "HETERO_EXHAUSTED: all review models failed (primary=$_RM_PRIMARY, panel=$_RM_PANEL_CSV)" >&2
+  fi
+
+  # v2.0.2: this used to `exit 75` on the spot, which made fallback_route dead config —
+  # codex was unreachable from the hetero path regardless of what the JSON said.
+  if [[ "$FALLBACK" == "codex" ]] && command -v "$CODEX" >/dev/null 2>&1; then
+    echo "agent-gates-review: falling back to $FALLBACK" >&2
+    if run_codex; then
+      exit 0
+    fi
+    echo "agent-gates-review: codex fallback also failed" >&2
+  fi
+
+  # Write the stub only once the fallback is out too, otherwise a successful codex
+  # review would be overwritten by an HETERO_EXHAUSTED marker.
   if [[ -n "$RESULT_FILE" ]]; then
     echo "<!-- HETERO_EXHAUSTED: primary=$_RM_PRIMARY, panel=$_RM_PANEL_CSV -->" > "$RESULT_FILE"
   fi
-  echo "${_hetero_err:-HETERO_EXHAUSTED: all review models failed (primary=$_RM_PRIMARY)}" >&2
   exit 75
-fi
+}
 
 # --- Legacy L0-L3 routing (no review_models in cap) ---
 
@@ -279,11 +345,23 @@ run_opencode() {
     if ! oc_serve_ensure 2>/dev/null; then
       return 1
     fi
-    raw=$("$opencode_bin" run --attach "$OC_SERVE_URL" -m "$MODEL" --dir "${PWD}" --format json "$PROMPT_CONTENT" 2>/dev/null)
+    raw=$(${TIMEOUT_CMD[@]+"${TIMEOUT_CMD[@]}"} "$opencode_bin" run --attach "$OC_SERVE_URL" -m "$MODEL" --dir "${PWD}" --format json "$PROMPT_CONTENT" 2>/dev/null)
     rc=$?
   fi
 
-  if [[ $rc -ne 0 ]] || [[ -z "$raw" ]] || ! echo "$raw" | grep -q '[^[:space:]]'; then
+  # v2.0.2: these four outcomes used to collapse into a bare `return 1`, so the caller
+  # could only say "review failed" — which is what sent a day of troubleshooting at the
+  # transport when the real problem was prompt formatting. Keep them distinguishable.
+  if [[ $rc -eq 124 ]]; then
+    echo "agent-gates-review: opencode timed out after ${TIMEOUT_SECS}s (model=$MODEL)" >&2
+    return 1
+  fi
+  if [[ $rc -ne 0 ]]; then
+    echo "agent-gates-review: opencode exited $rc (model=$MODEL)" >&2
+    return 1
+  fi
+  if [[ -z "$raw" ]] || ! echo "$raw" | grep -q '[^[:space:]]'; then
+    echo "agent-gates-review: opencode exited 0 but produced empty output (model=$MODEL)" >&2
     return 1
   fi
 
@@ -291,11 +369,12 @@ run_opencode() {
   parsed=$(echo "$raw" | parse_opencode_json)
 
   if [[ -z "$parsed" ]] || ! echo "$parsed" | grep -q '[^[:space:]]'; then
+    echo "agent-gates-review: opencode returned ${#raw} bytes but NDJSON parsed to empty text (model=$MODEL)" >&2
     return 1
   fi
 
   if ! has_valid_conclusion "$parsed"; then
-    echo "agent-gates-review: opencode output has no substantive conclusion (failure mode B) — treating as failure" >&2
+    echo "agent-gates-review: model answered ${#parsed} chars but produced no VERDICT line (model=$MODEL) — the prompt must require a line matching 'VERDICT: PASS|REVISE|FAIL|ISSUES|APPROVED|REJECT'. Model said: $(printf '%.200s' "$parsed" | tr '\n' ' ')" >&2
     return 1
   fi
 
@@ -309,8 +388,14 @@ run_opencode() {
 
 run_codex() {
   local raw
-  raw=$("$CODEX" exec -s read-only --skip-git-repo-check -C "${PWD}" < "$PROMPT_FILE" 2>/dev/null)
+  # Bounded for the same reason as opencode — a hung fallback is worse than a failed
+  # one, because the caller is already out of alternatives.
+  raw=$(${TIMEOUT_CMD[@]+"${TIMEOUT_CMD[@]}"} "$CODEX" exec -s read-only --skip-git-repo-check -C "${PWD}" < "$PROMPT_FILE" 2>/dev/null)
   local rc=$?
+  if [[ $rc -eq 124 ]]; then
+    echo "agent-gates-review: codex timed out after ${TIMEOUT_SECS}s" >&2
+    return 1
+  fi
   if [[ $rc -eq 0 && -n "$raw" ]]; then
     local result
     result=$(append_marker "codex" "gpt-5-series" "$raw")
@@ -329,6 +414,13 @@ prompt_too_long_for_opencode() {
 }
 
 # --- Main routing ---
+
+# Hetero selection is invoked here rather than at its definition site so every helper
+# it needs already exists. It exits on both success and exhaustion, so control reaches
+# the legacy case below only when the capability file carries no review_models segment.
+if _has_review_models; then
+  run_hetero_review
+fi
 
 case "$LEVEL" in
   L3)

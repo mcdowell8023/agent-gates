@@ -2,6 +2,36 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.0.2 — 审查失败可诊断 + 调用超时 + VERDICT 容错
+
+起因：`HETERO_EXHAUSTED: all review models failed` 被用于五种互不相关的失败，其中占比最高的一种是「模型正常答了，但输出里没有行首 `VERDICT:` 行」。这句报错把排查引向通道与版本，2026-08-13 因此产生一次误诊，把根因写成「opencode 1.17.15 的 `--format json` 挂死」——实测四条路径（裸跑 / `--attach` × 带 json / 不带）全部 4~20 秒返回、输出为标准 NDJSON，该结论已证伪。
+
+### Fixed
+- **审查失败现在可区分**：五种失败各自单独报行，前缀 `review-fail[<model>]:` —— 二进制缺失 / serve 不健康 / 超时 / 非零退出 / 空输出 / NDJSON 解析空 / 缺 VERDICT 行。缺 VERDICT 时附带模型输出前 200 字符，可直接看出它确实答了。`HETERO_EXHAUSTED` 降为汇总行，保留给既有日志抓取
+- **VERDICT 匹配容忍装饰**：`**VERDICT: PASS**`、`## VERDICT: PASS`、`- ` / `> ` 前缀、反引号、缩进、中文冒号 `VERDICT：`、`VERDICT: **PASS**` 全部接受。取值不在枚举内（`VERDICT: OK`）与整段无结论行仍拒。正则改用 POSIX 字符类，不再依赖 GNU 的 `\s`
+- **所有外部审查调用套超时**：`select.sh` / `oc-review` / `run_opencode` / `run_codex` 全部经 `bin/with-timeout.mjs`（`AG_REVIEW_TIMEOUT`，默认 300s）。该 wrapper 此前存在但**零调用点**，一个无边界 prompt 曾跑 80 分钟、exit 0、零产出
+- **`with-timeout.mjs` 改为杀整个进程组**：只杀直接子进程时，孙子进程继承 stdout 并继续持有管道，调用方的命令替换照样阻塞——超时形同没有。改用 `detached` + `kill(-pid)`，并显式转发 SIGINT / SIGTERM 以保留 Ctrl-C
+- **hetero 分支可落回 codex**：该分支原先直接 `exit 75`，`fallback_route` 是死配置。更深一层的原因是 `run_codex` 定义在文件靠后位置、hetero 分支执行时它还不存在；现已包成 `run_hetero_review()` 并推后到所有 helper 定义之后调用。`HETERO_EXHAUSTED` stub 改在 codex 也失败后才写，避免覆盖 codex 的成功产物
+- **不可用的回答会换下一个模型**：VERDICT 判定下推到 `_try_review_model`，primary 给不出可用结论时继续试 panel，而不是在调用方终止整条链
+- **结论行只承载取值**：原先是前缀匹配（`FAILED` 能当 `FAIL` 用），同一条规则让 `VERDICT: PASS_WITH_ISSUES` 被当成干净通过——**结论被反转**，比判失败更糟；`VERDICT: PASSENGER` 同样能过。仅加词边界还不够：`PASS-WITH-ISSUES` / `PASS.WITH.ISSUES` 会从标点处漏过去（异构审查第二轮抓到）。现在取值显式列出（含 `PASSED`/`FAILED`/`ISSUES_FOUND`/`REJECTED` 等变体），且取值之后只允许装饰符、空白与句末句号直到行尾——与文档要求 prompt 输出的形态一致。带限定词的结论一律判失败并明确报错，不再静默读成 PASS
+- **超时包装器的信号处理**：转发 SIGINT / SIGTERM 后**等待进程组真正退出**（3s grace 后补 SIGKILL），而不是转发完立即退出——后者会让忽略信号的进程组继续持有 stdout，正是这个 wrapper 要防的挂死
+- **保留 128+signal 退出码语义**：子进程被信号杀死时 `code === null`，原先一律返回 1，调用方分不清「命令失败」与「命令被杀」
+- **超时包装器缺失时 fail-closed**：`node` 或 `bin/with-timeout.mjs` 不可用时，`select.sh` / `oc-review` / `agent-gates-review` 一律拒绝执行并明确报错，不再静默退化为无超时运行（与 serve 守卫的 fail-closed 姿态一致）
+- 🔴 **hetero 分支会自愈共享 serve**：`_try_review_model` 原先只用 `oc_serve_health_check` **探测**，所以共享 serve 一死，opencode 通道就**永久不可用**——每次审查都落到 codex，而旧版报错完全看不出是 serve 的事。注意这里的不对称：legacy 的 `run_opencode` 一直用的是 `oc_serve_ensure`，**hetero 分支比它取代的那条路更脆弱**。改用 `oc_serve_ensure` 后仍然产出 attach URL 或失败，fail-closed 保证不变。用修好的工具自审时正好撞上这一条
+- **`HETERO_EXHAUSTED` 不再重复打印**：`run_fallback_chain` 本身会输出一条，上层无条件再输出一条 ⇒ 同一次失败看起来像两次。改为仅在绕过该路径时补（`panel_mode: off` 直接调 `_try_review_model`，它只报各模型的原因）
+
+### Changed（行为变化）
+- 配置里有 `review_models` / `hetero_models` 且 `fallback_route: codex` 时，hetero 模型耗尽后**会额外调用一次 codex**。这是 F4 的目的，但意味着一次失败的审查现在会多花一次 codex 的时间与额度。测试若断言「耗尽即失败」，需要把 `AG_REVIEW_CODEX` 指向不存在的路径（`tests/run_review_cmd.sh` 已按此调整）
+
+### Docs
+- README / README.zh-CN 新增 Troubleshooting 子节「审查失败：先看 review-fail 那一行」：五种失败对照表、prompt 结论行模板、接受与拒绝的格式清单、两个「不是原因」的东西（`--format json`、macOS 缺 GNU `timeout`）、以及为什么不能伪造锚点通过
+- `skills/agent-review-protocol` 同步同一份处置表；更正其中「`MAX_CHARS` 自动降级」的适用范围——该降级只在 legacy L0-L3 路由生效，hetero 分支不检查 prompt 长度
+
+### Tests
+- 新增 `tests/run_review_verdict_diagnostics.sh`：五种失败各自可辨识、VERDICT 格式与限定词用例、超时边界（含「不留孤儿孙子进程」断言）、wrapper 缺失 fail-closed、hetero→codex fallback
+- 拒绝类断言不再只看退出码：只断言「非 0 退出」的话，语法错误、`set -u` 未绑定变量、超时都会让用例变绿，实际上已经不再测判定逻辑。现在同时要求报错里出现对应的拒绝原因
+- 接受类断言同时要求产物落地（`REVIEW_TOOL` marker 存在），而不是只看 exit 0
+
 ## v2.0.0 — hetero-check 异构检查子系统 + Verifier
 
 ### Breaking Changes

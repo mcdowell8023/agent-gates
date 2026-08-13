@@ -460,6 +460,77 @@ Doctor checks the same surface as the install/uninstall scripts (paths, registra
 | Skill behavior unchanged after upgrade | Per-project hook was not refreshed | In the affected repo: re-run `init project gates` |
 | `hooks.json` has duplicate entries | Manual edits combined with installer re-runs | `./uninstall.sh` then re-install for a clean state |
 | Need to roll back a skill change | Looking for the previous SKILL.md | Check `SKILL.md.bak.<timestamp>` in the same skill directory |
+| `HETERO_EXHAUSTED` / review produces nothing | Several unrelated causes, most often prompt formatting | See [Review failures](#review-failures-read-the-per-model-line-first) below |
+
+### Review failures: read the per-model line first
+
+`agent-gates-review` can fail for five unrelated reasons. Since v2.0.2 each one names
+itself on its own line, prefixed `review-fail[<model>]:`. Read that line before doing
+anything else — the `HETERO_EXHAUSTED` summary underneath it says nothing about cause.
+
+| Error line | What actually happened | What to do |
+|---|---|---|
+| `answered N chars but produced no VERDICT line` | The model replied normally; the reply just has no line the gate can read as a verdict. **This is the most common failure by a wide margin.** The message quotes the model's first 200 characters so you can see for yourself that it did answer. | Fix the prompt — see below. Nothing is wrong with the transport, the model, or your network. |
+| `opencode exited 0 but produced empty output` | Transport-level flake (the "P2" mode `oc-review` retries) | Retry. If it persists, check the shared serve with `oc-reaper` |
+| `opencode timed out after Ns` | The invocation hit `AG_REVIEW_TIMEOUT` (default 300s) | Narrow the prompt. An open-ended "go find every place X is referenced" turns into a full repo crawl. Raise `AG_REVIEW_TIMEOUT` only if the prompt is genuinely large |
+| `shared opencode serve unhealthy at <url>` | Fail-closed: the shared serve is gone or wedged, and running bare is refused on purpose | `oc-reaper --apply` to clear a wedged serve, then retry |
+| `opencode exited N` / `codex timed out` | The reviewer process itself failed | Run the same command by hand to see its stderr |
+
+#### The prompt has to ask for the verdict line
+
+The gate treats a review as usable only if the output contains a line it can match as a
+verdict. If your prompt never asks for one, the review is discarded no matter how good it
+is. Put this at the end of the review prompt:
+
+```
+The last line must be exactly one of:
+VERDICT: PASS
+VERDICT: ISSUES
+VERDICT: FAIL
+```
+
+Accepted values, case-insensitive: `PASS` `PASSED` `REVISE` `REVISED` `FAIL` `FAILED`
+`ISSUES` `ISSUES_FOUND` `APPROVED` `APPROVE` `REJECT` `REJECTED`.
+
+**The verdict line must carry nothing but the value** (decoration and a trailing period are
+fine). A qualified verdict is rejected on purpose, in every spelling — `PASS_WITH_ISSUES`,
+`PASS-WITH-ISSUES`, `PASS.WITH.ISSUES`, `PASS WITH NOTES`. Reading a review that still has
+open concerns as a clean pass would invert its result, which is worse than failing the
+check outright. If the review has concerns, say `VERDICT: ISSUES` and put them in the body.
+
+Since v2.0.2 the surrounding decoration no longer matters. All of these are accepted:
+
+```
+VERDICT: PASS          **VERDICT: PASS**      ## VERDICT: PASS
+- VERDICT: PASS        > VERDICT: PASS        `VERDICT: PASS`
+  VERDICT: PASS        VERDICT：PASS          VERDICT: **PASS**
+```
+
+Still rejected, because the gate cannot tell what they mean: a value outside the enum
+(`VERDICT: OK`, `VERDICT: NEEDS_WORK`) and a reply with no verdict line at all.
+
+#### Two things that are *not* the cause
+
+**`opencode --format json` does not hang.** Notes written before v2.0.2 blame it, and
+that was a misdiagnosis. Measured on opencode 1.17.15, all four paths (bare or
+`--attach`, with or without `--format json`) return in 4–20s and emit exactly the NDJSON
+that `parse_opencode_json` expects. What actually happened in those incidents: the review
+prompt asked for no verdict line, and separately, no invocation had a timeout, so an
+unbounded prompt could run for over an hour and exit 0 with nothing. Both are fixed.
+
+**`timeout` is not missing from your machine because something is broken.** macOS ships
+no GNU `timeout`, so a diagnostic command wrapped in it fails with exit 127 and looks
+like a tool failure. Use `bin/with-timeout.mjs <secs> <cmd>` instead — the same wrapper
+the gate itself uses.
+
+#### Never fake the way past a review failure
+
+The gate deliberately captures `REVIEW_HEAD` / `REVIEW_FILES_SHA256` /
+`REVIEW_DIFF_SHA256` *before* the review and re-checks them *after*, so the evidence
+provably describes the code being committed. Hand-writing those anchors, self-signing an
+`.agent/verify/*.ack`, `SKIP_VERIFY=1`, `--no-verify`, or dropping `AGENT_MODE=1` all
+defeat that guarantee rather than satisfying it. If a review genuinely cannot run, say so
+and stop — do not manufacture the artifact.
 
 ## Relationship Between Components
 

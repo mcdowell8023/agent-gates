@@ -460,6 +460,55 @@ Doctor 检查的范围与 install / uninstall 脚本一致（路径、注册、s
 | 升级后 skill 行为没变 | 项目级 hook 没刷新 | 在受影响的仓库里重新跑 `init project gates` |
 | `hooks.json` 有重复条目 | 手动编辑 + 安装器多次重跑 | `./uninstall.sh` 然后重装，恢复干净状态 |
 | 想回滚某次 skill 改动 | 想找上一版 SKILL.md | 在该 skill 目录里找 `SKILL.md.bak.<timestamp>` |
+| `HETERO_EXHAUSTED` / 审查跑不出东西 | 五种互不相关的原因，最常见的是 prompt 格式 | 见下面 [审查失败](#审查失败先看-review-fail-那一行) |
+
+### 审查失败：先看 review-fail 那一行
+
+`agent-gates-review` 有五种互不相关的失败。v2.0.2 起每种都会单独打一行，前缀是
+`review-fail[<模型>]:`。**先读那一行**，底下那句 `HETERO_EXHAUSTED` 汇总不含任何原因信息。
+
+| 报错行 | 实际发生了什么 | 怎么办 |
+|---|---|---|
+| `answered N chars but produced no VERDICT line` | 模型正常回答了，只是回答里没有 gate 能识别为结论的那一行。**这是占比最高的一种失败。** 报错里带了模型输出的前 200 字符，可以自己确认它确实答了 | 改 prompt，见下。通道、模型、网络都没问题，别往那边查 |
+| `opencode exited 0 but produced empty output` | 传输层抖动（`oc-review` 会重试的 P2 模式） | 重试。持续出现就用 `oc-reaper` 查共享 serve |
+| `opencode timed out after Ns` | 撞上 `AG_REVIEW_TIMEOUT`（默认 300s） | 收窄 prompt。「找出所有引用 X 的地方」这类开放式要求等于放模型去爬整个仓库。确认 prompt 本身就很大时，才调高 `AG_REVIEW_TIMEOUT` |
+| `shared opencode serve unhealthy at <url>` | fail-closed：共享 serve 没了或卡死，拒绝裸跑是刻意设计 | `oc-reaper --apply` 清掉卡死的 serve，再重试 |
+| `opencode exited N` / `codex timed out` | 审查进程本身失败 | 手工跑同一条命令看它的 stderr |
+
+#### prompt 必须要求结论行
+
+gate 只把「输出里有一行能被识别为结论」的审查算作可用。prompt 里没要求这一行，审查写得再好也会被丢掉。在审查 prompt 末尾放这段：
+
+```
+最后一行必须是下列之一，且只有这一行内容：
+VERDICT: PASS
+VERDICT: ISSUES
+VERDICT: FAIL
+```
+
+可用取值（不区分大小写）：`PASS` `PASSED` `REVISE` `REVISED` `FAIL` `FAILED` `ISSUES` `ISSUES_FOUND` `APPROVED` `APPROVE` `REJECT` `REJECTED`。
+
+**结论行除了取值本身不能带别的内容**（装饰符和句末句号无妨）。带限定词的结论一律拒，无论哪种写法——`PASS_WITH_ISSUES`、`PASS-WITH-ISSUES`、`PASS.WITH.ISSUES`、`PASS WITH NOTES`。把仍有遗留问题的审查读成干净通过，会让结论反过来，比直接判失败更糟。审查有保留就写 `VERDICT: ISSUES`，把保留写进正文。
+
+v2.0.2 起，外面裹什么装饰都不影响，下面这些全部接受：
+
+```
+VERDICT: PASS          **VERDICT: PASS**      ## VERDICT: PASS
+- VERDICT: PASS        > VERDICT: PASS        `VERDICT: PASS`
+  VERDICT: PASS        VERDICT：PASS          VERDICT: **PASS**
+```
+
+仍然会被拒的两种，因为 gate 无法判断它们是什么意思：取值不在枚举内（`VERDICT: OK`、`VERDICT: NEEDS_WORK`），以及整段回答里没有结论行。
+
+#### 两个**不是**原因的东西
+
+**`opencode --format json` 不会挂死。** v2.0.2 之前的一些记录把根因写成它，那是误诊。在 opencode 1.17.15 上实测：裸跑 / `--attach` × 带 `--format json` / 不带，四条路径全部在 4~20 秒内返回，输出正是 `parse_opencode_json` 期望的 NDJSON。那几次事故的真实原因是两件事叠加——审查 prompt 没要求结论行，以及所有调用都没有超时保护，导致一个无边界 prompt 能跑一个多小时、最后 exit 0 什么也没产出。两处都已修。
+
+**`timeout` 找不到不代表环境坏了。** macOS 不带 GNU `timeout`，用它包住的排查命令会以 127 退出，看起来像工具挂了。改用 `bin/with-timeout.mjs <秒> <命令>`，gate 自己用的就是这个。
+
+#### 审查失败时不要伪造通过
+
+gate 刻意在审查**之前**捕获 `REVIEW_HEAD` / `REVIEW_FILES_SHA256` / `REVIEW_DIFF_SHA256`，审查**之后**再校验一次，用来证明这份证据描述的就是要提交的代码。手工填这些锚点、自签 `.agent/verify/*.ack`、`SKIP_VERIFY=1`、`--no-verify`、不带 `AGENT_MODE=1` 提交——这些都是绕掉那个保证，不是满足它。审查确实跑不起来时，如实说明并停下，不要造一份产物出来。
 
 ## Relationship Between Components（组件关系）
 

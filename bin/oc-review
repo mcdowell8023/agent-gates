@@ -15,6 +15,8 @@
 #   OC_REVIEW_RETRIES   extra attempts after the first (default 2 → up to 3 total)
 #   OC_REVIEW_OPENCODE  opencode binary (default "opencode"; overridable for tests)
 #   OC_SERVE_DISABLED   set to 1 to skip shared serve integration
+#   AG_REVIEW_TIMEOUT   seconds allowed per attempt (default 300). A timeout is not
+#                       retried — it exits 75 so the caller can fall back instead.
 # Source: https://github.com/mcdowell8023/agent-gates
 set -uo pipefail
 
@@ -63,18 +65,38 @@ _build_args() {
 tmp=$(mktemp); errtmp=$(mktemp)
 trap 'rm -f "$tmp" "$errtmp"' EXIT
 
+# v2.0.2: bound each attempt. Without this a request that never returns hangs the
+# caller indefinitely — and because the retry loop below only reacts to exit codes,
+# a hang was never even reached, let alone retried.
+_WT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/with-timeout.mjs"
+_TIMEOUT_SECS="${AG_REVIEW_TIMEOUT:-300}"
+if [[ ! -f "$_WT" ]] || ! command -v node >/dev/null 2>&1; then
+  # fail-closed, matching the serve guard above: exit 75 so the caller falls back, rather
+  # than quietly running an unbounded opencode that can hang the whole gate.
+  echo "oc-review: timeout wrapper unavailable ($_WT, node required) — refusing to run unbounded; caller should fall back per agent-review-protocol §8" >&2
+  exit 75
+fi
+_TIMEOUT_CMD=(node "$_WT" "$_TIMEOUT_SECS")
+
 attempt=0
 while :; do
   attempt=$((attempt + 1))
 
+  # Empty-array expansion stays guarded for bash 3.2 (macOS default) under `set -u`.
   if [[ ${#_SERVE_ATTACH[@]} -gt 0 ]]; then
     args=()
     while IFS= read -r -d '' a; do args+=("$a"); done < <(_build_args "$@")
-    "$OPENCODE" "${args[@]}" > "$tmp" 2>"$errtmp"
+    ${_TIMEOUT_CMD[@]+"${_TIMEOUT_CMD[@]}"} "$OPENCODE" "${args[@]}" > "$tmp" 2>"$errtmp"
   else
-    "$OPENCODE" "$@" > "$tmp" 2>"$errtmp"
+    ${_TIMEOUT_CMD[@]+"${_TIMEOUT_CMD[@]}"} "$OPENCODE" "$@" > "$tmp" 2>"$errtmp"
   fi
   rc=$?
+
+  # A timeout is not a flake — retrying just burns another full timeout window.
+  if [[ "$rc" -eq 124 ]]; then
+    echo "oc-review: opencode timed out after ${_TIMEOUT_SECS}s on attempt $attempt — not retrying; caller should fall back (e.g. codex) per agent-review-protocol §8" >&2
+    exit 75
+  fi
 
   has_output=0
   if [[ -s "$tmp" ]] && grep -q '[^[:space:]]' "$tmp"; then has_output=1; fi
