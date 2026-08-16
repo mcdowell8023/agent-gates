@@ -20,7 +20,7 @@ if [[ "$INSTALL_DIR" == *" "* ]]; then
   echo "agent-gates requires a space-free \$HOME path." >&2
   exit 1
 fi
-SKILLS=(init-project-gates agent-workflow-rules agent-review-protocol init-deep-fallback memory)
+SKILLS=(init-project-gates agent-workflow-rules agent-review-protocol init-deep-fallback memory agent-gates)
 MEMORY_SKILL_CANDIDATES=(
   "$HOME/.claude/skills"
   "$HOME/.config/opencode/skills"
@@ -445,7 +445,9 @@ install_skills() {
 create_symlinks() {
   if [[ "$TARGET_DIR" == "$HOME/.cc-switch/skills" ]]; then
     section "Creating platform symlinks"
-    local dirs=("$HOME/.claude/skills" "$HOME/.config/opencode/skills" "$HOME/.codex/skills")
+    # ~/.agents/skills is the shared directory some agents read exclusively; it was missing
+    # here, so those agents saw only whatever had been linked by hand (observed: 1 of 5).
+    local dirs=("$HOME/.claude/skills" "$HOME/.config/opencode/skills" "$HOME/.codex/skills" "$HOME/.agents/skills")
     for dir in "${dirs[@]}"; do
       [[ -d "$dir" ]] || continue
       for skill in "${SKILLS[@]}"; do

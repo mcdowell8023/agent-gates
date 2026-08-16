@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# agent-gates-status — one command, the whole picture.
+#
+# Exists because answering "is everything up to date?" used to mean an agent stitching
+# together agent-gates-version + doctor.sh + agent-gates-migrate + several greps and then
+# parsing it all back out — many tool calls and a lot of tokens for a question whose answer
+# always has the same shape.
+#
+# Default run is fast (~4s) and local-ish. The project scan is NOT included by default:
+# walking ~165 repos takes ~77s, which would make this too slow to reach for casually —
+# and a command you hesitate to run is no better than the pile of commands it replaced.
+#
+# Usage:  agent-gates-status [--full] [--no-network] [--quiet] [<project-root> ...]
+#   --full         also scan projects for frozen (non-shim) gates  (slow: ~80s)
+#   --no-network   skip remote comparison
+#   --quiet        one summary line only (for hooks / scripting)
+#
+# Exit: 0 healthy · 1 something needs attention
+# Source: https://github.com/mcdowell8023/agent-gates
+set -uo pipefail
+
+INSTALL_DIR="${AGENT_GATES_DIR:-$HOME/.agent-gates}"
+QUIET=0; FULL=0; NET=1
+ROOTS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --full) FULL=1; shift ;;
+    --no-network) NET=0; shift ;;
+    --quiet) QUIET=1; shift ;;
+    -h|--help) sed -n '3,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) ROOTS+=("$1"); shift ;;
+  esac
+done
+[[ ${#ROOTS[@]} -eq 0 ]] && ROOTS=("$HOME/wb" "$HOME/AgentWorkspace/projects")
+
+G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; B='\033[0;34m'; N='\033[0m'
+ATTENTION=0
+row() { [[ "$QUIET" -eq 1 ]] || printf "  %-18s %b\n" "$1" "$2"; }
+
+# --- installed version + gate stamp -----------------------------------------
+VER="$(tr -d '[:space:]' < "$INSTALL_DIR/.version" 2>/dev/null || echo '?')"
+STAMP="$(grep -m1 'GATE_VERSION=' "$INSTALL_DIR/hooks/git/agent-quality-gate.sh" 2>/dev/null | sed 's/.*="//;s/".*//')"
+
+[[ "$QUIET" -eq 1 ]] || echo -e "\n${B}━━━${N} agent-gates ${VER}"
+if [[ "$STAMP" == "$VER" ]]; then
+  row "gate" "${G}v${STAMP} stamped${N}"
+else
+  row "gate" "${R}v${STAMP:-unstamped} ≠ .version v${VER}${N} — re-run install.sh"
+  ATTENTION=1
+fi
+
+# --- skills across platforms ------------------------------------------------
+# One real directory, symlinked into each platform. A broken link stays silent until an
+# agent cannot find the skill, so resolve rather than just list.
+SKILLS=(init-project-gates agent-workflow-rules agent-review-protocol init-deep-fallback memory)
+MISSING=""
+for d in "$HOME/.claude/skills:claude" "$HOME/.config/opencode/skills:opencode" \
+         "$HOME/.codex/skills:codex" "$HOME/.agents/skills:agents"; do
+  path="${d%%:*}"; label="${d##*:}"
+  [[ -d "$path" ]] || continue
+  ok=0
+  for s in "${SKILLS[@]}"; do [[ -e "$path/$s" ]] && ok=$((ok+1)); done
+  [[ "$ok" -eq ${#SKILLS[@]} ]] || { MISSING+="${label}:${ok}/${#SKILLS[@]} "; ATTENTION=1; }
+done
+if [[ -z "$MISSING" ]]; then
+  row "skills" "${G}claude · opencode · codex · agents all ${#SKILLS[@]}/${#SKILLS[@]}${N}"
+else
+  row "skills" "${Y}${MISSING}${N}— re-run install.sh"
+fi
+
+# --- opencode serves --------------------------------------------------------
+# A serve with no `opencode run` client is a leak. Paseo-managed ones hold a permanent
+# connection to the daemon, so "something is connected" is not evidence of use.
+SERVES=$(pgrep -f "opencode serve" 2>/dev/null | wc -l | tr -d ' ')
+CLIENTS=$(pgrep -f "opencode run" 2>/dev/null | wc -l | tr -d ' ')
+if [[ "${SERVES:-0}" -eq 0 ]]; then
+  row "opencode" "${G}no serves${N}"
+else
+  OLD=0
+  while read -r p; do
+    [[ -z "$p" ]] && continue
+    e=$(ps -o etime= -p "$p" 2>/dev/null | tr -d ' ')
+    # etime shows d-hh:mm:ss or hh:mm:ss once past an hour
+    [[ "$e" == *-* || "$e" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]] && OLD=$((OLD+1))
+  done < <(pgrep -f "opencode serve" 2>/dev/null)
+  if [[ "$OLD" -gt 0 && "${CLIENTS:-0}" -eq 0 ]]; then
+    row "opencode" "${Y}${SERVES} serve(s), ${OLD} over 1h with 0 clients${N} — oc-reaper --apply"
+    ATTENTION=1
+  else
+    row "opencode" "${G}${SERVES} serve(s), ${CLIENTS} client(s)${N}"
+  fi
+fi
+
+# --- repo sync --------------------------------------------------------------
+REPO="${AGENT_GATES_REPO:-$HOME/AgentWorkspace/projects/tools/agent-gates}"
+if [[ -e "$REPO/.git" ]]; then   # -e not -d: a worktree's .git is a file
+  LOCAL=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null)
+  DIRTY=$(git -C "$REPO" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "$NET" -eq 1 ]]; then
+    OUT=""
+    while read -r rname; do
+      [[ -z "$rname" ]] && continue
+      rh=$(git -C "$REPO" ls-remote --heads "$rname" main 2>/dev/null | cut -c1-7)
+      if [[ -z "$rh" ]]; then OUT+="${rname}:unreachable "
+      elif [[ "$rh" == "$LOCAL" ]]; then OUT+="${G}${rname}✓${N} "
+      else OUT+="${Y}${rname}@${rh}${N} "; ATTENTION=1; fi
+    done < <(git -C "$REPO" remote 2>/dev/null)
+    row "repo $LOCAL" "${OUT}${DIRTY:+· ${DIRTY} uncommitted}"
+  else
+    if [[ "${DIRTY:-0}" -gt 0 ]]; then row "repo $LOCAL" "${DIRTY} uncommitted"; else row "repo $LOCAL" "${G}clean${N}"; fi
+  fi
+fi
+
+# --- projects (opt-in: ~80s for ~165 repos) ---------------------------------
+# A project on the v1.9.0 shim follows the global authority automatically; a frozen copy
+# silently stays on whatever version it was initialised with.
+if [[ "$FULL" -eq 1 && -x "$INSTALL_DIR/bin/agent-gates-migrate" ]]; then
+  MIG="$("$INSTALL_DIR/bin/agent-gates-migrate" "${ROOTS[@]}" 2>/dev/null | tail -1)"
+  TO_MIG="$(printf '%s' "$MIG" | sed -n 's/.*: \([0-9]*\) to migrate.*/\1/p')"
+  SHIMMED="$(printf '%s' "$MIG" | sed -n 's/.*, \([0-9]*\) already shim.*/\1/p')"
+  if [[ "${TO_MIG:-0}" -eq 0 ]]; then
+    row "projects" "${G}${SHIMMED:-0} on shim, all current${N}"
+  else
+    row "projects" "${Y}${TO_MIG} frozen${N} — agent-gates-migrate --apply ${ROOTS[*]}"
+    ATTENTION=1
+  fi
+elif [[ "$QUIET" -eq 0 ]]; then
+  row "projects" "not scanned (--full, ~80s)"
+fi
+
+if [[ "$QUIET" -eq 1 ]]; then
+  [[ "$ATTENTION" -eq 0 ]] && echo "agent-gates v$VER: healthy" || echo "agent-gates v$VER: needs attention"
+else
+  echo ""
+  [[ "$ATTENTION" -eq 0 ]] && echo -e "${G}All current.${N}" || echo -e "${Y}Needs attention — see above.${N}"
+fi
+exit "$ATTENTION"
