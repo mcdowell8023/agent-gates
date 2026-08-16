@@ -29,6 +29,10 @@ _HETERO_DEFAULT_AGENT_MAX_WALL_S=600
 _HETERO_DEFAULT_CRASH_LOOP_MAX=3
 _HETERO_DEFAULT_COLD_START_S=10
 _HETERO_DEFAULT_COOLDOWN_S=300
+# v2.1.0: this had no definition at all, so dispatch.sh ran `opencode run -m ""`, which
+# hangs instead of failing fast and leaves a 0-byte evidence file. The verify channel was
+# therefore never functional unless the caller happened to export HETERO_OC_MODEL by hand.
+_HETERO_DEFAULT_OC_MODEL="github-copilot/gpt-5.5"
 
 # Path to the gates config dir (mirrors bin/agent-gates-review convention).
 _hetero_gates_dir() {
@@ -110,6 +114,8 @@ hetero_load_config() {
   _hetero_resolve HETERO_CRASH_LOOP_MAX  lifecycle.crash_loop_max       lifecycle.crash_loop_max       "$_HETERO_DEFAULT_CRASH_LOOP_MAX"
   _hetero_resolve HETERO_COLD_START_S    lifecycle.cold_start_s         lifecycle.cold_start_s         "$_HETERO_DEFAULT_COLD_START_S"
   _hetero_resolve HETERO_COOLDOWN_S      lifecycle.cooldown_s           lifecycle.cooldown_s           "$_HETERO_DEFAULT_COOLDOWN_S"
+  # Same model the review side uses, so verify and review stay on one configured reviewer.
+  _hetero_resolve      HETERO_OC_MODEL   hetero_models.primary  review_models.primary  "$_HETERO_DEFAULT_OC_MODEL"
   _hetero_resolve_chan HETERO_CHAN_PASEO     paseo
   _hetero_resolve_chan HETERO_CHAN_OPENCODE  opencode
   _hetero_resolve_chan HETERO_CHAN_CODEX     codex

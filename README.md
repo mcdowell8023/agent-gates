@@ -523,14 +523,68 @@ no GNU `timeout`, so a diagnostic command wrapped in it fails with exit 127 and 
 like a tool failure. Use `bin/with-timeout.mjs <secs> <cmd>` instead — the same wrapper
 the gate itself uses.
 
-#### Never fake the way past a review failure
+#### When both channels are down: the external import route
 
-The gate deliberately captures `REVIEW_HEAD` / `REVIEW_FILES_SHA256` /
+If opencode and codex are both unavailable, there is still a legal way to produce review
+evidence — have the calling agent dispatch a Paseo sub-session, while the tool keeps
+ownership of the anchors. Two phases:
+
+```bash
+# 1. capture anchors, snapshot the prompt, get a token. Exits 77.
+agent-gates-review <prompt-file> --route paseo --dispatch-out request.json
+
+# 2. the calling agent creates a Paseo sub-session per request.json's "suggested" field
+#    (via MCP create_agent — a shell script cannot create a local Paseo agent), collects
+#    the review, then imports it:
+agent-gates-review --import-result review.md --token <token> \
+  --paseo-agent <agent-id> --result .agent/reviews/<name>.md
+```
+
+`request.json` carries a `requirements` block — copy it into the sub-session's prompt and
+the review will not come back missing its verdict line.
+
+**What this guarantees:** the staged diff has not moved between dispatch and import; the
+reviewer got the same prompt that was snapshotted; a Paseo agent with a non-claude provider,
+created after the dispatch, really exists; the token works exactly once.
+
+**What it does not guarantee:** ⛔ it does **not** prove the review text came from that
+agent — the caller could dispatch a real heterogeneous agent and still submit its own prose.
+The token is not an authorization credential; it lives in an agent-writable directory. And
+the anchors cover the **staged diff only** — unstaged changes, untracked files, dependency
+versions and runtime state are all outside them. Full statement: `docs/plans/2026-08-13-paseo-review-channel.md` §4.
+
+#### Fabricating evidence vs. an authorized override — not the same thing
+
+**Never fabricate.** The gate captures `REVIEW_HEAD` / `REVIEW_FILES_SHA256` /
 `REVIEW_DIFF_SHA256` *before* the review and re-checks them *after*, so the evidence
-provably describes the code being committed. Hand-writing those anchors, self-signing an
-`.agent/verify/*.ack`, `SKIP_VERIFY=1`, `--no-verify`, or dropping `AGENT_MODE=1` all
-defeat that guarantee rather than satisfying it. If a review genuinely cannot run, say so
-and stop — do not manufacture the artifact.
+provably describes the code being committed. Hand-writing those anchors, editing a
+verdict, or inventing a report defeats that guarantee rather than satisfying it. Don't.
+
+**But an override the user authorized is a legitimate path, not a breach.** When the user
+explicitly says to proceed, these are all fine:
+
+```bash
+SKIP_VERIFY=1 git commit ...      # skip CHECK 6
+SKIP_REVIEW=1 git commit ...      # skip CHECK 5
+agent-gates-verify-ack <run-id>   # record the user's go-ahead on an INCOMPLETE verify
+```
+
+Three conditions, all of them about honesty rather than permission:
+
+1. The user actually said so — not inferred, not "they'd probably agree"
+2. The report says plainly that this was **authorized override, not passing the check**
+3. Whatever is still unverified is written down, so it does not quietly disappear
+
+Be clear-eyed about what `agent-gates-verify-ack` is: the gate checks only the diff hash
+and a 4-hour freshness window. **It records no signer identity at all**, so "only a human
+may sign it" was never a technical guarantee — it was a discipline, and an expensive one.
+Treat the ack as an audit record: who authorized, when, and what remains open.
+
+**One deadlock worth naming.** A verify can come back `INCOMPLETE` purely because
+end-to-end testing requires a deployment, which requires a commit, which requires the
+verify to pass. Nobody can work out of that loop by trying harder. That is exactly what an
+authorized override is for — approve it, commit, and do the end-to-end right after. What
+must not happen is pretending the end-to-end already ran.
 
 ## Relationship Between Components
 

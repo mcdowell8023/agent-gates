@@ -14,3 +14,5 @@
 # Local environment
 .env
 .env.local
+.agent/reviews/
+.agent/verify/

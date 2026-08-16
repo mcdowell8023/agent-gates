@@ -506,9 +506,47 @@ VERDICT: PASS          **VERDICT: PASS**      ## VERDICT: PASS
 
 **`timeout` 找不到不代表环境坏了。** macOS 不带 GNU `timeout`，用它包住的排查命令会以 127 退出，看起来像工具挂了。改用 `bin/with-timeout.mjs <秒> <命令>`，gate 自己用的就是这个。
 
-#### 审查失败时不要伪造通过
+#### 两条通道都不可用时：外部审查导入
 
-gate 刻意在审查**之前**捕获 `REVIEW_HEAD` / `REVIEW_FILES_SHA256` / `REVIEW_DIFF_SHA256`，审查**之后**再校验一次，用来证明这份证据描述的就是要提交的代码。手工填这些锚点、自签 `.agent/verify/*.ack`、`SKIP_VERIFY=1`、`--no-verify`、不带 `AGENT_MODE=1` 提交——这些都是绕掉那个保证，不是满足它。审查确实跑不起来时，如实说明并停下，不要造一份产物出来。
+opencode 和 codex 都跑不了时，还有一条合法路径 —— 由调用方 agent 派 Paseo 子会话，锚点仍由工具掌管。两个阶段：
+
+```bash
+# 1. 捕获锚点 + 快照 prompt + 发 token，退出码 77
+agent-gates-review <prompt-file> --route paseo --dispatch-out request.json
+
+# 2. 调用方 agent 按 request.json 的 "suggested" 派 Paseo 子会话
+#    （走 MCP create_agent —— shell 脚本创建不了本机 Paseo agent），拿到审查后导入：
+agent-gates-review --import-result review.md --token <token> \
+  --paseo-agent <agent-id> --result .agent/reviews/<name>.md
+```
+
+`request.json` 里带一个 `requirements` 块，把它抄进子会话的 prompt，审查就不会回来时缺结论行。
+
+**这条通道保证**：staged diff 在派发与导入之间没变；reviewer 拿到的就是派发时快照的那份 prompt；确实存在一个 provider 非 claude、且创建于派发之后的 Paseo agent；token 只能用一次。
+
+**不保证**：⛔ **不证明审查正文出自那个 agent** —— 调用方可以真派一个异构 agent，却提交自己写的正文。token 不是授权凭据，它存在 agent 可写的目录里。锚点只覆盖 **staged diff**，未 staged 的改动、untracked 文件、依赖版本、运行态都不在范围内。完整表述见 `docs/plans/2026-08-13-paseo-review-channel.md` §4。
+
+#### 伪造证据 与 用户授权放行，是两回事
+
+**伪造永远禁止。** gate 在审查**之前**捕获 `REVIEW_HEAD` / `REVIEW_FILES_SHA256` / `REVIEW_DIFF_SHA256`，审查**之后**再校验一次，用来证明这份证据描述的就是要提交的代码。手工填锚点、改 verdict、编一份报告出来——这些是绕掉那个保证，不是满足它。
+
+**但用户明确授权的放行是合法路径，不算违规。** 用户说了继续，下面这些都可以用：
+
+```bash
+SKIP_VERIFY=1 git commit ...      # 跳过 CHECK 6
+SKIP_REVIEW=1 git commit ...      # 跳过 CHECK 5
+agent-gates-verify-ack <run-id>   # 给 INCOMPLETE 的 verify 记录用户的放行
+```
+
+三个条件，都是关于如实，不是关于权限：
+
+1. 用户**真的说了** —— 不是推断的，不是「他应该会同意」
+2. 报告里写明这是**授权放行，不是检查通过**
+3. 还没验的部分写清楚，不能悄悄消失
+
+关于 `agent-gates-verify-ack` 要看明白一件事：gate 对它只校验 diff hash 和 4 小时时效，**完全不记录签署者身份**。所以「只有人能签」从来不是技术保证，它只是一条纪律，而且代价不小。把 ack 当审计记录看：谁批准的、什么时候、还剩什么没验。
+
+**有一个死锁值得点名。** verify 可能仅仅因为端到端没做而判 `INCOMPLETE`，而端到端必须先部署，部署必须先 commit，commit 又要 verify 通过。**这个环谁都出不去，再努力也没用。** 授权放行正是为这种情况准备的——批准、提交、随后立刻补端到端。不许发生的是假装端到端已经跑过。
 
 ## Relationship Between Components（组件关系）
 

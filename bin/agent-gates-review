@@ -59,18 +59,33 @@ TIMEOUT_CMD=(node "$_WT" "$TIMEOUT_SECS")
 
 PROMPT_FILE=""
 RESULT_FILE=""
+ROUTE=""
+DISPATCH_OUT=""
+IMPORT_RESULT=""
+IMPORT_TOKEN=""
+PASEO_AGENT=""
+
+_need_val() { [[ $2 -ge 2 ]] || { echo "agent-gates-review: $1 requires a value" >&2; exit 1; }; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --result) [[ $# -ge 2 ]] || { echo "agent-gates-review: --result requires a path" >&2; exit 1; }; RESULT_FILE="$2"; shift 2 ;;
+    --result)         _need_val "$1" $#; RESULT_FILE="$2";   shift 2 ;;
+    --route)          _need_val "$1" $#; ROUTE="$2";         shift 2 ;;
+    --dispatch-out)   _need_val "$1" $#; DISPATCH_OUT="$2";  shift 2 ;;
+    --import-result)  _need_val "$1" $#; IMPORT_RESULT="$2"; shift 2 ;;
+    --token)          _need_val "$1" $#; IMPORT_TOKEN="$2";  shift 2 ;;
+    --paseo-agent)    _need_val "$1" $#; PASEO_AGENT="$2";   shift 2 ;;
     *)
       if [[ -z "$PROMPT_FILE" ]]; then PROMPT_FILE="$1"; shift
       else echo "agent-gates-review: unknown arg: $1" >&2; exit 1; fi ;;
   esac
 done
 
-if [[ -z "$PROMPT_FILE" || ! -f "$PROMPT_FILE" ]]; then
-  echo "Usage: agent-gates-review <prompt-file> [--result <result-file>]" >&2
+# Import mode takes no prompt file: the prompt was snapshotted at dispatch time and the
+# snapshot — not whatever the path holds now — is what gets verified.
+if [[ -z "$IMPORT_RESULT" ]] && [[ -z "$PROMPT_FILE" || ! -f "$PROMPT_FILE" ]]; then
+  echo "Usage: agent-gates-review <prompt-file> [--result <file>] [--route paseo --dispatch-out <file>]" >&2
+  echo "       agent-gates-review --import-result <review.md> --token <token> --paseo-agent <id> [--result <file>]" >&2
   exit 1
 fi
 
@@ -78,7 +93,11 @@ if [[ ! -f "$CAP_FILE" ]]; then
   echo "agent-gates-review: review-capability.json not found at $CAP_FILE — run install.sh or doctor.sh first" >&2
   exit 69
 fi
-PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
+if [[ -n "$IMPORT_RESULT" ]]; then
+  PROMPT_CONTENT=""
+else
+  PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
+fi
 PROMPT_LEN=${#PROMPT_CONTENT}
 
 LEVEL=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['level'])" "$CAP_FILE" 2>/dev/null || echo "L0")
@@ -413,7 +432,308 @@ prompt_too_long_for_opencode() {
   [[ "$PROMPT_LEN" -gt "$MAX_CHARS" ]]
 }
 
+# --- paseo external review import channel (v2.1.0) -------------------------
+#
+# A shell script cannot create a local Paseo agent — `paseo run` tries to launch Electron
+# and silently creates nothing (exit 0, absent from `paseo ls`). So dispatch is delegated to
+# the calling agent over MCP, and this tool keeps ownership of the part that matters: the
+# anchors. Phase 1 captures them and snapshots the prompt; phase 2 re-checks both before
+# accepting the result. See docs/plans/2026-08-13-paseo-review-channel.md §4 for exactly
+# what this does and does not guarantee — notably it does NOT prove the review text came
+# from that agent.
+
+PASEO_BIN="${AG_REVIEW_PASEO:-paseo}"
+PASEO_PENDING_DIR="$GATES_DIR/pending-reviews"
+PASEO_PROCESSING_DIR="$GATES_DIR/processing"
+PASEO_TTL="${AG_REVIEW_PASEO_TTL:-7200}"
+PASEO_PROCESSING_STALE="${AG_REVIEW_PROCESSING_STALE:-3600}"
+
+_paseo_mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
+
+_paseo_epoch_of() {
+  python3 -c "
+import sys, datetime
+try:
+    print(int(datetime.datetime.fromisoformat(sys.argv[1].replace('Z','+00:00')).timestamp()))
+except Exception:
+    print(0)
+" "$1" 2>/dev/null || echo 0
+}
+
+# Whole directories only. An earlier draft kept <token>.json and <token>.prompt side by
+# side; claim moved just the record, so snapshots piled up forever. Directory rename is
+# atomic, two file renames are not — that is the whole reason for this layout.
+# $1: a token to leave alone. The import path passes its own token so that an expired
+# record survives long enough to be claimed and reported as "expired" (74) instead of being
+# swept first and then reported as "unknown token" (1) — the same collapsing-of-distinct-
+# causes that this whole release is about. Everything else still gets cleaned.
+paseo_sweep() {
+  local keep="${1:-}"
+  local now d
+  now=$(date +%s)
+
+  if [[ -d "$PASEO_PENDING_DIR" ]]; then
+    for d in "$PASEO_PENDING_DIR"/*; do
+      [[ -e "$d" ]] || continue
+      [[ -n "$keep" && "$(basename "$d")" == "$keep" ]] && continue
+      [[ -d "$d" ]] || { rm -f "$d"; continue; }               # stray file from any old layout
+      [[ -f "$d/record.json" ]] || { rm -rf "$d"; continue; }  # orphan dir
+      local exp; exp=$(python3 -c "
+import json,sys,datetime
+try:
+    r=json.load(open(sys.argv[1]))
+    print(int(datetime.datetime.fromisoformat(r['expires_at'].replace('Z','+00:00')).timestamp()))
+except Exception:
+    print(0)
+" "$d/record.json" 2>/dev/null || echo 0)
+      [[ "${exp:-0}" -gt 0 && "${exp:-0}" -lt "$now" ]] && rm -rf "$d"
+    done
+  fi
+
+  # Crash residue: a claim that never finished. Judged by the directory's own mtime (set by
+  # the claim rename), never by record.created_at — a token that sat in pending for hours
+  # would otherwise be reaped the instant it was claimed.
+  if [[ -d "$PASEO_PROCESSING_DIR" ]]; then
+    for d in "$PASEO_PROCESSING_DIR"/*; do
+      [[ -d "$d" ]] || continue
+      local age=$(( now - $(_paseo_mtime "$d") ))
+      [[ "$age" -gt "$PASEO_PROCESSING_STALE" ]] || continue
+      if [[ -f "$d/record.json" ]]; then
+        mkdir -p "$PASEO_PENDING_DIR"
+        mv "$d" "$PASEO_PENDING_DIR/$(basename "$d")" 2>/dev/null || rm -rf "$d"
+      else
+        rm -rf "$d"
+      fi
+    done
+  fi
+}
+
+paseo_dispatch() {
+  [[ -n "$DISPATCH_OUT" ]] || { echo "agent-gates-review: --route paseo requires --dispatch-out <file>" >&2; exit 1; }
+
+  capture_review_anchor
+
+  local token dir
+  token=$(python3 -c "import secrets;print(secrets.token_hex(16))")
+  dir="$PASEO_PENDING_DIR/$token"
+  mkdir -p "$dir" || { echo "agent-gates-review: cannot create $dir" >&2; exit 1; }
+
+  cp "$PROMPT_FILE" "$dir/prompt" || { rm -rf "$dir"; echo "agent-gates-review: cannot snapshot prompt" >&2; exit 1; }
+  local psha; psha=$(sha256_stream < "$dir/prompt")
+  printf '%s\n' "$REVIEW_ANCHOR_FILES" > "$dir/files"
+
+  local created expires
+  created=$(python3 -c "import datetime;print(datetime.datetime.now(datetime.timezone.utc).isoformat())")
+  expires=$(python3 -c "
+import datetime,sys
+print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=int(sys.argv[1]))).isoformat())
+" "$PASEO_TTL")
+
+  python3 - "$dir/record.json" "$token" "$psha" "$created" "$expires" "$PWD" \
+    "$REVIEW_ANCHOR_ENABLED" "$REVIEW_ANCHOR_HEAD" "$REVIEW_ANCHOR_FILES_SHA256" "$REVIEW_ANCHOR_DIFF_SHA256" <<'PY'
+import json, sys
+p, token, psha, created, expires, cwd, en, head, fsha, dsha = sys.argv[1:11]
+json.dump({
+    "token": token, "prompt_sha256": psha, "created_at": created, "expires_at": expires,
+    "cwd": cwd,
+    "anchor": {"enabled": int(en), "head": head, "files_sha256": fsha, "diff_sha256": dsha},
+}, open(p, "w"), indent=2)
+PY
+
+  # Write the request last: if it fails there must be no dangling token left behind.
+  if ! python3 - "$DISPATCH_OUT" "$token" "$dir/prompt" "$psha" "$expires" <<'PY'
+import json, sys
+out, token, prompt_file, psha, expires = sys.argv[1:6]
+req = {
+    "token": token,
+    "prompt_file": prompt_file,
+    "prompt_sha256": psha,
+    "suggested": {
+        "provider": "opencode/github-copilot/gpt-5.5",
+        "alternatives": ["codex/gpt-5.5", "codebuddy-code/deepseek-v4-pro"],
+    },
+    "requirements": {
+        "read_only": True,
+        "verdict_line": "最后一行必须是裸行 VERDICT: PASS / ISSUES / FAIL（无 markdown 装饰、无缩进、英文半角冒号）",
+        "note": "结论行只能承载取值本身，PASS_WITH_ISSUES 之类会被拒",
+        "heterogeneous": "provider 不能是 claude —— 同模型审查不算异构审查",
+    },
+    "expires_at": expires,
+    "import_cmd": f"agent-gates-review --import-result <review.md> --token {token} --paseo-agent <agent-id> --result <out>",
+}
+json.dump(req, open(out, "w"), ensure_ascii=False, indent=2)
+PY
+  then
+    rm -rf "$dir"
+    echo "agent-gates-review: cannot write dispatch request to $DISPATCH_OUT — no pending record left behind" >&2
+    exit 1
+  fi
+
+  echo "agent-gates-review: dispatch request written to $DISPATCH_OUT (token ${token:0:8}…)" >&2
+  echo "  next: have the calling agent create a Paseo sub-session per 'suggested', then run 'import_cmd'" >&2
+  exit 77
+}
+
+# Verify a Paseo agent really exists, is heterogeneous, and postdates the dispatch.
+# Prints "<provider>/<model>" on success. Exit codes distinguish the reasons so the caller
+# can say which check failed.
+_paseo_verify_agent() {
+  local agent_id="$1" dispatched_at="$2"
+  command -v "$PASEO_BIN" >/dev/null 2>&1 || return 2
+
+  # `agent inspect`, not `agent ls`. Verified against paseo 0.1.x: `ls --json` reports
+  # `created` as a relative string ("4 minutes ago"), which cannot establish ordering at all,
+  # while `inspect --json` returns an absolute ISO8601 `CreatedAt`. The two also disagree on
+  # casing (camelCase vs PascalCase) and on whether provider and model are one field or two —
+  # an end-to-end run is what surfaced this; fakes built from the MCP tool's field names had
+  # every test passing against a shape the CLI never emits.
+  #
+  # ⚠️ inspect exits 0 even for an unknown id, so absence must be read off the payload.
+  #
+  # The payload goes to a file, not down a pipe: `python3 -` reads its *script* from stdin, so
+  # a heredoc script and piped data fight over the same fd — the heredoc wins and the script
+  # sees empty stdin.
+  local tmpj; tmpj=$(mktemp)
+  if ! "${TIMEOUT_CMD[@]}" "$PASEO_BIN" agent inspect "$agent_id" --json >"$tmpj" 2>/dev/null; then
+    rm -f "$tmpj"; return 3
+  fi
+
+  local out prc=0
+  out=$(python3 - "$tmpj" "$dispatched_at" <<'PY'
+import json, sys, datetime
+path, dispatched = sys.argv[1:3]
+try:
+    d = json.load(open(path))
+except Exception:
+    sys.exit(4)                      # no usable payload == unknown agent
+if not isinstance(d, dict) or not d.get("Id"):
+    sys.exit(4)
+prov = (d.get("Provider") or "")
+if not prov:
+    sys.exit(7)
+if "claude" in prov.lower():
+    sys.exit(5)
+def ts(t):
+    try: return datetime.datetime.fromisoformat((t or "").replace("Z", "+00:00"))
+    except Exception: return None
+ca, da = ts(d.get("CreatedAt")), ts(dispatched)
+# Fail closed: if either timestamp is missing or unparseable we cannot establish that the
+# agent postdates the dispatch, and "cannot tell" must not read as "fine".
+if ca is None or da is None:
+    sys.exit(8)
+if ca < da:
+    sys.exit(6)
+print(f'{prov}/{d.get("Model","?")}')
+PY
+  ) || prc=$?
+  rm -f "$tmpj"
+  [[ $prc -eq 0 ]] || return $prc
+  printf '%s' "$out"
+}
+
+paseo_import() {
+  [[ -n "$IMPORT_TOKEN" ]] || { echo "agent-gates-review: --import-result requires --token" >&2; exit 1; }
+  [[ -n "$PASEO_AGENT" ]] || { echo "agent-gates-review: --import-result requires --paseo-agent <id>" >&2; exit 1; }
+  [[ -f "$IMPORT_RESULT" && -s "$IMPORT_RESULT" ]] || { echo "agent-gates-review: review file missing or empty: $IMPORT_RESULT" >&2; exit 75; }
+
+  local pend="$PASEO_PENDING_DIR/$IMPORT_TOKEN" proc="$PASEO_PROCESSING_DIR/$IMPORT_TOKEN"
+  mkdir -p "$PASEO_PROCESSING_DIR"
+  # Atomic claim. Whoever wins the rename owns the token; everyone else fails here.
+  mv "$pend" "$proc" 2>/dev/null || {
+    echo "agent-gates-review: unknown, expired or already-claimed token" >&2; exit 1; }
+
+  local rec="$proc/record.json"
+  [[ -f "$rec" ]] || { rm -rf "$proc"; echo "agent-gates-review: pending record missing" >&2; exit 1; }
+
+  local fields
+  fields=$(python3 -c "
+import json,sys
+r=json.load(open(sys.argv[1]))
+a=r['anchor']
+print(r['prompt_sha256']); print(r['expires_at']); print(r['created_at'])
+print(a['enabled']); print(a['head']); print(a['files_sha256']); print(a['diff_sha256'])
+" "$rec" 2>/dev/null) || { rm -rf "$proc"; echo "agent-gates-review: pending record is corrupt or incomplete" >&2; exit 1; }
+
+  local rec_psha rec_exp rec_created
+  { read -r rec_psha; read -r rec_exp; read -r rec_created
+    read -r REVIEW_ANCHOR_ENABLED; read -r REVIEW_ANCHOR_HEAD
+    read -r REVIEW_ANCHOR_FILES_SHA256; read -r REVIEW_ANCHOR_DIFF_SHA256; } <<< "$fields"
+
+  local now exp_epoch
+  now=$(date +%s); exp_epoch=$(_paseo_epoch_of "$rec_exp")
+  if [[ "${exp_epoch:-0}" -gt 0 && "${exp_epoch:-0}" -lt "$now" ]]; then
+    rm -rf "$proc"; echo "agent-gates-review: token expired at $rec_exp — dispatch again" >&2; exit 74
+  fi
+
+  local cur_psha; cur_psha=$(sha256_stream < "$proc/prompt" 2>/dev/null)
+  if [[ "$cur_psha" != "$rec_psha" ]]; then
+    rm -rf "$proc"
+    echo "agent-gates-review: prompt snapshot no longer matches its recorded hash — the reviewed material was tampered with; dispatch again" >&2
+    exit 74
+  fi
+
+  REVIEW_ANCHOR_FILES=$(cat "$proc/files" 2>/dev/null)
+
+  # Anchor check goes BEFORE the recoverable checks, matching the plan's ordering. Leaving it
+  # to append_marker at the very end meant that "staged moved AND the agent is invalid" took
+  # the agent branch and bounced the token back to pending — inviting retries that can never
+  # succeed, because a moved anchor never comes back. Unrecoverable checks first.
+  local arc=0
+  review_anchor_is_unchanged || arc=$?
+  if [[ $arc -ne 0 ]]; then
+    rm -rf "$proc"
+    exit "$arc"
+  fi
+
+  local agent_desc vrc=0
+  agent_desc=$(_paseo_verify_agent "$PASEO_AGENT" "$rec_created") || vrc=$?
+  if [[ $vrc -ne 0 ]]; then
+    mv "$proc" "$pend" 2>/dev/null   # recoverable: dispatch another agent and retry
+    case $vrc in
+      2) echo "agent-gates-review: paseo binary not found ($PASEO_BIN) — cannot verify the reviewing agent" >&2 ;;
+      3) echo "agent-gates-review: 'paseo agent ls --json' failed — cannot verify the reviewing agent" >&2 ;;
+      7) echo "agent-gates-review: could not parse 'paseo agent ls --json' output — cannot verify the reviewing agent" >&2 ;;
+      4) echo "agent-gates-review: paseo agent '$PASEO_AGENT' not found — verification failed" >&2 ;;
+      5) echo "agent-gates-review: paseo agent '$PASEO_AGENT' runs a claude provider — same-model review does not count as heterogeneous" >&2 ;;
+      6) echo "agent-gates-review: paseo agent '$PASEO_AGENT' was created before this review was dispatched — an older agent cannot vouch for it" >&2 ;;
+      8) echo "agent-gates-review: paseo agent '$PASEO_AGENT' has no usable createdAt — cannot establish that it postdates the dispatch (fail-closed)" >&2 ;;
+      *) echo "agent-gates-review: paseo agent verification failed (rc=$vrc)" >&2 ;;
+    esac
+    exit 75
+  fi
+
+  local body; body=$(cat "$IMPORT_RESULT")
+  if ! has_valid_conclusion "$body"; then
+    mv "$proc" "$pend" 2>/dev/null   # recoverable: ask for a conclusion line and retry
+    echo "agent-gates-review: imported review produced no VERDICT line — the reviewer's prompt must require a line matching 'VERDICT: PASS|REVISE|FAIL|ISSUES|APPROVED|REJECT'. Review said: $(printf '%.200s' "$body" | tr '\n' ' ')" >&2
+    exit 75
+  fi
+
+  # append_marker re-checks the anchors it was given against the current staged state, so
+  # the "staged must not have moved" guarantee is the same code path the other routes use.
+  local product mrc=0
+  product=$(append_marker "paseo" "$agent_desc" "$body") || mrc=$?
+  if [[ $mrc -ne 0 ]]; then
+    rm -rf "$proc"   # anchors moved: unrecoverable
+    exit "$mrc"
+  fi
+
+  output_result "$product"
+  rm -rf "$proc"
+  exit 0
+}
+
 # --- Main routing ---
+
+paseo_sweep "$IMPORT_TOKEN"
+
+if [[ -n "$IMPORT_RESULT" ]]; then
+  paseo_import
+fi
+
+if [[ "$ROUTE" == "paseo" ]]; then
+  paseo_dispatch
+fi
 
 # Hetero selection is invoked here rather than at its definition site so every helper
 # it needs already exists. It exits on both success and exhaustion, so control reaches

@@ -327,7 +327,19 @@ hetero_dispatch() {
 
   # --- Channel 1: Paseo ---
   local paseo_bin="${HETERO_BIN_PASEO:-paseo}"
-  if [[ "${HETERO_CHAN_PASEO:-1}" == "1" ]] && command -v "$paseo_bin" >/dev/null 2>&1; then
+  # v2.1.0: on macOS the `paseo` on PATH is normally a symlink into Paseo.app's Electron
+  # binary. Run headless it dies with "FATAL: Unable to find helper app" (exit 133) — but
+  # hetero_spawn_pg backgrounds the process and never waits for an exit code, and stderr
+  # went to /dev/null, so the dispatch record cheerfully recorded capability=FULL for an
+  # agent that never existed. Callers then waited for evidence that could never arrive.
+  # Detect the bundle and skip the channel rather than manufacture a receipt.
+  local _paseo_real=""
+  if command -v "$paseo_bin" >/dev/null 2>&1; then
+    _paseo_real=$(readlink -f "$(command -v "$paseo_bin")" 2>/dev/null || command -v "$paseo_bin")
+  fi
+  if [[ -n "$_paseo_real" && "$_paseo_real" == *".app/Contents/MacOS"* ]]; then
+    echo "hetero: skipping paseo channel — '$paseo_bin' resolves into an app bundle ($_paseo_real), which cannot dispatch headless. Have the calling agent create the Paseo agent over MCP instead." >&2
+  elif [[ "${HETERO_CHAN_PASEO:-1}" == "1" ]] && [[ -n "$_paseo_real" ]]; then
     if _hetero_check_breaker "paseo/${role}"; then
       # F2: register-before-spawn — placeholder with PID=0/PGID=0 first
       hetero_register_spawn "paseo/${role}" 0 0
@@ -349,7 +361,14 @@ hetero_dispatch() {
   # --- Channel 2: opencode (fail-closed) ---
   if [[ "$channel" == "exhausted" ]]; then
     local oc_bin="${HETERO_BIN_OPENCODE:-opencode}"
-    if [[ "${HETERO_CHAN_OPENCODE:-1}" == "1" ]] && command -v "$oc_bin" >/dev/null 2>&1; then
+    # v2.1.0: an empty model is worse than a missing binary. `opencode run -m ""` does not
+    # fail fast — it hangs, so the evidence file is created and stays 0 bytes while the
+    # caller polls for a result that never comes. HETERO_OC_MODEL had no definition in
+    # config.sh at all, so this was the default state of the verify channel.
+    local oc_model="${HETERO_OC_MODEL:-}"
+    if [[ "${HETERO_CHAN_OPENCODE:-1}" == "1" ]] && [[ -z "$oc_model" ]]; then
+      echo "hetero: skipping opencode channel — no model configured. Set HETERO_OC_MODEL, or hetero_models.primary / review_models.primary in the capability file." >&2
+    elif [[ "${HETERO_CHAN_OPENCODE:-1}" == "1" ]] && command -v "$oc_bin" >/dev/null 2>&1; then
       if _hetero_check_breaker "opencode/${role}"; then
         # fail-closed: must get OC_SERVE_URL from oc_serve_ensure, otherwise skip
         local serve_ok=0
@@ -364,7 +383,7 @@ hetero_dispatch() {
           # is not discarded. Wrap in a shell so the redirect applies before exec.
           if hetero_spawn_pg bash -c \
             '"$1" run --attach "$2" --pure -m "$3" --dir "$4" --format json --variant "$7" "$5" >"$6" 2>/dev/null' \
-            -- "$oc_bin" "$OC_SERVE_URL" "${HETERO_OC_MODEL:-}" "${PWD}" "$prompt" "$evidence_path" "$effort"; then
+            -- "$oc_bin" "$OC_SERVE_URL" "$oc_model" "${PWD}" "$prompt" "$evidence_path" "$effort"; then
             channel="opencode"
             capability="EVIDENCE_ONLY"
             agent_pid="${HETERO_LAST_ROOT_PID:-}"

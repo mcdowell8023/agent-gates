@@ -2,6 +2,48 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.1.0 — 外部审查导入通道（Paseo 子会话）
+
+v2.0.2 把审查失败的**报错**说清了，但**可用通道**没变多。两条通道同时不可用时（自审 dogfooding 就撞上：共享 serve 死 + codex 超时），agent 没有任何合法路径产出审查证据——手工填锚点绕掉的正是「审查前捕获、审查后校验」的时序保证，所以被明令禁止。
+
+本版补上这条路径：**派发交给调用方 agent，锚点仍由工具掌管**。
+
+### Added
+- `--route paseo --dispatch-out <file>`：捕获锚点 + 把 prompt 复制成**不可变快照** + 写 pending 目录 + 输出派发请求，退出码 **77**（新增：需外部派发）。请求里带 `requirements` 块（结论行格式、异构要求），抄进子会话 prompt 即可
+- `--import-result <md> --token <t> --paseo-agent <id>`：**整目录原子 claim** → 校验链 → 写产物。产物格式与其他通道完全一致（`REVIEW_TOOL: paseo` + 三个锚点），**gate hook 无需任何改动**
+- `paseo agent inspect <id> --json` 来源核实：agent 存在、`Provider` 非 claude、`CreatedAt` 晚于派发时刻
+- 新 env：`AG_REVIEW_PASEO`（paseo 二进制）、`AG_REVIEW_PASEO_TTL`（token 有效期，默认 7200s）、`AG_REVIEW_PROCESSING_STALE`（崩溃残留阈值，默认 3600s）
+- `tests/run_review_paseo_channel.sh`（27 用例）
+
+### 这条通道保证什么、不保证什么
+**保证**：staged diff 在派发与导入之间未变；reviewer 拿到的是派发时快照的 prompt；确实存在一个 provider 非 claude、创建于派发之后的 Paseo agent；token 只能用一次。
+**不保证**：⛔ **不证明审查正文出自那个 agent**（调用方可真派一个异构 agent 却提交自己写的正文）；token 不是授权凭据，它在 agent 可写目录里；锚点只覆盖 **staged diff**，未 staged 改动、untracked 文件、依赖版本、运行态都不在范围内。完整表述见 `docs/plans/2026-08-13-paseo-review-channel.md` §4
+
+### 实现上值得记的几处
+- **pending 记录用目录而非平行文件**：claim 必须原子，而目录 rename 是原子的、两个文件的 rename 不是。早先的 `<token>.json` + `<token>.prompt` 布局在 claim 时只搬走记录，快照会永久堆积
+- **不可恢复的校验排在可恢复的之前**：锚点已变时若先撞上 agent 核实失败，token 会被移回 pending，引来永远不可能成功的重试
+- **`CreatedAt` 解析失败按拒绝处理**：条件式放行等于在 Paseo 改格式时静默放过来源不明的 agent
+- **崩溃残留按目录 mtime 判定**，不按 `record.created_at`——后者会让长时间 pending 的记录一 claim 就被回收
+- **来源核实用 `inspect` 不用 `ls`**：`ls --json` 的 `created` 是相对时间串（`"4 minutes ago"`）无法判定先后，且 `ls` 与 `inspect` 的字段名与结构都不同。`inspect` 对不存在的 id 也 exit 0，缺失只能从 payload 判断
+
+### 已知限制
+- 工具**不能自己派本机 Paseo**：`paseo run` 会尝试拉起 Electron，exit 0 但 agent 根本没创建（前台 / `-d` / `--host` 三种模式实测一致）。派发只能由 agent 走 MCP `create_agent`
+- 跨 provider `create_agent` 不能继承 `bypassPermissions`，必须显式传 mode
+
+### 门禁不再卡死自己人（口径变更）
+
+真实反馈：并发开发多条线时，门禁成了阻塞项——一条 CRM 任务在 verify 上耗了两天，而卡它的三件事全是 agent-gates 自己的缺陷。
+
+- **「伪造证据」与「用户授权放行」拆成两类。** 前者永远禁止（手填锚点、改 verdict、编报告、不带 `AGENT_MODE=1` 偷提交）；后者是**合法路径**：用户明确授权时，`SKIP_VERIFY=1` / `SKIP_REVIEW=1` / `agent-gates-verify-ack` 都可以用，agent 也可以代跑 ack。三个条件只关于**如实**：用户真说了、报告写明是授权放行而非通过、待补项写清楚
+- **说清 ack 是什么**：gate 对它只校验 diff hash 与 4h 时效，**不记录任何签署者身份**。所以「只有人能签」从来不是技术保证，只是一条纪律，且代价是每次都要人 cd 进目录跑命令。它的实际作用是审计记录
+- **点名一个闭环死锁**：verify 可能仅因端到端未做而判 `INCOMPLETE`，而端到端要先部署、部署要先 commit、commit 又要 verify 过。**这个环再努力也出不去**，授权放行就是为它准备的
+- **gate 的 INCOMPLETE 提示自己给出放行命令**。旧文案是 "confirm via workflow"——不说跑什么，逼每个 agent 重新推导机制再向用户解释一遍。现在直接打印 `agent-gates-verify-ack <run-id>`、4h 时效与 hash 绑定的注意事项，以及那个死锁的说明
+
+### Fixed（verify 侧，与 review 侧同类缺陷）
+- 🔴 **`HETERO_OC_MODEL` 此前在 `config.sh` 里完全没有定义** ⇒ `dispatch.sh` 实际执行 `opencode run -m ""`，它**不快速失败而是挂起**，evidence 文件建了但停在 0 字节，调用方一直轮询等一个永远不来的结果。**verify 的 opencode channel 从来就没工作过**，除非调用方碰巧手工 export 过。现在从 `hetero_models.primary` / `review_models.primary` 解析，默认 `github-copilot/gpt-5.5`；空模型时跳过该 channel 并明确报错
+- 🔴 **paseo channel 会为不存在的 agent 开出回执**：macOS 上 `paseo` 软链指向 Paseo.app 的 Electron 本体，headless 运行直接 `FATAL: Unable to find helper app`（exit 133）——但 `hetero_spawn_pg` 后台 spawn 从不等退出码，`2>/dev/null` 又吞掉 stderr，于是 `dispatch.json` 照写 `capability=FULL`。现在用 `readlink -f` 探测 `.app/Contents/MacOS` 并跳过该 channel，提示改由 MCP 派发
+- 这两条与 v2.0.2 修的 `HETERO_EXHAUSTED` 是同一形状：**检查点存在，但检查的不是真正该检查的东西**；回执写得漂亮，事情没发生
+
 ## v2.0.2 — 审查失败可诊断 + 调用超时 + VERDICT 容错
 
 起因：`HETERO_EXHAUSTED: all review models failed` 被用于五种互不相关的失败，其中占比最高的一种是「模型正常答了，但输出里没有行首 `VERDICT:` 行」。这句报错把排查引向通道与版本，2026-08-13 因此产生一次误诊，把根因写成「opencode 1.17.15 的 `--format json` 挂死」——实测四条路径（裸跑 / `--attach` × 带 json / 不带）全部 4~20 秒返回、输出为标准 NDJSON，该结论已证伪。

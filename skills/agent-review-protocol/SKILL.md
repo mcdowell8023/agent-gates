@@ -49,13 +49,29 @@ v2.0.2 起每种失败单独报一行。`HETERO_EXHAUSTED` 只是汇总，**本�
 | `shared opencode serve unhealthy at <url>` | fail-closed，刻意拒绝裸跑 | `oc-reaper --apply` 清掉卡死 serve，再重试 |
 | `opencode exited N` / `codex timed out` | 审查进程本身失败 | 手工跑同一条命令看 stderr |
 
-**⛔ 失败时不许做的四件事**（都是伪造通过，不是解决）：
+**⛔ 永远不许伪造证据**（这些是造假，不是解决）：
 - 手工填 `REVIEW_HEAD` / `REVIEW_FILES_SHA256` / `REVIEW_DIFF_SHA256`——绕掉的正是「审查前捕获、审查后校验 staged 未变」这个时序保证
-- 自签 `.agent/verify/*.ack`（gate 只校验内容与时效，分不出谁写的）
-- `SKIP_VERIFY=1` / `SKIP_REVIEW=1` / `--no-verify`
-- 不带 `AGENT_MODE=1` 提交（gate 会静默放行，「commit 成功」≠「gate 跑了」）
+- 改 verdict、编一份审查/验证报告
+- 不带 `AGENT_MODE=1` 偷偷提交（gate 会静默放行，「commit 成功」≠「gate 跑了」）
 
-审查确实跑不起来时，如实说明并停下。
+**✅ 但用户明确授权的放行是合法路径**，不算违规，也不用再来回请示：
+
+```bash
+SKIP_VERIFY=1 git commit ...      # 跳过 CHECK 6
+SKIP_REVIEW=1 git commit ...      # 跳过 CHECK 5
+agent-gates-verify-ack <run-id>   # 给 INCOMPLETE 的 verify 记录用户放行（⚠️ 4 小时时效）
+```
+
+三个条件，都是关于**如实**而不是关于权限：
+1. 用户**真的说了**——不是推断、不是「他应该会同意」
+2. 报告里写明这是**授权放行，不是检查通过**
+3. 还没验的部分写清楚，不许悄悄消失
+
+⚠️ 看明白 `agent-gates-verify-ack` 是什么：gate 只校验 diff hash 和 4 小时时效，**完全不记录签署者身份**。所以「只有人能签」从来不是技术保证，只是一条纪律。用户明确授权后 agent 代跑这条命令是可以的——把它当审计记录：谁批准、何时、还剩什么没验。
+
+🔴 **一个会把人锁死的环，要认出来**：verify 可能仅仅因为端到端没做而判 `INCOMPLETE`，而端到端必须先部署 → 部署必须先 commit → commit 又要 verify 过。**这个环再努力也出不去**，它是门禁的时序假设问题，不是你做得不够。遇到这种：如实报告「INCOMPLETE 的唯一原因是时序，不是漏做」，请用户授权放行，提交后立刻补端到端。⛔ 不许假装端到端已经跑过。
+
+审查确实跑不起来、用户又没授权时，才停下报告。
 
 #### prompt 结尾必须要求结论行
 
@@ -83,6 +99,33 @@ v2.0.2 起装饰不影响判定，下面这些全部接受：
 - 整段回答没有结论行
 
 ⚠️ 装饰容忍是 v2.0.2 才有的。**目标机器上 `~/.agent-gates/.version` 若低于 2.0.2，必须写裸行**——把 VERDICT 包在反引号里被拒过，是真实踩过的坑。
+
+#### 两条通道都不可用时：外部审查导入（v2.1.0）
+
+opencode 与 codex 都跑不了时，**不要停在这里、也不要伪造锚点**。走两阶段：
+
+```bash
+# 阶段 1：工具捕获锚点 + 快照 prompt + 发 token，退出码 77
+agent-gates-review <prompt-file> --route paseo --dispatch-out /tmp/req.json
+
+# 阶段 2：你用 MCP create_agent 派子会话审完后，把结果导回
+agent-gates-review --import-result /tmp/review.md --token <token> \
+  --paseo-agent <agent-id> --result .agent/reviews/<name>.md
+```
+
+`req.json` 的 `requirements` 块**照抄进子会话 prompt**，审查就不会回来时缺结论行。
+
+派子会话时三件必知（都是实测踩过的）：
+
+| 事项 | 说明 |
+|---|---|
+| **provider 不能是 claude** | 工具会核，同模型审查直接判失败（红线 #8） |
+| **跨 provider 必须显式传 mode** | 不能从 claude 继承 `bypassPermissions`。opencode 可用：`Sisyphus - ultraworker` / `Hephaestus - Deep Agent` / `Atlas - Plan Executor` / `Prometheus - Plan Builder` |
+| **agent 必须在派发之后创建** | 工具用 `paseo agent inspect <id> --json` 核 `CreatedAt`；拿一个旧 agent 顶账会被拒 |
+
+导入失败时报错会指名原因：agent 找不到 / provider 是 claude / 早于派发 / 缺 `CreatedAt`（fail-closed）/ 缺 VERDICT 行 / 锚点已变 / 过期 / token 已用。其中**锚点已变与过期是不可重试的**（token 直接作废，重新派发），其余可以换个 agent 或补个结论行后用同一 token 重试。
+
+⛔ 这条通道**不证明审查正文出自那个 agent** —— 它只证明你确实派了一个异构子会话。别把它当来源认证，也别据此放松自查。
 
 ### Tool Priority (⛔ Hard Constraint)
 
