@@ -2,7 +2,7 @@
 # agent-gates installer
 # Detects agent platforms, installs skills + registers platform hooks.
 # Usage: curl -fsSL https://raw.githubusercontent.com/mcdowell8023/agent-gates/main/install.sh | bash
-# Or: ./install.sh [--target DIR] [--skip-hooks] [--force | --upgrade]
+# Or: ./install.sh [--target DIR] [--skip-hooks] [--force | --upgrade | --local]
 
 set -euo pipefail
 
@@ -360,9 +360,22 @@ detect_platform() {
 
 # --- Clone or update repo ---
 fetch_repo() {
+  # --local installs from the checkout this script lives in. Without it there is no way to
+  # install unpushed work at all: the payload always came from remote main, while the banner
+  # reads SCRIPT_DIR/.version — so a run against a local branch printed the local version
+  # and a full list of "Installed:" lines while changing nothing. Verified 2026-08-16.
+  if [[ "${USE_LOCAL:-0}" == "1" ]]; then
+    [[ -n "$SCRIPT_DIR" && -d "$SCRIPT_DIR/skills" && -f "$SCRIPT_DIR/.version" ]] || \
+      fail "--local needs to run from an agent-gates checkout (skills/ and .version not found in '${SCRIPT_DIR:-?}')"
+    REPO_DIR="$SCRIPT_DIR"
+    info "Source: local checkout $REPO_DIR (v$(tr -d '[:space:]' < "$REPO_DIR/.version"))"
+    return 0
+  fi
+
   local tmp_dir
   tmp_dir=$(mktemp -d)
   REPO_DIR="$tmp_dir/agent-gates"
+  info "Source: remote $REPO_URL (main) — use --local to install the checkout you are in"
 
   if command -v git &>/dev/null; then
     git clone --depth 1 "$REPO_URL.git" "$REPO_DIR" 2>/dev/null || \
@@ -846,15 +859,17 @@ main() {
       --target) TARGET_DIR="$2"; shift 2 ;;
       --skip-hooks) SKIP_HOOKS=1; shift ;;
       --force|--upgrade) FORCE=1; shift ;;
+      --local) USE_LOCAL=1; FORCE=1; shift ;;
       --with-openspec) WITH_OPENSPEC=1; shift ;;
       --codegraph-hook) CODEGRAPH_HOOK=1; shift ;;
       --skip-deps) SKIP_DEPS=1; shift ;;
       -h|--help)
-        echo "Usage: install.sh [--target DIR] [--skip-hooks] [--force | --upgrade] [--with-openspec] [--codegraph-hook] [--skip-deps]"
+        echo "Usage: install.sh [--target DIR] [--skip-hooks] [--force | --upgrade | --local] [--with-openspec] [--codegraph-hook] [--skip-deps]"
         echo "  --target DIR       Override skills target directory"
         echo "  --skip-hooks       Skip platform hook registration"
         echo "  --force            Reinstall even if version matches"
         echo "  --upgrade          Alias of --force"
+        echo "  --local            Install from this checkout instead of cloning remote main"
         echo "  --with-openspec    Check for OpenSpec CLI availability (no auto-install)"
         echo "  --codegraph-hook   Register CodeGraph auto-init chpwd hook in ~/.zshrc"
         echo "  --skip-deps        Skip external dependency install (Memory / Superpowers / OpenSpec)"

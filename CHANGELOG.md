@@ -39,6 +39,19 @@ v2.0.2 把审查失败的**报错**说清了，但**可用通道**没变多。�
 - **点名一个闭环死锁**：verify 可能仅因端到端未做而判 `INCOMPLETE`，而端到端要先部署、部署要先 commit、commit 又要 verify 过。**这个环再努力也出不去**，授权放行就是为它准备的
 - **gate 的 INCOMPLETE 提示自己给出放行命令**。旧文案是 "confirm via workflow"——不说跑什么，逼每个 agent 重新推导机制再向用户解释一遍。现在直接打印 `agent-gates-verify-ack <run-id>`、4h 时效与 hash 绑定的注意事项，以及那个死锁的说明
 
+### 通道不强制，只规定证据
+- `--import-result` 的 `--paseo-agent` **改为可选**，新增 `--imported-model`。任意通道产出的审查都能导入：opencode CLI、codex、别的 agent、人工看的都行。两者必须给一个，所以不会出现来源完全不明的审查
+- 差别只在对来源是否诚实：带 `--paseo-agent` 时工具核实 agent 存在且异构，产物记该 agent；带 `--imported-model` 时记 `REVIEW_TOOL: external` 并把模型标 `unverified`，stderr 同步说明。**锚点保证两者完全相同**——gate 认的是「审查期间 staged 没动」，不是「用了哪个工具」
+
+### Fixed：oc-reaper 对 Paseo 托管的 serve 完全失效
+- 判据里「端口上有 ESTABLISHED 连接就保留」排在「有没有真实 `opencode run` 客户端」之前，而 **Paseo 托管的 serve 与 Paseo daemon 之间的连接永不断开** ⇒ 该信号永远为真、serve 永远被保留。实测：两个 serve 存活 **23 小时**，全机零个 `opencode run`，`--apply` 一个也没回收
+- 改为先看真实客户端（有则任何年龄都保留），裸连接只在 `OC_REAPER_MAX_AGE`（默认 7200s）以内提供保护，超龄按泄漏处理
+- 这与 `agent-resource-lifecycle.md` 记的是同一个错误的又一次复现：**判定该看业务实体还在不在，不是看父进程或 socket 还在不在**
+
+### Fixed：install.sh 自己就是假回执
+- `fetch_repo()` **无条件从 GitHub clone main**，`REPO_URL` 是硬编码常量不可覆盖 ⇒ 在本地 checkout 里跑 `./install.sh --upgrade`，装的是远程代码，**本地改动一个字节都装不上**。而横幅那句 `Installer vX.Y.Z` 读的是本地 `.version` ⇒ **显示本地版本号、装远程代码**，还逐行打印 `✓ Installed: bin/...`、exit 0 全绿
+- 新增 `--local`：从 install.sh 所在的 checkout 安装。默认（clone）路径下也会打印 `Source: remote ... — use --local to install the checkout you are in`，让来源不再靠猜
+
 ### Fixed（verify 侧，与 review 侧同类缺陷）
 - 🔴 **`HETERO_OC_MODEL` 此前在 `config.sh` 里完全没有定义** ⇒ `dispatch.sh` 实际执行 `opencode run -m ""`，它**不快速失败而是挂起**，evidence 文件建了但停在 0 字节，调用方一直轮询等一个永远不来的结果。**verify 的 opencode channel 从来就没工作过**，除非调用方碰巧手工 export 过。现在从 `hetero_models.primary` / `review_models.primary` 解析，默认 `github-copilot/gpt-5.5`；空模型时跳过该 channel 并明确报错
 - 🔴 **paseo channel 会为不存在的 agent 开出回执**：macOS 上 `paseo` 软链指向 Paseo.app 的 Electron 本体，headless 运行直接 `FATAL: Unable to find helper app`（exit 133）——但 `hetero_spawn_pg` 后台 spawn 从不等退出码，`2>/dev/null` 又吞掉 stderr，于是 `dispatch.json` 照写 `capability=FULL`。现在用 `readlink -f` 探测 `.app/Contents/MacOS` 并跳过该 channel，提示改由 MCP 派发

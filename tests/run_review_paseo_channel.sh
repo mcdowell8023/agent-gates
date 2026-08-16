@@ -432,6 +432,56 @@ JSON
   teardown
 }
 
+# Import declaring the reviewer instead of proving it — the channel-agnostic path.
+import_declared() {
+  local model="$1"
+  OUT_FILE=$(mktemp)
+  local errf; errf=$(mktemp)
+  RC2=0
+  ( cd "$REPO" && AGENT_GATES_DIR="$GATES" \
+      node "$WITH_TIMEOUT" 45 bash "$REVIEW_CMD" --import-result "$REVIEW_FILE" \
+        --token "$TOKEN" --imported-model "$model" --result "$OUT_FILE" ) >/dev/null 2>"$errf" || RC2=$?
+  ERRTXT=$(cat "$errf"); rm -f "$errf"
+}
+
+test_import_declared_channel_agnostic() {
+  echo "T28: import without --paseo-agent → accepted, recorded as external + unverified"
+  # The gate prescribes evidence, not a channel: a review produced by opencode CLI, codex,
+  # another agent, or a human must be importable. What changes is honesty about provenance,
+  # not whether the door opens.
+  arrange_dispatched
+  make_review "reviewed by hand
+VERDICT: PASS"
+  import_declared "opencode/github-copilot/gpt-5.5"
+  assert "exit 0" "$([[ $RC2 -eq 0 ]] && echo true || echo false)"
+  assert "REVIEW_TOOL: external" \
+    "$(grep -q 'REVIEW_TOOL: external' "$OUT_FILE" 2>/dev/null && echo true || echo false)"
+  assert "model recorded and marked unverified" \
+    "$(grep -qE 'REVIEW_MODEL:.*unverified' "$OUT_FILE" 2>/dev/null && echo true || echo false)"
+  assert "anchors still present (the guarantee that does hold)" \
+    "$(grep -qE 'REVIEW_DIFF_SHA256: [0-9a-f]{64}' "$OUT_FILE" 2>/dev/null && echo true || echo false)"
+  assert "stderr says provenance was not verified" \
+    "$(printf '%s' "$ERRTXT" | grep -qi 'unverified' && echo true || echo false)"
+  teardown
+}
+
+test_import_requires_some_provenance() {
+  echo "T29: neither --paseo-agent nor --imported-model → rejected"
+  arrange_dispatched
+  make_review "VERDICT: PASS"
+  OUT_FILE=$(mktemp); local errf; errf=$(mktemp); local rc=0
+  ( cd "$REPO" && AGENT_GATES_DIR="$GATES" \
+      node "$WITH_TIMEOUT" 45 bash "$REVIEW_CMD" --import-result "$REVIEW_FILE" \
+        --token "$TOKEN" --result "$OUT_FILE" ) >/dev/null 2>"$errf" || rc=$?
+  local err; err=$(cat "$errf"); rm -f "$errf"
+  assert "exits non-zero" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+  assert "error names both accepted forms" \
+    "$(printf '%s' "$err" | grep -q 'paseo-agent' && printf '%s' "$err" | grep -q 'imported-model' && echo true || echo false)"
+  assert "token not consumed by a rejected import" \
+    "$([[ -d "$(PEND)/$TOKEN" ]] && echo true || echo false)"
+  teardown
+}
+
 test_expired_cleanup_whole_dir() {
   echo "T21: expired records are cleaned as whole directories, leaving no orphans"
   arrange_dispatched
@@ -527,6 +577,8 @@ test_recoverable_failure_allows_retry
 test_unrecoverable_failure_drops_token
 test_unrecoverable_wins_over_recoverable
 test_agent_without_createdat_fails_closed
+test_import_declared_channel_agnostic
+test_import_requires_some_provenance
 test_expired_cleanup_whole_dir
 test_orphan_dir_without_record_is_swept
 test_cleanup_does_not_touch_processing

@@ -516,9 +516,16 @@ agent-gates-review <prompt-file> --route paseo --dispatch-out request.json
 
 # 2. 调用方 agent 按 request.json 的 "suggested" 派 Paseo 子会话
 #    （走 MCP create_agent —— shell 脚本创建不了本机 Paseo agent），拿到审查后导入：
+# 来源可核实——工具会核 agent 确实存在且是异构 provider：
 agent-gates-review --import-result review.md --token <token> \
   --paseo-agent <agent-id> --result .agent/reviews/<name>.md
+
+# 来源仅声明——任意通道都行（opencode CLI、codex、别的 agent、人工看的）：
+agent-gates-review --import-result review.md --token <token> \
+  --imported-model "opencode/github-copilot/gpt-5.5" --result .agent/reviews/<name>.md
 ```
+
+**不规定通道，只规定证据。** 审查由什么产出的都可以，gate 认的是锚点。两种形式的差别只在对来源是否诚实：带 `--paseo-agent` 时产物记录已核实的 agent；带 `--imported-model` 时记 `REVIEW_TOOL: external` 并把模型标为 `unverified`。两者必须给一个，所以不会出现来源完全不明的审查。
 
 `request.json` 里带一个 `requirements` 块，把它抄进子会话的 prompt，审查就不会回来时缺结论行。
 

@@ -108,10 +108,16 @@ opencode 与 codex 都跑不了时，**不要停在这里、也不要伪造锚�
 # 阶段 1：工具捕获锚点 + 快照 prompt + 发 token，退出码 77
 agent-gates-review <prompt-file> --route paseo --dispatch-out /tmp/req.json
 
-# 阶段 2：你用 MCP create_agent 派子会话审完后，把结果导回
+# 阶段 2 · 形式 A：派了 Paseo 子会话，来源可核实
 agent-gates-review --import-result /tmp/review.md --token <token> \
   --paseo-agent <agent-id> --result .agent/reviews/<name>.md
+
+# 阶段 2 · 形式 B：任意通道都行（opencode CLI / codex / 别的 agent / 人工看的）
+agent-gates-review --import-result /tmp/review.md --token <token> \
+  --imported-model "opencode/github-copilot/gpt-5.5" --result .agent/reviews/<name>.md
 ```
+
+**不规定通道，只规定证据。** 两种形式必须给一个，差别只在对来源是否诚实：A 记录已核实的 agent；B 记 `REVIEW_TOOL: external` 并把模型标 `unverified`。锚点保证两者相同。
 
 `req.json` 的 `requirements` 块**照抄进子会话 prompt**，审查就不会回来时缺结论行。
 

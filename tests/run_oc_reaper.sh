@@ -168,8 +168,43 @@ test_mixed_multiple() {
   )
 }
 
+test_stale_serve_with_connection_is_reaped() {
+  echo "T8: connected but no opencode run client, past MAX_AGE → reaped"
+  # A Paseo-managed serve holds a permanent connection to the Paseo daemon, so the
+  # ESTABLISHED signal never clears. Before this, that single signal kept the serve forever:
+  # two were observed alive at 23h with zero `opencode run` processes on the machine, and
+  # `--apply` reaped none of them. Age must win over a bare connection.
+  ( FAKE=$(mktemp -d)
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE/lsof"   # always reports a connection
+    chmod +x "$FAKE/lsof"
+    export PATH="$FAKE:$PATH"
+    spawn_fake_serve 9931
+    sleep 1
+    out=$(OC_REAPER_MIN_AGE=0 OC_REAPER_MAX_AGE=0 bash "$REAPER" 2>&1)
+    assert "connected-but-clientless serve is reapable" \
+      "$(echo "$out" | grep -q '9931' && echo true || echo false)"
+    cleanup_bg; rm -rf "$FAKE" )
+}
+
+test_active_client_keeps_serve_at_any_age() {
+  echo "T9: real opencode run client → kept even past MAX_AGE"
+  ( FAKE=$(mktemp -d)
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE/lsof"
+    chmod +x "$FAKE/lsof"
+    export PATH="$FAKE:$PATH"
+    spawn_fake_serve 9932
+    bash -c 'exec -a "opencode run --attach http://127.0.0.1:9932" sleep 60' &
+    sleep 1
+    out=$(OC_REAPER_MIN_AGE=0 OC_REAPER_MAX_AGE=0 bash "$REAPER" 2>&1)
+    assert "kept because a real client exists" \
+      "$(echo "$out" | grep -q '9932' && echo false || echo true)"
+    cleanup_bg; rm -rf "$FAKE" )
+}
+
 test_orphan_dryrun
 test_serve_with_attach_client
+test_stale_serve_with_connection_is_reaped
+test_active_client_keeps_serve_at_any_age
 test_shared_port_kept
 test_young_serve_kept
 test_apply_kills_orphan

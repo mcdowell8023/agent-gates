@@ -20,6 +20,9 @@ set -uo pipefail
 APPLY=0
 [[ "${1:-}" == "--apply" ]] && APPLY=1
 MIN_AGE="${OC_REAPER_MIN_AGE:-120}"
+# Past this age a serve with no `opencode run` client is a leak, even if something is still
+# connected to it (see the in-use check below for why that signal cannot be trusted alone).
+MAX_AGE="${OC_REAPER_MAX_AGE:-7200}"
 KEEP_PORT="${OC_REVIEW_PORT:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,10 +56,20 @@ while IFS= read -r pid; do
   if [[ -n "$KEEP_PORT" && "$port" == "$KEEP_PORT" ]]; then kept=$((kept+1)); continue; fi
   age=$(etime_to_secs "$(ps -o etime= -p "$pid" 2>/dev/null)")
   if [[ "$age" -lt "$MIN_AGE" ]]; then kept=$((kept+1)); continue; fi
-  # in-use? (conservative: keep if either signal says so)
-  if lsof -nP -iTCP:"$port" -sTCP:ESTABLISHED >/dev/null 2>&1; then kept=$((kept+1)); continue; fi
+  # In-use? A real client is an `opencode run`, and that is checked first — it keeps the
+  # serve at any age.
   if pgrep -f "opencode run.*--port ${port}" >/dev/null 2>&1; then kept=$((kept+1)); continue; fi
   if pgrep -f "opencode run.*attach.*:${port}" >/dev/null 2>&1; then kept=$((kept+1)); continue; fi
+  # A bare ESTABLISHED connection is much weaker evidence, and used alone it never clears:
+  # a Paseo-managed serve holds a permanent connection to the Paseo daemon, so this signal
+  # stays true forever and the serve is kept forever — observed at 23h with zero
+  # `opencode run` processes anywhere on the machine. That is the same mistake recorded in
+  # the resource-lifecycle notes: judge whether the *business entity* is still alive, not
+  # whether some parent or socket still exists. So a connection only protects a young
+  # serve; past OC_REAPER_MAX_AGE it is treated as a leak.
+  if [[ "$age" -lt "$MAX_AGE" ]] && lsof -nP -iTCP:"$port" -sTCP:ESTABLISHED >/dev/null 2>&1; then
+    kept=$((kept+1)); continue
+  fi
   # orphan
   if [[ "$APPLY" -eq 1 ]]; then
     reap_pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')

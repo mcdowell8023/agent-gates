@@ -64,6 +64,7 @@ DISPATCH_OUT=""
 IMPORT_RESULT=""
 IMPORT_TOKEN=""
 PASEO_AGENT=""
+IMPORTED_MODEL=""
 
 _need_val() { [[ $2 -ge 2 ]] || { echo "agent-gates-review: $1 requires a value" >&2; exit 1; }; }
 
@@ -75,6 +76,7 @@ while [[ $# -gt 0 ]]; do
     --import-result)  _need_val "$1" $#; IMPORT_RESULT="$2"; shift 2 ;;
     --token)          _need_val "$1" $#; IMPORT_TOKEN="$2";  shift 2 ;;
     --paseo-agent)    _need_val "$1" $#; PASEO_AGENT="$2";   shift 2 ;;
+    --imported-model) _need_val "$1" $#; IMPORTED_MODEL="$2"; shift 2 ;;
     *)
       if [[ -z "$PROMPT_FILE" ]]; then PROMPT_FILE="$1"; shift
       else echo "agent-gates-review: unknown arg: $1" >&2; exit 1; fi ;;
@@ -633,8 +635,14 @@ PY
 
 paseo_import() {
   [[ -n "$IMPORT_TOKEN" ]] || { echo "agent-gates-review: --import-result requires --token" >&2; exit 1; }
-  [[ -n "$PASEO_AGENT" ]] || { echo "agent-gates-review: --import-result requires --paseo-agent <id>" >&2; exit 1; }
   [[ -f "$IMPORT_RESULT" && -s "$IMPORT_RESULT" ]] || { echo "agent-gates-review: review file missing or empty: $IMPORT_RESULT" >&2; exit 75; }
+  # The channel is not prescribed: any reviewer can be imported. --paseo-agent additionally
+  # proves a heterogeneous Paseo agent existed; without it the import still works but the
+  # product is marked unverified, and --imported-model must at least say what produced it.
+  if [[ -z "$PASEO_AGENT" && -z "$IMPORTED_MODEL" ]]; then
+    echo "agent-gates-review: --import-result needs either --paseo-agent <id> (verified) or --imported-model <id> (declared, recorded as unverified)" >&2
+    exit 1
+  fi
 
   local pend="$PASEO_PENDING_DIR/$IMPORT_TOKEN" proc="$PASEO_PROCESSING_DIR/$IMPORT_TOKEN"
   mkdir -p "$PASEO_PROCESSING_DIR"
@@ -685,7 +693,15 @@ print(a['enabled']); print(a['head']); print(a['files_sha256']); print(a['diff_s
     exit "$arc"
   fi
 
-  local agent_desc vrc=0
+  local agent_desc="" vrc=0 review_tool="paseo"
+  if [[ -z "$PASEO_AGENT" ]]; then
+    # Declared-only import: no Paseo agent to check against, so say so in the product rather
+    # than let it read like a verified one. The anchors still hold — what is missing is any
+    # evidence about *who* reviewed.
+    review_tool="external"
+    agent_desc="${IMPORTED_MODEL} (unverified)"
+    echo "agent-gates-review: importing without agent verification — recorded as REVIEW_TOOL: external, model '${IMPORTED_MODEL}' marked unverified" >&2
+  else
   agent_desc=$(_paseo_verify_agent "$PASEO_AGENT" "$rec_created") || vrc=$?
   if [[ $vrc -ne 0 ]]; then
     mv "$proc" "$pend" 2>/dev/null   # recoverable: dispatch another agent and retry
@@ -701,6 +717,7 @@ print(a['enabled']); print(a['head']); print(a['files_sha256']); print(a['diff_s
     esac
     exit 75
   fi
+  fi
 
   local body; body=$(cat "$IMPORT_RESULT")
   if ! has_valid_conclusion "$body"; then
@@ -712,7 +729,7 @@ print(a['enabled']); print(a['head']); print(a['files_sha256']); print(a['diff_s
   # append_marker re-checks the anchors it was given against the current staged state, so
   # the "staged must not have moved" guarantee is the same code path the other routes use.
   local product mrc=0
-  product=$(append_marker "paseo" "$agent_desc" "$body") || mrc=$?
+  product=$(append_marker "$review_tool" "$agent_desc" "$body") || mrc=$?
   if [[ $mrc -ne 0 ]]; then
     rm -rf "$proc"   # anchors moved: unrecoverable
     exit "$mrc"

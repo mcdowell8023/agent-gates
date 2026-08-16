@@ -536,9 +536,20 @@ agent-gates-review <prompt-file> --route paseo --dispatch-out request.json
 # 2. the calling agent creates a Paseo sub-session per request.json's "suggested" field
 #    (via MCP create_agent — a shell script cannot create a local Paseo agent), collects
 #    the review, then imports it:
+# provenance proven — the tool checks the agent really exists and is heterogeneous:
 agent-gates-review --import-result review.md --token <token> \
   --paseo-agent <agent-id> --result .agent/reviews/<name>.md
+
+# provenance declared — any channel at all (opencode CLI, codex, another agent, a human):
+agent-gates-review --import-result review.md --token <token> \
+  --imported-model "opencode/github-copilot/gpt-5.5" --result .agent/reviews/<name>.md
 ```
+
+**The channel is not prescribed — the evidence is.** Whatever produced the review, the
+anchors are what the gate cares about. The two forms differ only in honesty about
+provenance: with `--paseo-agent` the product records the verified agent; with
+`--imported-model` it records `REVIEW_TOOL: external` and marks the model `unverified`.
+One of the two is required, so a review can never land with no stated origin at all.
 
 `request.json` carries a `requirements` block — copy it into the sub-session's prompt and
 the review will not come back missing its verdict line.
