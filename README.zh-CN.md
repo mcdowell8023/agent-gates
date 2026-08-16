@@ -146,6 +146,24 @@ agent 在 session 内开发时，agent-gates 自动：
 
 ## 新特性
 
+### v2.1.0 — 门禁不再卡死自己人
+
+真实反馈：并发开发多条线时，门禁成了阻塞项。一条任务在 verify 上耗了两天，而卡它的三件事**全是 agent-gates 自己的缺陷**。
+
+- **「伪造证据」与「用户授权放行」分开。** 伪造仍然禁止；用户明确授权的放行是**合法路径** —— `SKIP_VERIFY=1`、`SKIP_REVIEW=1`、`agent-gates-verify-ack`（用户授权后 agent 可代跑）。三个条件都关于**如实**，不关于权限。gate 的 `INCOMPLETE` 提示现在直接打印命令，而不是那句什么都没说的 "confirm via workflow" —— 后者逼每个 agent 重新推导机制、再向用户解释一遍才能动。
+- **不规定通道，只规定证据。** `--import-result` 接受任意来源的审查：`--paseo-agent <id>` 会核实异构 Paseo agent，`--imported-model <id>` 则声明来源并标 `unverified`。两种形式的锚点保证完全相同。新增两阶段流程：`--route paseo --dispatch-out` 捕获锚点 + 快照 prompt（退出码 77），调用方走 MCP 派发，结果经原子 claim 导入。
+- **修了三处「回执写得漂亮、事情没发生」** —— `HETERO_OC_MODEL` 此前**根本没有定义**，verify 实际执行 `opencode run -m ""`，它挂起而非失败、只留 0 字节 evidence；paseo channel 为从未启动的 agent 写 `capability=FULL`（其 CLI 是 Electron 应用本体、headless 跑不起来，而 spawn 从不等退出码）；`install.sh` 永远 clone 远程 main 却显示**本地**版本号，本地改动根本装不上 —— 现在 `--local` 从当前 checkout 安装。
+- **`oc-reaper` 不再永久保留泄漏的 serve。** 「端口有 ESTABLISHED 连接」排在「有没有真实 `opencode run` 客户端」之前，而 Paseo 托管的 serve 与 daemon 的连接永不断开 ⇒ 该信号永远为真。实测两个 serve 存活 23 小时、全机零个客户端，`--apply` 一个都没回收。
+
+### v2.0.2 — 审查失败会说清到底哪里出了问题
+
+`HETERO_EXHAUSTED: all review models failed` 被用于五种互不相关的失败。其中占比最高的那种——模型答了但没有行首 `VERDICT:` 行——读起来像通道故障，害得排查花一整天去追一个并不存在的 `--format json` 挂死。
+
+- 每种失败各自报告：`review-fail[<model>]:` 点名模型与原因，缺结论行时还会引用模型自己的原话。
+- 结论行匹配容忍常见 markdown（`**加粗**`、`##`、列表项、引用、反引号、缩进、中文冒号），但要求该行**只承载取值** —— `PASS_WITH_ISSUES` 这类带限定词的结论会让结果反转，一律拒绝。
+- 所有审查调用都由 `with-timeout.mjs` 限时（`AG_REVIEW_TIMEOUT`，默认 300s）。这个 wrapper 自 v1.x 就存在却**零调用点**；现在它还会杀整个进程组——只杀直接子进程时，孙子进程仍持有继承来的 stdout，超时等于没做。
+- hetero 分支可落回 codex（`fallback_route` 此前是死配置），并用 `oc_serve_ensure` 自愈共享 serve，而不只是探测它。
+
 ### v2.0.0 — hetero-check 子系统 + Verifier 角色（BREAKING）
 
 **BREAKING**：`lib/review-selection.sh` → `lib/hetero/select.sh`（兼容 shim 保留一个 minor 周期）；`review-capability.json` → `hetero-check.json`（`agent-gates-config-migrate` 自动转换）。

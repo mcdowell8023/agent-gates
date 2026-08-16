@@ -146,6 +146,54 @@ While the agent works inside a session, agent-gates automatically:
 
 ## What's New
 
+### v2.1.0 — the gate stops blocking its own side
+
+Real feedback: with several development lines running in parallel, the gate became the
+bottleneck. One task spent two days stuck on verify — and all three things blocking it were
+agent-gates' own defects.
+
+- **Fabricating evidence and an authorized override are now separated.** Fabrication stays
+  banned; an override the user explicitly approved is a legitimate path — `SKIP_VERIFY=1`,
+  `SKIP_REVIEW=1`, and `agent-gates-verify-ack` (an agent may run it once you have approved).
+  The three conditions are all about honesty, not permission. The gate's `INCOMPLETE` message
+  now prints the command itself instead of "confirm via workflow", which named nothing and
+  forced every agent to reconstruct the mechanism and explain it before anyone could move.
+- **The channel is not prescribed — the evidence is.** `--import-result` accepts a review
+  from any source: `--paseo-agent <id>` verifies a heterogeneous Paseo agent, or
+  `--imported-model <id>` declares the origin and records it `unverified`. Anchors are
+  identical either way. New two-phase flow: `--route paseo --dispatch-out` captures the
+  anchors and snapshots the prompt (exit 77), the caller dispatches over MCP, then the result
+  is imported under an atomic claim.
+- **Fixed three "the receipt looked fine, nothing happened" defects** — `HETERO_OC_MODEL` had
+  no definition at all, so verify ran `opencode run -m ""`, which hangs rather than fails and
+  left 0-byte evidence; the paseo channel wrote `capability=FULL` for agents that never
+  started (its CLI is an Electron bundle that cannot run headless, and the spawn never waited
+  for an exit code); `install.sh` always cloned remote main while displaying the *local*
+  version, so local changes could never be installed — now `--local` installs the checkout
+  you are in.
+- **`oc-reaper` no longer keeps leaked serves forever.** "Port has an ESTABLISHED connection"
+  ranked above "is there a real `opencode run` client", and a Paseo-managed serve holds a
+  permanent daemon connection — so the signal never cleared. Two serves were observed alive
+  at 23h with zero clients on the machine, and `--apply` reaped none of them.
+
+### v2.0.2 — review failures say what actually went wrong
+
+`HETERO_EXHAUSTED: all review models failed` was emitted for five unrelated failures. The
+most common by far — the model answered but produced no line-start `VERDICT:` — read as a
+transport failure, which cost a full day chasing a nonexistent `--format json` hang.
+
+- Each failure now reports itself: `review-fail[<model>]:` names the model and the reason,
+  and quotes the model's own words when a verdict line is missing.
+- The verdict matcher tolerates ordinary markdown (`**bold**`, `##`, list items, blockquotes,
+  backticks, indentation, full-width colons) but requires the line to carry nothing but the
+  value — a qualified verdict like `PASS_WITH_ISSUES` inverts the result and is rejected.
+- Every reviewer invocation is bounded by `with-timeout.mjs` (`AG_REVIEW_TIMEOUT`, default
+  300s). That wrapper had shipped since v1.x with **zero call sites**; it now also kills the
+  whole process group, because killing only the direct child leaves grandchildren holding the
+  inherited stdout and the timeout accomplishes nothing.
+- The hetero branch falls back to codex (`fallback_route` was dead config), and self-heals the
+  shared serve with `oc_serve_ensure` instead of merely probing it.
+
 ### v2.0.0 — hetero-check subsystem + Verifier role (BREAKING)
 
 **Breaking**: `lib/review-selection.sh` → `lib/hetero/select.sh` (shim kept for one minor); `review-capability.json` → `hetero-check.json` (`agent-gates-config-migrate` auto-converts).
