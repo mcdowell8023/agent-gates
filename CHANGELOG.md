@@ -2,6 +2,79 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.2.0 — pi 通道 + oc-reaper 三层空转判据
+
+两件事都源自 2026-08-20 的一次现场：机器可用内存掉到 70MB、load 14.6，三个
+`opencode serve` 各烧 52-86% CPU 而手上零活，`oc-reaper` 却报 `0 reapable, 7 kept`。
+
+### Added
+- **`pi` 通道**，排在 paseo 之后、opencode 之前。六通道顺序变为
+  `paseo → pi → opencode → codex → codebuddy → echo-fallback`
+- 新 env / 配置：`HETERO_PI_MODEL`（`<provider>/<model>` 格式）、`HETERO_BIN_PI`、
+  `HETERO_CHAN_PI`，以及 `hetero-check.json` 的 `pi_models.primary`
+- `tests/run_hetero_pi_channel.sh`（13 断言）、`tests/run_oc_reaper_layers.sh`（16 断言）
+
+### 为什么 pi 排在 opencode 之前
+`pi` 是 one-shot——`--help` 里没有 serve / daemon / port 任何子命令，`-p` 处理完即退出。
+`opencode` 需要常驻 `opencode serve`，而 Paseo 驱动它时**每个 agent 起一个独立 serve**，
+实测 1-1.5GB RSS 且 agent idle 后不回收。实测对比（含 bug 的 JS + 要求结论行）：
+
+| 通道 | 耗时 | 峰值 RSS | 跑完残留 |
+|---|---|---|---|
+| pi `github-copilot/gpt-5.4` | 29.9s | 197MB | 零 |
+| pi `volcengine-coding/deepseek-v4-flash` | 12.7s | 216MB | 零 |
+| opencode 共享 serve `:4096`（`--attach`） | — | 619MB 常驻 | 1 个，受 oc-review 管 |
+| opencode Paseo 托管 | — | 1-1.5GB / 个 | 不回收 |
+
+⚠️ **注意区分**：共享 serve 那一行是**健康**的（3h10m 均值 5% CPU）。烧机器的从来不是
+「用 opencode 审查」，而是「每次调用新起一个 serve」。`oc-review` v1.13.0 的 `--attach`
+已经消掉了 per-run 堆叠——绕过它的调用**跑一次就漏一个 1GB serve**，与调用频次无关。
+
+### Changed
+- `HETERO_PI_MODEL` 未配置时**静默跳过该通道**，不给默认值：加通道不能悄悄改变既有路由。
+  `config.sh` 也刻意**不**回退到 `review_models.primary`，否则所有已配 reviewer 的安装
+  都会被自动切到 pi
+- 模型缺 provider 前缀（无 `/`）→ 报错跳过，不猜。pi 的 `--provider` 与 `--model` 是两个
+  独立参数，必须显式拆分
+- pi 通道 capability 仍为 `EVIDENCE_ONLY`。`FULL` 是 paseo 专属语义（可核实的异构 agent
+  身份），pi 给不出；输出契约与 opencode 通道一致——stdout 落进 evidence 文件
+
+### Fixed
+- **`oc-reaper` 的空转判据从全局门控改为 per-serve 三层判定。** 原 `spin_check_allowed()`
+  只要 Paseo 上有**任何一个** opencode agent 处于 running，就对**所有** Paseo 托管的 serve
+  关闭空转检测。现场把 `OC_REAPER_SPIN_CPU` 降到 30 仍是 `0 reapable`，证明挡住它的是门控
+  本身而非阈值。新判据：
+
+  ```
+  层1  有工作子进程（排除 lsp-daemon）        → 在干活，任何 CPU 都保留
+  层2  无工作子进程 + CPU 低                  → 空闲无害，保留
+  层3  无工作子进程 + CPU 高 + 主线程 ≥95%
+       采样卡在 kevent64                      → 才判 GC 空转
+  ```
+
+  三层都不能省。**层1 不能省**：等 jest 子进程返回的 serve 主线程同样 100% 卡在
+  `kevent64`，与 GC 空转无法区分——「主线程 kevent64 即空转」这条判据**单独使用是错的**，
+  当天差点据此杀掉一个已跑 40 分钟的测试。**层3 不能省**：纯 JS 重计算也符合「无子进程 +
+  高 CPU」，只有采样能区分 GC 与 JS（实测一个 100% CPU 的 `yes` 被层3 正确挡住）。
+  `sample` 缺失或失败一律保留——无法证明就不动手。新增 `OC_REAPER_SPIN_IDLE_PCT`（默认 95）、
+  `OC_REAPER_SPIN_SAMPLE_SECS`（默认 2）
+- **`oc-reaper` 不再清掉 agent-gates 自己的共享 serve。** `KEEP_PORT` 原为
+  `${OC_REVIEW_PORT:-}`，默认空；该变量平时不设置，于是 reaper 认不出 4096 需要保护，把
+  `lib/hetero/serve.sh` 那个「存在目的就是消除 per-run 堆叠」的持久 serve 当泄漏回收
+  （实测 age 38051s 被清）。现与 `serve.sh` 完全对齐为
+  `${OC_SERVE_PORT:-${OC_REVIEW_PORT:-4096}}`，命中时**显式打印一行**而非静默计入 kept
+- `tests/run_oc_reaper.sh` 两处断言缺陷：4 处用 `grep ':<port>'` 判断是否被回收——端口号
+  出现不等于被回收，新增的 `[keep]` 行同样含 `:<port>` ⇒ 误判；`0 reapable` 是全局计数，
+  机器上有其他 opencode serve 时必然失败（实测 1/3 概率），现改为检测到非测试 serve 时
+  **显式跳过并说明**，不静默弱化断言
+
+### v2.1.0 的一条「已知限制」已失效
+v2.1.0 记「工具不能自己派本机 Paseo，`paseo run` exit 0 但 agent 根本没创建」——**归因错了**。
+真因是 `~/.local/bin/paseo` 那条软链指向了 Paseo.app 的**主 APPL 可执行文件**；官方包装器
+`Contents/Resources/bin/paseo` 会先进 `Paseo Helper`，走它 `run -d` **可以正常创建 agent**。
+软链已修正（2026-08-17）。`dispatch.sh` 里检测 `.app/Contents/MacOS` 就跳过 paseo 通道的守卫
+仍然保留——它防的是「给从未存在的 agent 记 FULL」那种假通过。
+
 ## v2.1.0 — 外部审查导入通道（Paseo 子会话）
 
 v2.0.2 把审查失败的**报错**说清了，但**可用通道**没变多。两条通道同时不可用时（自审 dogfooding 就撞上：共享 serve 死 + codex 超时），agent 没有任何合法路径产出审查证据——手工填锚点绕掉的正是「审查前捕获、审查后校验」的时序保证，所以被明令禁止。

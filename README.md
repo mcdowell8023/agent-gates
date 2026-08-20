@@ -146,6 +146,59 @@ While the agent works inside a session, agent-gates automatically:
 
 ## What's New
 
+### v2.2.0 — pi channel + three-layer spin judgment
+
+**New `pi` channel, ahead of opencode.** Order is now
+`paseo → pi → opencode → codex → codebuddy → echo-fallback`.
+
+`pi` is one-shot: its `--help` lists no serve/daemon/port subcommand at all, and `-p`
+processes the prompt and exits. `opencode` needs a long-lived `opencode serve`, and when
+Paseo drives it **every agent gets its own** — measured at 1-1.5GB RSS and never reclaimed
+once the agent goes idle. Measured, reviewing a JS file with real bugs:
+
+| channel | wall | peak RSS | residue |
+|---|---|---|---|
+| pi `github-copilot/gpt-5.4` | 29.9s | 197MB | none |
+| pi `volcengine-coding/deepseek-v4-flash` | 12.7s | 216MB | none |
+| opencode shared serve `:4096` (`--attach`) | — | 619MB resident | 1, owned by oc-review |
+| opencode under Paseo | — | 1-1.5GB each | not reclaimed |
+
+⚠️ Read that table carefully: the shared serve row is **healthy** (5% average CPU over
+3h10m). What burns the machine was never "reviewing with opencode" — it is *starting a new
+serve per call*. `oc-review` v1.13.0's `--attach` already eliminated per-run stacking; a
+call that bypasses it leaks one ~1GB serve **on the very first invocation**, regardless of
+frequency.
+
+Configure with `HETERO_PI_MODEL=<provider>/<model>`. Left unset, the channel **steps aside
+silently** and routing is unchanged — adding a channel must not quietly re-route existing
+installs.
+
+**`oc-reaper` spin detection is now per-serve, in three layers.** The old gate asked Paseo
+whether *any* opencode agent was running and, if one was, disabled spin detection for
+**every** Paseo-managed serve. Observed failing in production: one running agent protected
+six abandoned serves while three of them burned 52-86% CPU each; lowering
+`OC_REAPER_SPIN_CPU` to 30 still reported `0 reapable`, proving the gate — not the
+threshold — was the blocker.
+
+```
+Layer 1  has a working child (lsp-daemon excluded)   -> real work, keep at any CPU
+Layer 2  no working child, low CPU                   -> idle, harmless, keep
+Layer 3  no working child, high CPU, main thread
+         >=95% parked in kevent64                    -> proven GC spin, reap
+```
+
+No layer is removable. **Layer 1**: a serve awaiting a `jest` child also parks its main
+thread in `kevent64` at ~100%, so "main thread in kevent64" **is not a valid spin test on
+its own** — that judgment nearly killed a serve 40 minutes into a test run. **Layer 3**:
+heavy JS also looks like "no child + high CPU"; only sampling separates GC from JS (a
+100%-CPU `yes` process is correctly spared). Missing or failing `sample` always keeps the
+serve — what cannot be proven is not acted on.
+
+Also fixed: `oc-reaper` no longer reaps agent-gates' own shared serve. `KEEP_PORT`
+defaulted to empty, so with `OC_REVIEW_PORT` unset (the normal case) port 4096 was not
+recognised as protected and the persistent shared serve was reaped as a leak (observed at
+age 38051s).
+
 ### v2.1.0 — the gate stops blocking its own side
 
 Real feedback: with several development lines running in parallel, the gate became the

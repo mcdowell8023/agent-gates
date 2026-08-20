@@ -146,6 +146,50 @@ agent 在 session 内开发时，agent-gates 自动：
 
 ## 新特性
 
+### v2.2.0 — pi 通道 + 三层空转判据
+
+**新增 `pi` 通道，排在 opencode 之前。** 顺序变为
+`paseo → pi → opencode → codex → codebuddy → echo-fallback`。
+
+`pi` 是 one-shot：`--help` 里没有 serve / daemon / port 任何子命令，`-p` 处理完即退出。
+`opencode` 需要常驻 `opencode serve`，而 Paseo 驱动它时**每个 agent 起一个独立 serve**，
+实测 1-1.5GB RSS 且 agent idle 后不回收。实测（审查一个含真 bug 的 JS 文件）：
+
+| 通道 | 耗时 | 峰值 RSS | 跑完残留 |
+|---|---|---|---|
+| pi `github-copilot/gpt-5.4` | 29.9s | 197MB | 零 |
+| pi `volcengine-coding/deepseek-v4-flash` | 12.7s | 216MB | 零 |
+| opencode 共享 serve `:4096`（`--attach`） | — | 619MB 常驻 | 1 个，受 oc-review 管 |
+| opencode Paseo 托管 | — | 1-1.5GB / 个 | 不回收 |
+
+⚠️ 这张表要看清：共享 serve 那一行是**健康**的（3h10m 均值 5% CPU）。烧机器的从来不是
+「用 opencode 审查」，而是**每次调用新起一个 serve**。`oc-review` v1.13.0 的 `--attach`
+已经消掉了 per-run 堆叠——绕过它的调用**跑第一次就漏一个约 1GB 的 serve**，与调用频次无关。
+
+用 `HETERO_PI_MODEL=<provider>/<model>` 配置。**不配则该通道静默让路**、路由完全不变——
+加通道不能悄悄改掉既有安装的路由。
+
+**`oc-reaper` 的空转检测改为 per-serve 三层判定。** 旧门控问 Paseo「有没有任何 opencode
+agent 在 running」，只要有一个，就对**所有** Paseo 托管的 serve 关闭空转检测。现场实测失效：
+一个 running agent 保护了 6 个已废弃的 serve，其中 3 个各烧 52-86% CPU；把
+`OC_REAPER_SPIN_CPU` 降到 30 仍是 `0 reapable`——挡住它的是门控，不是阈值。
+
+```
+层1  有工作子进程（排除 lsp-daemon）        → 在干活，任何 CPU 都保留
+层2  无工作子进程 + CPU 低                  → 空闲无害，保留
+层3  无工作子进程 + CPU 高 + 主线程 ≥95%
+     采样卡在 kevent64                      → 证明是 GC 空转，才清
+```
+
+三层都不能省。**层1 不能省**：等 `jest` 子进程的 serve 主线程同样 100% 卡在 `kevent64`，
+所以「主线程 kevent64 即空转」**单独使用是错的判据**——当天差点据此杀掉一个已跑 40 分钟的
+测试。**层3 不能省**：纯 JS 重计算也符合「无子进程 + 高 CPU」，只有采样能区分 GC 与 JS
+（一个 100% CPU 的 `yes` 进程会被正确放过）。`sample` 缺失或失败一律保留——无法证明就不动手。
+
+同时修复：`oc-reaper` 不再清掉 agent-gates 自己的共享 serve。`KEEP_PORT` 原本默认为空，
+而 `OC_REVIEW_PORT` 平时不设置，于是 4096 没被识别为受保护端口，那个持久共享 serve 被当作
+泄漏回收（实测 age 38051s 被清）。
+
 ### v2.1.0 — 门禁不再卡死自己人
 
 真实反馈：并发开发多条线时，门禁成了阻塞项。一条任务在 verify 上耗了两天，而卡它的三件事**全是 agent-gates 自己的缺陷**。
