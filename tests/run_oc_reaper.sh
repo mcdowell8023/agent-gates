@@ -80,7 +80,7 @@ test_serve_with_attach_client() {
     out=$(OC_REAPER_MIN_AGE=0 OC_REVIEW_PORT="" bash "$REAPER" 2>&1)
     rc=$?
     assert "exit 0" "$([[ $rc -eq 0 ]] && echo true || echo false)"
-    assert "port 9902 NOT listed as reapable" "$(echo "$out" | grep -q ':9902' && echo false || echo true)"
+    assert "port 9902 NOT listed as reapable" "$(echo "$out" | grep -qE '(would reap|reaped) serve :9902' && echo false || echo true)"
     assert "kept count includes it" "$(echo "$out" | grep -q 'kept' && echo true || echo false)"
   )
 }
@@ -95,8 +95,18 @@ test_shared_port_kept() {
     out=$(OC_REAPER_MIN_AGE=0 OC_REVIEW_PORT=9903 bash "$REAPER" 2>&1)
     rc=$?
     assert "exit 0" "$([[ $rc -eq 0 ]] && echo true || echo false)"
-    assert "port 9903 NOT listed as reapable" "$(echo "$out" | grep -q ':9903' && echo false || echo true)"
-    assert "0 reapable" "$(echo "$out" | grep -q '0 reapable' && echo true || echo false)"
+    assert "port 9903 NOT listed as reapable" "$(echo "$out" | grep -qE '(would reap|reaped) serve :9903' && echo false || echo true)"
+    # A global "0 reapable" only holds on a machine with no other opencode serve. Another
+    # session's serve would be reported legitimately, making this assertion flaky (observed
+    # failing 1-in-3 runs). Announce the skip instead of silently weakening it.
+    foreign=$(pgrep -f "opencode serve" 2>/dev/null | while read -r fp; do
+      ps -o command= -p "$fp" 2>/dev/null | grep -q "port 990" || echo x
+    done | wc -l | tr -d ' ')
+    if [[ "$foreign" -gt 0 ]]; then
+      echo "  ⊘ skip '0 reapable' — $foreign non-test opencode serve(s) present"
+    else
+      assert "0 reapable" "$(echo "$out" | grep -q '0 reapable' && echo true || echo false)"
+    fi
   )
 }
 
@@ -110,8 +120,18 @@ test_young_serve_kept() {
     out=$(OC_REAPER_MIN_AGE=999 OC_REVIEW_PORT="" bash "$REAPER" 2>&1)
     rc=$?
     assert "exit 0" "$([[ $rc -eq 0 ]] && echo true || echo false)"
-    assert "port 9904 NOT listed as reapable" "$(echo "$out" | grep -q ':9904' && echo false || echo true)"
-    assert "0 reapable" "$(echo "$out" | grep -q '0 reapable' && echo true || echo false)"
+    assert "port 9904 NOT listed as reapable" "$(echo "$out" | grep -qE '(would reap|reaped) serve :9904' && echo false || echo true)"
+    # A global "0 reapable" only holds on a machine with no other opencode serve. Another
+    # session's serve would be reported legitimately, making this assertion flaky (observed
+    # failing 1-in-3 runs). Announce the skip instead of silently weakening it.
+    foreign=$(pgrep -f "opencode serve" 2>/dev/null | while read -r fp; do
+      ps -o command= -p "$fp" 2>/dev/null | grep -q "port 990" || echo x
+    done | wc -l | tr -d ' ')
+    if [[ "$foreign" -gt 0 ]]; then
+      echo "  ⊘ skip '0 reapable' — $foreign non-test opencode serve(s) present"
+    else
+      assert "0 reapable" "$(echo "$out" | grep -q '0 reapable' && echo true || echo false)"
+    fi
   )
 }
 
@@ -142,7 +162,17 @@ test_no_processes() {
     out=$(OC_REAPER_MIN_AGE=0 OC_REVIEW_PORT="" bash "$REAPER" 2>&1)
     rc=$?
     assert "exit 0" "$([[ $rc -eq 0 ]] && echo true || echo false)"
-    assert "0 reapable" "$(echo "$out" | grep -q '0 reapable' && echo true || echo false)"
+    # A global "0 reapable" only holds on a machine with no other opencode serve. Another
+    # session's serve would be reported legitimately, making this assertion flaky (observed
+    # failing 1-in-3 runs). Announce the skip instead of silently weakening it.
+    foreign=$(pgrep -f "opencode serve" 2>/dev/null | while read -r fp; do
+      ps -o command= -p "$fp" 2>/dev/null | grep -q "port 990" || echo x
+    done | wc -l | tr -d ' ')
+    if [[ "$foreign" -gt 0 ]]; then
+      echo "  ⊘ skip '0 reapable' — $foreign non-test opencode serve(s) present"
+    else
+      assert "0 reapable" "$(echo "$out" | grep -q '0 reapable' && echo true || echo false)"
+    fi
     assert "no negative kept" "$(echo "$out" | grep -qE '[0-9]+ kept' && echo true || echo false)"
   )
 }
@@ -162,7 +192,7 @@ test_mixed_multiple() {
     rc=$?
     assert "exit 0" "$([[ $rc -eq 0 ]] && echo true || echo false)"
     assert "orphan 9907 listed as reapable" "$(echo "$out" | grep -q '\[dry-run\].*:9907' && echo true || echo false)"
-    assert "client-attached 9908 NOT listed" "$(echo "$out" | grep -q ':9908' && echo false || echo true)"
+    assert "client-attached 9908 NOT listed" "$(echo "$out" | grep -qE '(would reap|reaped) serve :9908' && echo false || echo true)"
     assert "1 reapable" "$(echo "$out" | grep -q '1 reapable' && echo true || echo false)"
     assert "at least 1 kept" "$(echo "$out" | grep -qE '[1-9][0-9]* kept' && echo true || echo false)"
   )

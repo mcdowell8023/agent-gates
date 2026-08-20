@@ -11,9 +11,31 @@
 #   - it has NO active client: no ESTABLISHED TCP conn (lsof) AND no matching
 #     `opencode run ... <port>` process
 #
+# Also reaps, regardless of age, a serve that is SPINNING. Three layers, all required:
+#   1. no child process doing real work (lsp-daemon excluded — it is always there)
+#   2. sustained CPU above OC_REAPER_SPIN_CPU, measured by two cputime samples
+#   3. main thread parked in kevent64 for >= OC_REAPER_SPIN_IDLE_PCT of a `sample` run,
+#      proving the CPU is going to GC rather than to JS
+#
+# What this catches: under memory pressure the Bun/JSC GC threads (libpas scavenger plus
+# the Heap Helper threads) burn whole cores rescanning a swapped-out heap while the main
+# thread sits idle. Observed twice on 2026-08-20 — first 3 serves at 100%+ each, later 7
+# serves of which one reached 317% with a 1.4 GB heap. Neither age nor the connection
+# check sees any of it.
+#
+# Why all three layers: layer 1 cannot be skipped, because a serve legitimately waiting on
+# a spawned child (jest, tsc) also parks its main thread in kevent64 at ~100% — judging by
+# the main thread alone would kill working serves. Layer 3 cannot be skipped either,
+# because a serve doing heavy pure-JS work has no children and high CPU, and would
+# otherwise look identical to a spinner.
+#
 # DEFAULT DRY-RUN (lists what it would do). Pass --apply to actually kill.
 # opencode serve ignores SIGTERM, so this uses SIGKILL (confirmed empirically).
-# Env: OC_REAPER_MIN_AGE (default 120), OC_REVIEW_PORT (shared port to always keep).
+# Env: OC_REAPER_MIN_AGE (default 120), OC_REAPER_MAX_AGE (default 7200),
+#      OC_REAPER_SPIN_CPU (default 80, percent; 0 disables spin detection),
+#      OC_REAPER_SPIN_WINDOW (default 2, cputime sample seconds),
+#      OC_REAPER_SPIN_IDLE_PCT (default 95), OC_REAPER_SPIN_SAMPLE_SECS (default 2),
+#      OC_REVIEW_PORT (shared port to always keep).
 # Source: https://github.com/mcdowell8023/agent-gates
 set -uo pipefail
 
@@ -23,7 +45,19 @@ MIN_AGE="${OC_REAPER_MIN_AGE:-120}"
 # Past this age a serve with no `opencode run` client is a leak, even if something is still
 # connected to it (see the in-use check below for why that signal cannot be trusted alone).
 MAX_AGE="${OC_REAPER_MAX_AGE:-7200}"
-KEEP_PORT="${OC_REVIEW_PORT:-}"
+# Must mirror lib/hetero/serve.sh:9 exactly — same variable order, same 4096 fallback.
+# That library manages a *persistent* shared serve whose whole purpose is to eliminate
+# per-run stacking, and its port defaults to 4096 when neither var is set. This line
+# previously defaulted to empty, so with OC_REVIEW_PORT unset (the normal case) the
+# reaper did not recognise 4096 as protected and killed the shared serve as a leak —
+# observed 2026-08-20, reaped at age 38051s. The two components were fighting.
+KEEP_PORT="${OC_SERVE_PORT:-${OC_REVIEW_PORT:-4096}}"
+# A spinning serve burns a full core; 80% clears normal jitter. 0 disables the check.
+SPIN_CPU="${OC_REAPER_SPIN_CPU:-80}"
+SPIN_WINDOW="${OC_REAPER_SPIN_WINDOW:-2}"
+# Main thread must be this idle (percent of samples in kevent64) to call it GC spin.
+SPIN_IDLE_PCT="${OC_REAPER_SPIN_IDLE_PCT:-95}"
+SPIN_SAMPLE_SECS="${OC_REAPER_SPIN_SAMPLE_SECS:-2}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${SCRIPT_DIR}/../lib/hetero/dispatch.sh" ]]; then
@@ -46,15 +80,93 @@ etime_to_secs() {
   echo $(( 10#${d:-0}*86400 + 10#${h:-0}*3600 + 10#${m:-0}*60 + 10#${s:-0} ))
 }
 
+# CPU time in centiseconds from `ps -o time=`. macOS prints MM:SS.CC (minutes can exceed
+# 60 — pid 1 shows e.g. 61:06.25); Linux and long-lived procs may print HH:MM:SS.
+cputime_cs() {
+  local t="${1// /}" a b c sec cs
+  [[ -z "$t" ]] && { echo 0; return; }
+  IFS=: read -r a b c <<< "$t"
+  if [[ -n "${c:-}" ]]; then
+    sec="${c%%.*}"; cs="${c#*.}"; [[ "$cs" == "$c" ]] && cs=0
+    echo $(( 10#${a:-0}*360000 + 10#${b:-0}*6000 + 10#${sec:-0}*100 + 10#${cs:-0} ))
+  else
+    sec="${b%%.*}"; cs="${b#*.}"; [[ "$cs" == "$b" ]] && cs=0
+    echo $(( 10#${a:-0}*6000 + 10#${sec:-0}*100 + 10#${cs:-0} ))
+  fi
+}
+
+# Instantaneous CPU percent over SPIN_WINDOW seconds. `ps -o pcpu=` is a lifetime
+# average and would report ~0 for a process that idled for hours and only just started
+# spinning, so it cannot be used here — two cputime samples are required.
+spin_cpu_pct() {
+  local pid="$1" t1 t2
+  t1=$(cputime_cs "$(ps -o time= -p "$pid" 2>/dev/null)")
+  sleep "$SPIN_WINDOW"
+  t2=$(cputime_cs "$(ps -o time= -p "$pid" 2>/dev/null)")
+  [[ "$t2" -lt "$t1" ]] && { echo 0; return; }   # pid reused / gone
+  echo $(( (t2 - t1) / SPIN_WINDOW ))
+}
+
+# Does this serve have a child process doing real work? lsp-daemon does not count — it is
+# the serve's own long-lived helper and is present while the serve spins too. What proves
+# real work is a spawned tool process (jest / tsc / git / ...).
+#
+# This replaced an earlier gate that asked Paseo whether any opencode agent was running.
+# That gate was too coarse and failed in production on 2026-08-20: one running agent
+# protected six abandoned serves, and the reaper reported "0 reapable, 7 kept" while three
+# serves burned 130-158% CPU each.
+serve_has_working_children() {
+  local pid="$1" c
+  while IFS= read -r c; do
+    [[ -z "$c" ]] && continue
+    case "$(ps -o command= -p "$c" 2>/dev/null)" in
+      *lsp-daemon*) ;;
+      "")           ;;
+      *)            return 0 ;;
+    esac
+  done < <(pgrep -P "$pid" 2>/dev/null)
+  return 1
+}
+
+# Is the main thread parked in kevent64 instead of executing JS? This is what separates
+# "GC spinning on a swapped-out heap" from "legitimately burning CPU in JS".
+#
+# Checked ONLY for a serve that already has no working children and high CPU, so the
+# sampling cost is paid in the rare case. Note the inverse is NOT a valid test on its own:
+# a serve waiting on a child (e.g. jest) also parks in kevent64 at ~100%, which is exactly
+# why serve_has_working_children must be consulted first.
+serve_main_thread_idle() {
+  local pid="$1" tmp tot kev
+  command -v sample >/dev/null 2>&1 || return 1   # no sample -> cannot prove -> keep
+  tmp=$(mktemp -t oc-reaper-sample) || return 1
+  # `sample` also echoes the report to stdout and leaves its own file behind; -f keeps it
+  # contained so we can delete it.
+  if ! sample "$pid" "$SPIN_SAMPLE_SECS" -f "$tmp" >/dev/null 2>&1; then
+    rm -f "$tmp"; return 1
+  fi
+  tot=$(grep -oE "^ *[0-9]+ Thread_[0-9]+ +DispatchQueue_1" "$tmp" | grep -oE "[0-9]+" | head -1)
+  kev=$(grep -oE "[0-9]+ kevent64" "$tmp" | grep -oE "^[0-9]+" | sort -rn | head -1)
+  rm -f "$tmp"
+  [[ -z "$tot" || -z "$kev" ]] && return 1
+  [[ "$tot" -eq 0 ]] && return 1
+  [[ $(( kev * 100 / tot )) -ge "$SPIN_IDLE_PCT" ]]
+}
+
 reaped=0
 kept=0
 while IFS= read -r pid; do
   [[ -z "$pid" ]] && continue
+  reason="no client"
   cmd=$(ps -o command= -p "$pid" 2>/dev/null) || continue
   port=$(printf '%s' "$cmd" | grep -oE 'port [0-9]+' | awk '{print $2}')
   [[ -z "$port" ]] && continue
-  if [[ -n "$KEEP_PORT" && "$port" == "$KEEP_PORT" ]]; then kept=$((kept+1)); continue; fi
   age=$(etime_to_secs "$(ps -o etime= -p "$pid" 2>/dev/null)")
+  if [[ -n "$KEEP_PORT" && "$port" == "$KEEP_PORT" ]]; then
+    # Say so rather than counting it silently: its lifecycle belongs to oc-review, so if
+    # it ever wedges or spins, the reaper will not touch it and the user needs to know.
+    [[ "$APPLY" -eq 0 ]] && echo "[keep] shared serve :$port pid=$pid (managed by oc-review, age ${age}s)"
+    kept=$((kept+1)); continue
+  fi
   if [[ "$age" -lt "$MIN_AGE" ]]; then kept=$((kept+1)); continue; fi
   # In-use? A real client is an `opencode run`, and that is checked first — it keeps the
   # serve at any age.
@@ -68,14 +180,30 @@ while IFS= read -r pid; do
   # whether some parent or socket still exists. So a connection only protects a young
   # serve; past OC_REAPER_MAX_AGE it is treated as a leak.
   if [[ "$age" -lt "$MAX_AGE" ]] && lsof -nP -iTCP:"$port" -sTCP:ESTABLISHED >/dev/null 2>&1; then
-    kept=$((kept+1)); continue
+    # Young + connected is normally kept. But a serve can also burn a full core while
+    # doing nothing at all (GC spinning on a swapped-out heap), and neither signal sees
+    # that. If spinning is provable-safe to act on, fall through to reap.
+    # Layer 1: a spawned tool process means real work — keep at any age, any CPU.
+    if [[ "$SPIN_CPU" -le 0 ]] || serve_has_working_children "$pid"; then
+      kept=$((kept+1)); continue
+    fi
+    # Layer 2: no working children, but low CPU — idle and harmless, keep.
+    spin=$(spin_cpu_pct "$pid")
+    if [[ "$spin" -lt "$SPIN_CPU" ]]; then
+      kept=$((kept+1)); continue
+    fi
+    # Layer 3: no working children AND high CPU — prove it is GC spin, not JS work.
+    if ! serve_main_thread_idle "$pid"; then
+      kept=$((kept+1)); continue
+    fi
+    reason="spinning ${spin}% CPU in GC, no working children"
   fi
   # orphan
   if [[ "$APPLY" -eq 1 ]]; then
     reap_pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
-    hetero_kill_tree "${reap_pgid:-$pid}" 0 2>/dev/null && echo "reaped serve :$port pid=$pid (age ${age}s)"
+    hetero_kill_tree "${reap_pgid:-$pid}" 0 2>/dev/null && echo "reaped serve :$port pid=$pid (age ${age}s, ${reason})"
   else
-    echo "[dry-run] would reap serve :$port pid=$pid (age ${age}s, no client)"
+    echo "[dry-run] would reap serve :$port pid=$pid (age ${age}s, ${reason})"
   fi
   reaped=$((reaped+1))
 done < <(pgrep -f "opencode serve")
