@@ -116,7 +116,13 @@ hetero_load_config() {
   _hetero_resolve HETERO_COOLDOWN_S      lifecycle.cooldown_s           lifecycle.cooldown_s           "$_HETERO_DEFAULT_COOLDOWN_S"
   # Same model the review side uses, so verify and review stay on one configured reviewer.
   _hetero_resolve      HETERO_OC_MODEL   hetero_models.primary  review_models.primary  "$_HETERO_DEFAULT_OC_MODEL"
+  # pi channel model — deliberately NO default. An unconfigured pi channel must step aside
+  # so that adding it cannot silently re-route existing installs. Resolved from
+  # pi_models.primary only; it must NOT fall back to review_models.primary, which would
+  # auto-enable pi for everyone who already configured a reviewer.
+  _hetero_resolve      HETERO_PI_MODEL   pi_models.primary      pi_models.primary      ""
   _hetero_resolve_chan HETERO_CHAN_PASEO     paseo
+  _hetero_resolve_chan HETERO_CHAN_PI        pi
   _hetero_resolve_chan HETERO_CHAN_OPENCODE  opencode
   _hetero_resolve_chan HETERO_CHAN_CODEX     codex
   _hetero_resolve_chan HETERO_CHAN_CODEBUDDY codebuddy

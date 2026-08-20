@@ -279,11 +279,11 @@ _hetero_gen_verify_run_id() {
 # ---------------------------------------------------------------------------
 # hetero_dispatch <role> <prompt> [supervised]
 #
-# Five-channel dispatch:
-#   paseo → opencode (fail-closed) → codex → codebuddy → echo-fallback
+# Six-channel dispatch:
+#   paseo → pi → opencode (fail-closed) → codex → codebuddy → echo-fallback
 #
 # Sets globals after dispatch:
-#   HETERO_DISPATCH_CHANNEL       — channel used (paseo/opencode/codex/codebuddy/exhausted)
+#   HETERO_DISPATCH_CHANNEL       — channel used (paseo/pi/opencode/codex/codebuddy/exhausted)
 #   HETERO_DISPATCH_CAPABILITY    — FULL or EVIDENCE_ONLY
 #   HETERO_DISPATCH_VERIFY_RUN_ID — unique ID for this dispatch run
 #   HETERO_DISPATCH_DISPATCH_JSON — path to the dispatch artifact JSON
@@ -358,7 +358,47 @@ hetero_dispatch() {
     fi
   fi
 
-  # --- Channel 2: opencode (fail-closed) ---
+  # --- Channel 2: pi (one-shot; preferred over opencode) ---
+  # pi has no serve/daemon/port subcommand at all — `-p` processes the prompt and exits,
+  # measured at ~200MB peak RSS with zero residue. opencode needs a long-lived
+  # `opencode serve`, and when Paseo drives it every agent gets its OWN: measured at
+  # 1-1.5GB RSS each and not reclaimed when the agent goes idle. On 2026-08-20 three such
+  # serves were burning 52-86% CPU with no work in flight, on a machine down to 70MB free.
+  # That is why pi is tried first.
+  if [[ "$channel" == "exhausted" ]]; then
+    local pi_bin="${HETERO_BIN_PI:-pi}"
+    local pi_model="${HETERO_PI_MODEL:-}"
+    if [[ "${HETERO_CHAN_PI:-1}" != "1" ]]; then
+      :  # explicitly disabled
+    elif [[ -z "$pi_model" ]]; then
+      # Not configured -> step aside quietly. Adding a channel must not change existing
+      # routing, so with no model set opencode handles this exactly as before. (Note the
+      # contrast with the empty-HETERO_OC_MODEL bug: there an unset model produced
+      # `opencode run -m ""`, which HANGS rather than failing fast. Skipping is the fix.)
+      :
+    elif [[ "$pi_model" != */* ]]; then
+      echo "hetero: skipping pi channel — HETERO_PI_MODEL='$pi_model' has no provider prefix. Use '<provider>/<model>', e.g. github-copilot/gpt-5.4 or volcengine-coding/deepseek-v4-flash." >&2
+    elif command -v "$pi_bin" >/dev/null 2>&1; then
+      if _hetero_check_breaker "pi/${role}"; then
+        local pi_provider="${pi_model%%/*}" pi_id="${pi_model#*/}"
+        hetero_register_spawn "pi/${role}" 0 0
+        # Same contract as the opencode channel: stdout lands in the evidence file.
+        if hetero_spawn_pg bash -c \
+          '"$1" -p --provider "$2" --model "$3" "$4" >"$5" 2>/dev/null' \
+          -- "$pi_bin" "$pi_provider" "$pi_id" "$prompt" "$evidence_path"; then
+          channel="pi"
+          capability="EVIDENCE_ONLY"
+          agent_pid="${HETERO_LAST_ROOT_PID:-}"
+          agent_pgid="${HETERO_LAST_PGID:-}"
+          hetero_register_spawn "pi/${role}" "${agent_pid}" "${agent_pgid:-$agent_pid}"
+        else
+          echo "spawn failed for pi/${role}" >&2
+        fi
+      fi
+    fi
+  fi
+
+  # --- Channel 3: opencode (fail-closed) ---
   if [[ "$channel" == "exhausted" ]]; then
     local oc_bin="${HETERO_BIN_OPENCODE:-opencode}"
     # v2.1.0: an empty model is worse than a missing binary. `opencode run -m ""` does not
@@ -399,7 +439,7 @@ hetero_dispatch() {
     fi
   fi
 
-  # --- Channel 3: codex ---
+  # --- Channel 4: codex ---
   if [[ "$channel" == "exhausted" ]]; then
     local codex_bin="${HETERO_BIN_CODEX:-codex}"
     if [[ "${HETERO_CHAN_CODEX:-1}" == "1" ]] && command -v "$codex_bin" >/dev/null 2>&1; then
@@ -420,7 +460,7 @@ hetero_dispatch() {
     fi
   fi
 
-  # --- Channel 4: codebuddy ---
+  # --- Channel 5: codebuddy ---
   if [[ "$channel" == "exhausted" ]]; then
     local codebuddy_bin="${HETERO_BIN_CODEBUDDY:-codebuddy}"
     if [[ "${HETERO_CHAN_CODEBUDDY:-1}" == "1" ]] && command -v "$codebuddy_bin" >/dev/null 2>&1; then
