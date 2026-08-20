@@ -144,8 +144,19 @@ serve_main_thread_idle() {
   if ! sample "$pid" "$SPIN_SAMPLE_SECS" -f "$tmp" >/dev/null 2>&1; then
     rm -f "$tmp"; return 1
   fi
-  tot=$(grep -oE "^ *[0-9]+ Thread_[0-9]+ +DispatchQueue_1" "$tmp" | grep -oE "[0-9]+" | head -1)
-  kev=$(grep -oE "[0-9]+ kevent64" "$tmp" | grep -oE "^[0-9]+" | sort -rn | head -1)
+  # Both numbers must come from the MAIN thread's section. `sample` reports per-thread
+  # sections; taking the max kevent64 across the whole report while tot comes from the main
+  # thread alone mixes numerator and denominator — another thread parked in kevent64 would
+  # inflate the ratio and could report "idle" while the main thread executes JS, reaping
+  # real work (found by cross-review 2026-08-20).
+  local main_sec
+  main_sec=$(awk '
+    /Thread_[0-9]+[[:space:]]+DispatchQueue_1/ { inmain=1; print; next }
+    inmain && /^[[:space:]]*[0-9]+[[:space:]]+Thread_[0-9]+/ { inmain=0 }
+    inmain { print }
+  ' "$tmp")
+  tot=$(printf '%s\n' "$main_sec" | grep -oE "^ *[0-9]+ Thread_[0-9]+ +DispatchQueue_1" | grep -oE "[0-9]+" | head -1)
+  kev=$(printf '%s\n' "$main_sec" | grep -oE "[0-9]+ kevent64" | grep -oE "^[0-9]+" | sort -rn | head -1)
   rm -f "$tmp"
   [[ -z "$tot" || -z "$kev" ]] && return 1
   [[ "$tot" -eq 0 ]] && return 1

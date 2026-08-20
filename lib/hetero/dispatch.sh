@@ -376,8 +376,11 @@ hetero_dispatch() {
       # contrast with the empty-HETERO_OC_MODEL bug: there an unset model produced
       # `opencode run -m ""`, which HANGS rather than failing fast. Skipping is the fix.)
       :
-    elif [[ "$pi_model" != */* ]]; then
-      echo "hetero: skipping pi channel — HETERO_PI_MODEL='$pi_model' has no provider prefix. Use '<provider>/<model>', e.g. github-copilot/gpt-5.4 or volcengine-coding/deepseek-v4-flash." >&2
+    elif [[ "$pi_model" != */* || -z "${pi_model%%/*}" || -z "${pi_model#*/}" ]]; then
+      # A slash alone is not enough. 'github-copilot/' and '/gpt-5.4' both satisfy `*/*`
+      # yet leave one side empty, producing `--model ""` or `--provider ""` — the very
+      # empty-flag hang this guard exists to prevent (found by cross-review 2026-08-20).
+      echo "hetero: skipping pi channel — HETERO_PI_MODEL='$pi_model' is not a valid '<provider>/<model>' pair (both sides must be non-empty), e.g. github-copilot/gpt-5.4 or volcengine-coding/deepseek-v4-flash." >&2
     elif command -v "$pi_bin" >/dev/null 2>&1; then
       if _hetero_check_breaker "pi/${role}"; then
         local pi_provider="${pi_model%%/*}" pi_id="${pi_model#*/}"

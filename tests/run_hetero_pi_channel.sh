@@ -148,6 +148,24 @@ echo "P4: HETERO_PI_MODEL 缺 provider 前缀 → 跳过并报错（不猜）"
   rm -rf "$fd" "$HETERO_LOCK_DIR"; teardown_mock_repo
 )
 
+# P4b: a slash is not enough — an empty provider or model must also be rejected.
+# `github-copilot/` passes `!= */*` yet yields `--model ""`, which is exactly the
+# empty-flag hang the guard exists to prevent (found by cross-review, 2026-08-20).
+echo "P4b: provider 或 model 为空 → 跳过并报错"
+for bad in "github-copilot/" "/gpt-5.4" "/"; do
+(
+  setup_mock_repo; source_dispatch
+  prep ok; fd="$FAKE_DIR"
+  export HETERO_PI_MODEL="$bad"
+  export HETERO_OC_MODEL="github-copilot/gpt-5.5"
+  hetero_dispatch "reviewer" "test prompt" 0 2>"$fd/err.txt" >/dev/null
+  err=$(cat "$fd/err.txt" 2>/dev/null)
+  assert "HETERO_PI_MODEL='$bad' → 落回 opencode (实际 ${HETERO_DISPATCH_CHANNEL:-})" "$([[ "${HETERO_DISPATCH_CHANNEL:-}" == "opencode" ]] && echo true || echo false)"
+  assert "HETERO_PI_MODEL='$bad' → stderr 说明原因" "$([[ "$err" == *"pi"* ]] && echo true || echo false)"
+  rm -rf "$fd" "$HETERO_LOCK_DIR"; teardown_mock_repo
+)
+done
+
 # P5: explicit disable
 echo "P5: HETERO_CHAN_PI=0 → 显式禁用"
 (

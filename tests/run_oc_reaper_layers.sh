@@ -51,11 +51,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 kev="${FAKE_SAMPLE_KEV:-2231}"
+other="${FAKE_SAMPLE_OTHER_KEV:-0}"
 [[ -z "$out" ]] && exit 0
+# Mirrors the real report shape: per-thread sections. A second thread is emitted so the
+# parser cannot mix one thread's kevent64 count with another thread's sample total.
 cat > "$out" <<INNER
 Analysis of sampling fake-serve (process 1) written to file
     2307 Thread_1   DispatchQueue_1
       $kev kevent64  (in libsystem_kernel.dylib)
+    900 Thread_2
+      $other kevent64  (in libsystem_kernel.dylib)
 INNER
 exit 0
 EOF
@@ -116,8 +121,10 @@ assert_fake_up() {
 }
 
 run_reaper() { PATH="$FAKEBIN:$PATH" OC_REAPER_MIN_AGE=0 OC_REAPER_SPIN_WINDOW=1 \
+  OC_REAPER_SPIN_CPU="${OC_REAPER_SPIN_CPU:-20}" \
   OC_REAPER_SPIN_SAMPLE_SECS=1 \
   FAKE_SAMPLE_KEV="${FAKE_SAMPLE_KEV:-2231}" FAKE_SAMPLE_FAIL="${FAKE_SAMPLE_FAIL:-0}" \
+  FAKE_SAMPLE_OTHER_KEV="${FAKE_SAMPLE_OTHER_KEV:-0}" \
   bash "$REAPER" 2>&1; }
 
 cleanup() {
@@ -191,6 +198,20 @@ assert_fake_up 9916
 out=$(FAKE_SAMPLE_FAIL=1 run_reaper)
 [[ "$out" == *"9916"* && "$out" == *"would reap"* ]] && r=false || r=true
 assert "unprovable spin keeps the serve" "$r"
+kill_last
+
+# L3d: another thread's kevent64 count must NOT be credited to the main thread.
+# Main thread is busy in JS (100/2307 = 4%), while Thread_2 is parked (890/900 = 99%).
+# Taking the max across the whole report would read 890/2307 = 38%... still under 95%, so
+# push Thread_2 above the main thread's total to make the mismatch decisive: 3000/2307
+# would exceed 100% and clear any threshold. Found by cross-review 2026-08-20.
+echo "L3d: 其他线程的 kevent64 不得计入主线程 → 主线程在跑 JS 时必须保留"
+spawn_serve 9917 busy
+sleep 1
+assert_fake_up 9917
+out=$(FAKE_SAMPLE_KEV=100 FAKE_SAMPLE_OTHER_KEV=3000 run_reaper)
+[[ "$out" == *"9917"* && "$out" == *"would reap"* ]] && r=false || r=true
+assert "分子分母不混用（主线程 4% 忙于 JS ⇒ 保留）" "$r"
 kill_last
 
 # KEEP_PORT: shared serve protected even when OC_REVIEW_PORT is unset
