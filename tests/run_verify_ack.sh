@@ -76,15 +76,11 @@ echo "A3: AGENT_MODE=1 且给了 reason → 成功，signed_by: agent，reason �
   teardown_repo
 )
 
-# A4: backward compatibility — an explicit human confirmation keeps the default reason
-echo "A4: ASK_USER_CONFIRMED=1 → 仍算人工确认，可用默认 reason"
-(
-  setup_repo
-  out=$(AGENT_MODE=1 ASK_USER_CONFIRMED=1 bash "$ACK" RUN1 2>&1); rc=$?
-  assert "exit 0 (实际 $rc)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
-  assert "signed_by: human" "$(grep -q '^signed_by: human' .agent/verify/RUN1.ack && echo true || echo false)"
-  teardown_repo
-)
+# A4 was here, asserting that ASK_USER_CONFIRMED=1 kept the default reason. Cross-review
+# on 2026-08-21 (#7) overturned that: ASK_USER_CONFIRMED is itself an env var the agent can
+# set, so exempting it from the reason requirement reopened exactly the path the reason
+# requirement exists to close. The flag now only affects the recorded signed_by value —
+# see A7 (reason still required) and A8 (flag recorded as human).
 
 # A5: the ack must bind the current staged diff and HEAD, or the gate cannot detect staleness
 echo "A5: .ack 绑定当前 staged hash 与 HEAD"
@@ -107,6 +103,25 @@ echo "A6: verify 文档不存在 → 拒绝"
   out=$(env -u AGENT_MODE bash "$ACK" NOSUCH 2>&1); rc=$?
   assert "exit != 0 (实际 $rc)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
   assert "未写出 .ack" "$([[ ! -f .agent/verify/NOSUCH.ack ]] && echo true || echo false)"
+  teardown_repo
+)
+
+# A7: ASK_USER_CONFIRMED is an env var the agent can set itself, so it must not buy a
+# "no reason needed" path. Cross-review 2026-08-21 #7.
+echo "A7: ⛔ ASK_USER_CONFIRMED 不得成为「免 reason」后门"
+(
+  setup_repo
+  out=$(AGENT_MODE=1 ASK_USER_CONFIRMED=1 bash "$ACK" RUN1 2>&1); rc=$?
+  assert "AGENT_MODE 下即使有 ASK_USER_CONFIRMED 也要 reason (rc=$rc)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+  teardown_repo
+)
+
+echo "A8: ASK_USER_CONFIRMED + 显式 reason → 记为 human"
+(
+  setup_repo
+  out=$(AGENT_MODE=1 ASK_USER_CONFIRMED=1 bash "$ACK" RUN1 "user confirmed in chat" 2>&1); rc=$?
+  assert "exit 0 (实际 $rc)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+  assert "signed_by: human" "$(grep -q '^signed_by: human' .agent/verify/RUN1.ack && echo true || echo false)"
   teardown_repo
 )
 

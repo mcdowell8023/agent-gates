@@ -460,11 +460,25 @@ except Exception:
                 _ACK_AGE=$(( _V6_NOW - _ACK_MTIME ))
                 # TTL is configurable: 4h was arbitrary, and under parallel development an
                 # ACK signed before a long build would expire before the commit landed.
+                # Capped, because the variable is readable from the agent's own environment
+                # and an unbounded value would retire the staleness check entirely
+                # (cross-review 2026-08-21 #8).
                 _ACK_TTL="${AGENT_GATES_ACK_TTL:-14400}"
+                [[ "$_ACK_TTL" =~ ^[0-9]+$ ]] || _ACK_TTL=14400
+                [[ "$_ACK_TTL" -gt 86400 ]] && _ACK_TTL=86400
                 if [[ "$_ACK_AGE" -le "$_ACK_TTL" ]] && grep -q 'USER_ACK: PROCEED' "$ACK_FILE" 2>/dev/null; then
                   # Hash binding: if staged_diff_hash is present in .ack, verify it matches
                   # current staged diff (excluding .agent/verify/ to avoid chicken-and-egg).
                   # Missing hash field = old-style .ack without binding, skip check (backward compat).
+                  # Surface who signed. The field is not a permission check — nothing at
+                  # this layer can be — but an agent-signed ACK must not read like a human
+                  # one in the log (cross-review 2026-08-21 #7: the field was written and
+                  # never consumed, making it decorative).
+                  _ACK_SIGNER=$(grep '^signed_by:' "$ACK_FILE" 2>/dev/null | awk '{print $2}' | head -1 || true)
+                  if [[ "$_ACK_SIGNER" == "agent" ]]; then
+                    _ACK_REASON=$(sed -n 's/^reason:[[:space:]]*//p' "$ACK_FILE" 2>/dev/null | head -1)
+                    echo "   ⚠️  ACK signed by agent on the user's behalf — reason: ${_ACK_REASON:-<none>}"
+                  fi
                   _ACK_HASH=$(grep '^staged_diff_hash:' "$ACK_FILE" 2>/dev/null | awk '{print $2}' | head -1 || true)
                   _ACK_HEAD=$(grep '^HEAD:' "$ACK_FILE" 2>/dev/null | awk '{print $2}' | head -1 || true)
                   if [[ -n "$_ACK_HASH" ]]; then

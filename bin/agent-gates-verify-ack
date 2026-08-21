@@ -33,9 +33,12 @@ VERIFY_DIR=".agent/verify"
 # The gate is on HONESTY instead. An agent signing on the user's behalf must say what was
 # authorized, because the default reason would be a false statement. ASK_USER_CONFIRMED=1
 # still means a human confirmed and keeps the default reason.
+# ASK_USER_CONFIRMED is itself an env var the agent can set, so it must NOT buy a
+# "no reason needed" path (cross-review 2026-08-21 #7). Under AGENT_MODE the reason is
+# required either way; the flag only changes what the artifact records about the signer.
 SIGNED_BY=human
-if [[ "${AGENT_MODE:-}" == "1" && "${ASK_USER_CONFIRMED:-}" != "1" ]]; then
-  SIGNED_BY=agent
+if [[ "${AGENT_MODE:-}" == "1" ]]; then
+  [[ "${ASK_USER_CONFIRMED:-}" == "1" ]] || SIGNED_BY=agent
   if [[ $# -lt 2 ]]; then
     echo "$PROG: under AGENT_MODE=1 an explicit reason is required — state what the user authorized." >&2
     echo "  The default reason ('user confirmed') would be untrue when an agent signs." >&2

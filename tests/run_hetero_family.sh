@@ -77,7 +77,7 @@ echo "F7: 也接受直接传族名（调用方已知实施族时不必给 model-
 hetero_families_differ github-copilot/gpt-5.4 anthropic && r=true || r=false
 assert "model-id vs 族名 → 可比" "$r"
 
-echo "F8: 配置可覆盖/新增规则"
+echo "F8: 仓库内配置可新增未知族，但不得改写内置"
 (
   TMPD=$(mktemp -d)
   mkdir -p "$TMPD/.agent"
@@ -87,7 +87,37 @@ JSON
   cd "$TMPD"
   _HETERO_FAMILY_CACHE=""   # force re-read
   eq "新增规则 acme-1" "$(hetero_model_family acme-1)" acme
-  eq "覆盖内置 gpt-*"  "$(hetero_model_family gpt-5.4)" acme-openai-fork
+  # 仓库内配置不得改写内置族——这正是 cross-review #3 堵掉的绕过（见 F9）
+  eq "内置 gpt-* 不被仓库配置改写" "$(hetero_model_family gpt-5.4)" openai
+  cd /; rm -rf "$TMPD"
+)
+
+echo "F9: ⛔ 仓库内配置不得把同族改写成异构（cross-review 2026-08-21 #3）"
+(
+  TMPD=$(mktemp -d); mkdir -p "$TMPD/.agent"
+  # 被审查的 agent 对工作树有写权限。若仓库内配置能覆盖族映射,它只要写一行就能
+  # 把 claude 评审者说成 openai,同族自审直接拿 FULL。
+  cat > "$TMPD/.agent/hetero-check.json" <<'JSON'
+{ "model_families": { "claude-*": "openai" } }
+JSON
+  cd "$TMPD"
+  _HETERO_FAMILY_CACHE=""
+  eq "claude-opus-5 仍是 anthropic（仓库配置不得放宽）" "$(hetero_model_family claude-opus-5)" anthropic
+  _HETERO_FAMILY_CACHE=""
+  hetero_families_differ claude-opus-5 anthropic && r=false || r=true
+  assert "同族仍被判相同（绕过被堵）" "$r"
+  cd /; rm -rf "$TMPD"
+)
+
+echo "F10: 仓库内配置仍可用于「新增未知族」（收紧方向允许）"
+(
+  TMPD=$(mktemp -d); mkdir -p "$TMPD/.agent"
+  cat > "$TMPD/.agent/hetero-check.json" <<'JSON'
+{ "model_families": { "acme-*": "acme" } }
+JSON
+  cd "$TMPD"
+  _HETERO_FAMILY_CACHE=""
+  eq "新增未知模型的族仍生效" "$(hetero_model_family acme-1)" acme
   cd /; rm -rf "$TMPD"
 )
 

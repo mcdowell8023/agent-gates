@@ -22,17 +22,21 @@
 _HETERO_FAMILY_SOURCED=1
 
 _HETERO_FAMILY_CACHE=""
-_HETERO_FAMILY_RULES=""   # newline-separated "<pattern>\t<family>"
+# Two config sources with DIFFERENT trust levels (cross-review 2026-08-21 #3):
+#   TRUSTED — ~/.agent-gates/hetero-check.json, a user-controlled location. May override
+#             built-ins, e.g. to reclassify a vendor fork.
+#   REPO    — .agent/hetero-check.json, inside the work tree the reviewed agent can write.
+#             May only SUPPLY families for ids the built-ins do not recognise; it must not
+#             be able to relabel a known family. Otherwise one line
+#             ({"model_families":{"claude-*":"openai"}}) turns same-family self-review into
+#             "heterogeneous" and buys FULL.
+_HETERO_FAMILY_RULES_TRUSTED=""
+_HETERO_FAMILY_RULES_REPO=""
 
 # Load configured rules once. Uses a newline-separated string rather than an array so this
 # stays safe under `set -u` on macOS's bash 3.2, where empty-array expansion is a trap.
-_hetero_family_load_config() {
-  _HETERO_FAMILY_CACHE="loaded"
-  _HETERO_FAMILY_RULES=""
-  local f
-  for f in ".agent/hetero-check.json" "${HOME}/.agent-gates/hetero-check.json"; do
-    [[ -f "$f" ]] || continue
-    _HETERO_FAMILY_RULES=$(python3 -c '
+_hetero_family_read_rules() {
+  python3 -c '
 import json,sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -43,21 +47,28 @@ if isinstance(mf, dict):
     for k, v in mf.items():
         if k and v:
             print("%s\t%s" % (k, v))
-' "$f" 2>/dev/null) || _HETERO_FAMILY_RULES=""
-    break
-  done
+' "$1" 2>/dev/null || true
 }
 
-# Echo the configured family for an id, or nothing. Returns 1 when no rule matches.
-_hetero_family_from_config() {
-  local id="$1" line pat fam
-  [[ "${_HETERO_FAMILY_CACHE:-}" == "loaded" ]] || _hetero_family_load_config
-  [[ -z "$_HETERO_FAMILY_RULES" ]] && return 1
+_hetero_family_load_config() {
+  _HETERO_FAMILY_CACHE="loaded"
+  _HETERO_FAMILY_RULES_TRUSTED=""
+  _HETERO_FAMILY_RULES_REPO=""
+  local tf="${HOME}/.agent-gates/hetero-check.json"
+  local rf=".agent/hetero-check.json"
+  [[ -f "$tf" ]] && _HETERO_FAMILY_RULES_TRUSTED=$(_hetero_family_read_rules "$tf")
+  [[ -f "$rf" ]] && _HETERO_FAMILY_RULES_REPO=$(_hetero_family_read_rules "$rf")
+}
+
+# Echo the family matched by a rule set, or nothing. Returns 1 when no rule matches.
+_hetero_family_match() {
+  local id="$1" rules="$2" pat fam
+  [[ -z "$rules" ]] && return 1
   while IFS=$'\t' read -r pat fam; do
     [[ -z "$pat" || -z "$fam" ]] && continue
     # Unquoted $pat on purpose — it is a glob such as "acme-*".
     if [[ "$id" == $pat ]]; then printf '%s' "$fam"; return 0; fi
-  done <<< "$_HETERO_FAMILY_RULES"
+  done <<< "$rules"
   return 1
 }
 
@@ -76,7 +87,10 @@ hetero_model_family() {
       echo "$id"; return 0 ;;
   esac
 
-  if fam=$(_hetero_family_from_config "$id"); then
+  [[ "${_HETERO_FAMILY_CACHE:-}" == "loaded" ]] || _hetero_family_load_config
+
+  # Trusted config may override the built-ins.
+  if fam=$(_hetero_family_match "$id" "$_HETERO_FAMILY_RULES_TRUSTED"); then
     echo "$fam"; return 0
   fi
 
@@ -96,7 +110,15 @@ hetero_model_family() {
     llama-*)                                    echo meta ;;
     mistral-*|mixtral-*)                        echo mistral ;;
     hy3*|hunyuan*)                              echo tencent ;;
-    *)                                          echo unknown ;;
+    *)
+      # Only now may the repo-local config speak: it can name a family the built-ins do
+      # not know, but never relabel one they do.
+      if fam=$(_hetero_family_match "$id" "$_HETERO_FAMILY_RULES_REPO"); then
+        echo "$fam"
+      else
+        echo unknown
+      fi
+      ;;
   esac
 }
 
