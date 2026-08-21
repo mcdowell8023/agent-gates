@@ -134,6 +134,30 @@ echo "C7: 未声明实施族时必须明确提示（否则 agent 不知道少了
   rm -rf "$FAKE_DIR" "$HETERO_LOCK_DIR"; teardown_repo
 )
 
+# C8: the implementer family must be configurable, not env-only. Requiring every agent to
+# export it by hand is how it ends up unset — and unset means EVIDENCE_ONLY for every
+# high-risk path, i.e. an ack every time.
+echo "C8: implementer_family 可从配置文件读（不必每个 agent 自己 export）"
+(
+  setup_repo; source_dispatch; mkfakes
+  GD=$(mktemp -d); export AGENT_GATES_DIR="$GD"
+  cat > "$GD/hetero-check.json" <<'JSON'
+{ "implementer_family": "anthropic",
+  "pi_models": { "primary": "volcengine-coding/deepseek-v4-flash" } }
+JSON
+  _HETERO_CONFIG_SOURCED=""; _HETERO_FAMILY_CACHE=""
+  unset HETERO_IMPLEMENTER_FAMILY HETERO_PI_MODEL
+  source "$CONFIG_LIB"; hetero_load_config
+  assert "HETERO_IMPLEMENTER_FAMILY 从配置读到 (实际 '${HETERO_IMPLEMENTER_FAMILY:-}')" \
+    "$([[ "${HETERO_IMPLEMENTER_FAMILY:-}" == anthropic ]] && echo true || echo false)"
+  assert "HETERO_PI_MODEL 从配置读到 (实际 '${HETERO_PI_MODEL:-}')" \
+    "$([[ "${HETERO_PI_MODEL:-}" == volcengine-coding/deepseek-v4-flash ]] && echo true || echo false)"
+  export HETERO_BIN_PASEO=/nonexistent-paseo
+  hetero_dispatch reviewer "p" 0 2>/dev/null
+  assert "仅靠配置即可拿到 FULL (实际 $(cap))" "$([[ "$(cap)" == FULL ]] && echo true || echo false)"
+  rm -rf "$GD" "$FAKE_DIR" "$HETERO_LOCK_DIR"; unset AGENT_GATES_DIR; teardown_repo
+)
+
 echo
 read -r P F < "$RESULTS_FILE"
 echo "=== PASS=$P FAIL=$F ==="

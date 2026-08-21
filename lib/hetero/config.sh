@@ -121,6 +121,10 @@ hetero_load_config() {
   # pi_models.primary only; it must NOT fall back to review_models.primary, which would
   # auto-enable pi for everyone who already configured a reviewer.
   _hetero_resolve      HETERO_PI_MODEL   pi_models.primary      pi_models.primary      ""
+  # The implementer family must be configurable, not env-only. Requiring every agent to
+  # export it by hand is how it ends up unset — and unset means EVIDENCE_ONLY on every
+  # high-risk path, i.e. an ACK every single time. No default: fail-closed stands.
+  _hetero_resolve      HETERO_IMPLEMENTER_FAMILY implementer_family implementer_family ""
   _hetero_resolve_chan HETERO_CHAN_PASEO     paseo
   _hetero_resolve_chan HETERO_CHAN_PI        pi
   _hetero_resolve_chan HETERO_CHAN_OPENCODE  opencode

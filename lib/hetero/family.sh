@@ -10,7 +10,8 @@
 #
 # Rules come from two places with DIFFERENT trust, because one of them is writable by the
 # very agent being reviewed:
-#     ~/.agent-gates/hetero-check.json   user-controlled  → may override the built-ins
+#     $AGENT_GATES_DIR/hetero-check.json user-controlled  → may override the built-ins
+#       (defaults to ~/.agent-gates/)
 #     .agent/hetero-check.json           in the work tree → may only name families for ids
 #                                                            the built-ins do not recognise
 # Format: { "model_families": { "acme-*": "acme" } }
@@ -61,7 +62,10 @@ _hetero_family_load_config() {
   _HETERO_FAMILY_CACHE="loaded"
   _HETERO_FAMILY_RULES_TRUSTED=""
   _HETERO_FAMILY_RULES_REPO=""
-  local tf="${HOME}/.agent-gates/hetero-check.json"
+  # Same location config.sh reads, AGENT_GATES_DIR included — hardcoding $HOME here made
+  # the trusted source unreachable whenever AGENT_GATES_DIR was set.
+  local gd="${AGENT_GATES_DIR:-$HOME/.agent-gates}"
+  local tf="${gd}/hetero-check.json"
   local rf=".agent/hetero-check.json"
   [[ -f "$tf" ]] && _HETERO_FAMILY_RULES_TRUSTED=$(_hetero_family_read_rules "$tf")
   if [[ "${HETERO_FAMILY_NO_REPO_CONFIG:-0}" != "1" && -f "$rf" ]]; then
