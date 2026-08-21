@@ -8,10 +8,17 @@
 # azure/gpt-5.4 are both "openai", volcengine-coding/deepseek-v4-flash and
 # volcengine-chat/deepseek-v4-flash are both "deepseek".
 #
-# Rules can be overridden or extended in .agent/hetero-check.json:
-#     { "model_families": { "acme-*": "acme" } }
-# Configured patterns win over the built-ins, so a vendor fork can be reclassified without
-# touching this file.
+# Rules come from two places with DIFFERENT trust, because one of them is writable by the
+# very agent being reviewed:
+#     ~/.agent-gates/hetero-check.json   user-controlled  → may override the built-ins
+#     .agent/hetero-check.json           in the work tree → may only name families for ids
+#                                                            the built-ins do not recognise
+# Format: { "model_families": { "acme-*": "acme" } }
+#
+# ⚠️ Residual risk, stated rather than hidden: the repo-local source can still claim any id
+# the built-in table misses. That table cannot be exhaustive, so a genuinely known vendor id
+# absent from it remains relabelable. Adding bare/aliased forms as they surface is the only
+# mitigation; set HETERO_FAMILY_NO_REPO_CONFIG=1 to refuse the repo-local source entirely.
 #
 # fail-closed: an unresolvable family can NEVER satisfy "different" (see
 # hetero_families_differ). Otherwise any unrecognised model id would silently pass the
@@ -57,7 +64,9 @@ _hetero_family_load_config() {
   local tf="${HOME}/.agent-gates/hetero-check.json"
   local rf=".agent/hetero-check.json"
   [[ -f "$tf" ]] && _HETERO_FAMILY_RULES_TRUSTED=$(_hetero_family_read_rules "$tf")
-  [[ -f "$rf" ]] && _HETERO_FAMILY_RULES_REPO=$(_hetero_family_read_rules "$rf")
+  if [[ "${HETERO_FAMILY_NO_REPO_CONFIG:-0}" != "1" && -f "$rf" ]]; then
+    _HETERO_FAMILY_RULES_REPO=$(_hetero_family_read_rules "$rf")
+  fi
 }
 
 # Echo the family matched by a rule set, or nothing. Returns 1 when no rule matches.
@@ -97,7 +106,10 @@ hetero_model_family() {
   case "$id" in
     # Bare forms matter: paseo takes `--provider claude/opus`, which strips to "opus".
     claude|claude-*|opus|opus-*|sonnet|sonnet-*|haiku|haiku-*) echo anthropic ;;
-    gpt|gpt-*|o1-*|o3-*|o4-*|codex|codex-*)    echo openai ;;
+    # Bare forms must be listed too: anything the built-ins miss falls through to *),
+    # where repo-local config may name it — so a missing bare form is a relabel hole
+    # (cross-review round 2 found bare o1/o3 exactly this way).
+    gpt|gpt-*|o1|o1-*|o3|o3-*|o4|o4-*|codex|codex-*) echo openai ;;
     gemini-*)                                   echo google ;;
     deepseek-*)                                 echo deepseek ;;
     glm-*)                                      echo zhipu ;;

@@ -39,7 +39,10 @@ VERIFY_DIR=".agent/verify"
 SIGNED_BY=human
 if [[ "${AGENT_MODE:-}" == "1" ]]; then
   [[ "${ASK_USER_CONFIRMED:-}" == "1" ]] || SIGNED_BY=agent
-  if [[ $# -lt 2 ]]; then
+  # Count-of-arguments is not check-of-content: `ack RUN1 ''` satisfies `$# -ge 2` while
+  # ${2:-default} treats the empty string as absent, so the artifact would record the exact
+  # default reason this check exists to forbid (cross-review round 2, 2026-08-21).
+  if [[ $# -lt 2 || -z "${2//[[:space:]]/}" ]]; then
     echo "$PROG: under AGENT_MODE=1 an explicit reason is required — state what the user authorized." >&2
     echo "  The default reason ('user confirmed') would be untrue when an agent signs." >&2
     echo "  e.g. $PROG ${VERIFY_RUN_ID} 'user approved: e2e blocked on deploy, will run right after commit'" >&2

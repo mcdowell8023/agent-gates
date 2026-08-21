@@ -474,11 +474,13 @@ except Exception:
                   # this layer can be — but an agent-signed ACK must not read like a human
                   # one in the log (cross-review 2026-08-21 #7: the field was written and
                   # never consumed, making it decorative).
+                  # Printed UNCONDITIONALLY. Showing it only when signed_by=agent gave the
+                  # agent a hidden switch: ASK_USER_CONFIRMED=1 is env-settable, records
+                  # "human", and the warning disappeared (cross-review round 2, 2026-08-21).
+                  # The field cannot be trusted, so it is surfaced rather than acted on.
                   _ACK_SIGNER=$(grep '^signed_by:' "$ACK_FILE" 2>/dev/null | awk '{print $2}' | head -1 || true)
-                  if [[ "$_ACK_SIGNER" == "agent" ]]; then
-                    _ACK_REASON=$(sed -n 's/^reason:[[:space:]]*//p' "$ACK_FILE" 2>/dev/null | head -1)
-                    echo "   ⚠️  ACK signed by agent on the user's behalf — reason: ${_ACK_REASON:-<none>}"
-                  fi
+                  _ACK_REASON=$(sed -n 's/^reason:[[:space:]]*//p' "$ACK_FILE" 2>/dev/null | head -1)
+                  echo "   ACK: signed_by=${_ACK_SIGNER:-<unset>} — reason: ${_ACK_REASON:-<none>}"
                   _ACK_HASH=$(grep '^staged_diff_hash:' "$ACK_FILE" 2>/dev/null | awk '{print $2}' | head -1 || true)
                   _ACK_HEAD=$(grep '^HEAD:' "$ACK_FILE" 2>/dev/null | awk '{print $2}' | head -1 || true)
                   if [[ -n "$_ACK_HASH" ]]; then

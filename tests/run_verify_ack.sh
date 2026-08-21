@@ -125,6 +125,34 @@ echo "A8: ASK_USER_CONFIRMED + 显式 reason → 记为 human"
   teardown_repo
 )
 
+# A9/A10: counting arguments is not checking content. `ack RUN1 ''` passes `$# -lt 2`
+# while ${2:-default} treats the empty string as absent, so the artifact records the very
+# default reason the check exists to forbid (cross-review round 2, 2026-08-21).
+echo "A9: ⛔ 空 reason 不得通过（数参数个数 ≠ 检查内容）"
+(
+  setup_repo
+  out=$(AGENT_MODE=1 bash "$ACK" RUN1 "" 2>&1); rc=$?
+  assert "空串被拒 (rc=$rc)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+  assert "未写出 .ack" "$([[ ! -f .agent/verify/RUN1.ack ]] && echo true || echo false)"
+  teardown_repo
+)
+
+echo "A10: ⛔ 全空白 reason 也不得通过"
+(
+  setup_repo
+  out=$(AGENT_MODE=1 bash "$ACK" RUN1 "   " 2>&1); rc=$?
+  assert "全空白被拒 (rc=$rc)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+  teardown_repo
+)
+
+echo "A11: ⛔ ASK_USER_CONFIRMED 也不能靠空 reason 绕过"
+(
+  setup_repo
+  out=$(AGENT_MODE=1 ASK_USER_CONFIRMED=1 bash "$ACK" RUN1 "" 2>&1); rc=$?
+  assert "空串被拒 (rc=$rc)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+  teardown_repo
+)
+
 echo
 read -r P F < "$RESULTS_FILE"
 echo "=== PASS=$P FAIL=$F ==="

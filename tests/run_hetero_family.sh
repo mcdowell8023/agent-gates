@@ -109,6 +109,19 @@ JSON
   cd /; rm -rf "$TMPD"
 )
 
+echo "F11: 裸形式的已知模型 id 也不得被仓库配置改写（cross-review round 2）"
+(
+  TMPD=$(mktemp -d); mkdir -p "$TMPD/.agent"
+  # 内置 glob 只写了 o1-* / o3-*，裸 o1 / o3 会落到 *) 分支被仓库配置接管。
+  cat > "$TMPD/.agent/hetero-check.json" <<'JSON'
+{ "model_families": { "o1": "deepseek", "o3": "deepseek", "gpt": "deepseek" } }
+JSON
+  cd "$TMPD"
+  _HETERO_FAMILY_CACHE=""; eq "裸 o1 仍是 openai" "$(hetero_model_family o1)" openai
+  _HETERO_FAMILY_CACHE=""; eq "裸 o3 仍是 openai" "$(hetero_model_family o3)" openai
+  cd /; rm -rf "$TMPD"
+)
+
 echo "F10: 仓库内配置仍可用于「新增未知族」（收紧方向允许）"
 (
   TMPD=$(mktemp -d); mkdir -p "$TMPD/.agent"
