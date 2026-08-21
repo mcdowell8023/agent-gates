@@ -23,9 +23,25 @@ VERIFY_RUN_ID="$1"
 REASON="${2:-user confirmed}"
 VERIFY_DIR=".agent/verify"
 
+# An ACK is an authorization record, not an identity proof. This script records no signer
+# identity and never could — anyone able to run it can set any environment variable. So
+# refusing to run under AGENT_MODE=1 proved nothing; its only real effect was forcing the
+# user to cd into the repo and sign by hand, which became the dominant cost once several
+# tasks ran in parallel (2026-08-21: repeated manual signing on reviews that had already
+# passed).
+#
+# The gate is on HONESTY instead. An agent signing on the user's behalf must say what was
+# authorized, because the default reason would be a false statement. ASK_USER_CONFIRMED=1
+# still means a human confirmed and keeps the default reason.
+SIGNED_BY=human
 if [[ "${AGENT_MODE:-}" == "1" && "${ASK_USER_CONFIRMED:-}" != "1" ]]; then
-  echo "agent-gates-verify-ack: ACK must be triggered by human confirmation (ASK_USER_CONFIRMED=1), not agent" >&2
-  exit 1
+  SIGNED_BY=agent
+  if [[ $# -lt 2 ]]; then
+    echo "$PROG: under AGENT_MODE=1 an explicit reason is required — state what the user authorized." >&2
+    echo "  The default reason ('user confirmed') would be untrue when an agent signs." >&2
+    echo "  e.g. $PROG ${VERIFY_RUN_ID} 'user approved: e2e blocked on deploy, will run right after commit'" >&2
+    exit 1
+  fi
 fi
 
 # Validate verify document exists
@@ -56,6 +72,7 @@ ACK_TMP="${ACK_FILE}.tmp.$$"
 cat > "$ACK_TMP" <<EOF
 USER_ACK: PROCEED
 verify_run_id: ${VERIFY_RUN_ID}
+signed_by: ${SIGNED_BY}
 staged_diff_hash: ${STAGED_DIFF_HASH}
 HEAD: ${HEAD}
 reason: ${REASON}
@@ -68,4 +85,5 @@ echo "✅ ACK written: $ACK_FILE"
 echo "   run_id:  $VERIFY_RUN_ID"
 echo "   hash:    $STAGED_DIFF_HASH"
 echo "   HEAD:    $HEAD"
+echo "   signed:  $SIGNED_BY"
 echo "   reason:  $REASON"

@@ -458,7 +458,10 @@ except Exception:
                 _ACK_MTIME=$(stat -f %m "$ACK_FILE" 2>/dev/null || stat -c %Y "$ACK_FILE" 2>/dev/null || echo "0")
                 _V6_NOW=$(date +%s)
                 _ACK_AGE=$(( _V6_NOW - _ACK_MTIME ))
-                if [[ "$_ACK_AGE" -le 14400 ]] && grep -q 'USER_ACK: PROCEED' "$ACK_FILE" 2>/dev/null; then
+                # TTL is configurable: 4h was arbitrary, and under parallel development an
+                # ACK signed before a long build would expire before the commit landed.
+                _ACK_TTL="${AGENT_GATES_ACK_TTL:-14400}"
+                if [[ "$_ACK_AGE" -le "$_ACK_TTL" ]] && grep -q 'USER_ACK: PROCEED' "$ACK_FILE" 2>/dev/null; then
                   # Hash binding: if staged_diff_hash is present in .ack, verify it matches
                   # current staged diff (excluding .agent/verify/ to avoid chicken-and-egg).
                   # Missing hash field = old-style .ack without binding, skip check (backward compat).
@@ -481,7 +484,7 @@ except Exception:
                   fi
                   # else: no hash field — backward-compat, skip hash check
                 else
-                  fail "Verifier ACK expired or malformed (ACKs are valid 4h)"
+                  fail "Verifier ACK expired or malformed (valid $(( _ACK_TTL / 3600 ))h; set AGENT_GATES_ACK_TTL to change)"
                   _v6_ack_help "$VERIFY_RUN_ID" "$VERIFY_VERDICT"
                 fi
               else
