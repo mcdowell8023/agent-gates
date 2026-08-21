@@ -81,8 +81,9 @@ hetero_model_family() {
   fi
 
   case "$id" in
-    claude-*|opus-*|sonnet-*|haiku-*)          echo anthropic ;;
-    gpt-*|o1-*|o3-*|o4-*|codex-*)              echo openai ;;
+    # Bare forms matter: paseo takes `--provider claude/opus`, which strips to "opus".
+    claude|claude-*|opus|opus-*|sonnet|sonnet-*|haiku|haiku-*) echo anthropic ;;
+    gpt|gpt-*|o1-*|o3-*|o4-*|codex|codex-*)    echo openai ;;
     gemini-*)                                   echo google ;;
     deepseek-*)                                 echo deepseek ;;
     glm-*)                                      echo zhipu ;;

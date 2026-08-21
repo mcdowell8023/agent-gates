@@ -44,6 +44,8 @@ _hetero_ensure_serve() {
 _hetero_ensure_select() {
   if ! declare -f select_effort >/dev/null 2>&1; then
     local sel
+    fam="$(_hetero_dispatch_lib_dir)/family.sh"
+    [[ -f "$fam" ]] && source "$fam"
     sel="$(_hetero_dispatch_lib_dir)/select.sh"
     [[ -f "$sel" ]] && source "$sel"
   fi
@@ -277,6 +279,33 @@ _hetero_gen_verify_run_id() {
 }
 
 # ---------------------------------------------------------------------------
+# _hetero_capability_for <reviewer-model>
+#
+# capability answers exactly one question: did the dispatch layer record a reviewer whose
+# model family PROVABLY differs from the implementer's?
+#
+# It used to answer "was the paseo channel used", which was broken in a way nothing caught:
+# the paseo branch hardcoded `--provider claude/opus`, so the only channel able to award
+# FULL was dispatching a SAME-FAMILY reviewer (the main session is Claude), while pi and
+# opencode — explicitly configured with a heterogeneous model — could never get above
+# EVIDENCE_ONLY. The grading was inverted.
+#
+# ⚠️ This is deliberately NOT a claim that the review text came from that model. Nothing at
+# this layer can establish that, and the old FULL did not either. It records a checkable
+# fact about the dispatch, nothing more.
+#
+# fail-closed: no declared implementer family, or either side unresolvable -> EVIDENCE_ONLY.
+_hetero_capability_for() {
+  local reviewer="${1:-}" implementer="${HETERO_IMPLEMENTER_FAMILY:-}"
+  [[ -z "$implementer" ]] && { echo EVIDENCE_ONLY; return 0; }
+  if declare -f hetero_families_differ >/dev/null 2>&1 \
+     && hetero_families_differ "$reviewer" "$implementer"; then
+    echo FULL
+  else
+    echo EVIDENCE_ONLY
+  fi
+}
+
 # hetero_dispatch <role> <prompt> [supervised]
 #
 # Six-channel dispatch:
@@ -343,11 +372,16 @@ hetero_dispatch() {
     if _hetero_check_breaker "paseo/${role}"; then
       # F2: register-before-spawn — placeholder with PID=0/PGID=0 first
       hetero_register_spawn "paseo/${role}" 0 0
-      if hetero_spawn_pg "$paseo_bin" run --detach --provider claude/opus --mode auto \
+      # Model is configurable. The old hardcoded claude/opus meant this channel dispatched
+      # a same-family reviewer while recording FULL; the default is kept for backward
+      # compatibility, but capability is now decided by family, so the default no longer
+      # earns FULL when the implementer is also Claude.
+      local paseo_model="${HETERO_PASEO_MODEL:-claude/opus}"
+      if hetero_spawn_pg "$paseo_bin" run --detach --provider "$paseo_model" --mode auto \
         --title "hetero-dispatch-${role}" --thinking "$effort" "$prompt" 2>/dev/null; then
         # For paseo, we just mark channel (actual agent startup is async)
         channel="paseo"
-        capability="FULL"
+        capability=$(_hetero_capability_for "$paseo_model")
         agent_pid="${HETERO_LAST_ROOT_PID:-}"
         agent_pgid="${HETERO_LAST_PGID:-}"
         # Update registration with real PID/PGID now that spawn succeeded
@@ -390,7 +424,7 @@ hetero_dispatch() {
           '"$1" -p --provider "$2" --model "$3" "$4" >"$5" 2>/dev/null' \
           -- "$pi_bin" "$pi_provider" "$pi_id" "$prompt" "$evidence_path"; then
           channel="pi"
-          capability="EVIDENCE_ONLY"
+          capability=$(_hetero_capability_for "$pi_model")
           agent_pid="${HETERO_LAST_ROOT_PID:-}"
           agent_pgid="${HETERO_LAST_PGID:-}"
           hetero_register_spawn "pi/${role}" "${agent_pid}" "${agent_pgid:-$agent_pid}"
@@ -428,7 +462,7 @@ hetero_dispatch() {
             '"$1" run --attach "$2" --pure -m "$3" --dir "$4" --format json --variant "$7" "$5" >"$6" 2>/dev/null' \
             -- "$oc_bin" "$OC_SERVE_URL" "$oc_model" "${PWD}" "$prompt" "$evidence_path" "$effort"; then
             channel="opencode"
-            capability="EVIDENCE_ONLY"
+            capability=$(_hetero_capability_for "$oc_model")
             agent_pid="${HETERO_LAST_ROOT_PID:-}"
             agent_pgid="${HETERO_LAST_PGID:-}"
             # Update registration with real PID/PGID
