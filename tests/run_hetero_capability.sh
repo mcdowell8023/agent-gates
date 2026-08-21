@@ -121,6 +121,19 @@ echo "C6: paseo 配异构模型 + 实施族 anthropic → FULL"
   rm -rf "$FAKE_DIR" "$HETERO_LOCK_DIR"; teardown_repo
 )
 
+echo "C7: 未声明实施族时必须明确提示（否则 agent 不知道少了什么）"
+(
+  setup_repo; source_dispatch; mkfakes
+  export HETERO_BIN_PASEO=/nonexistent-paseo
+  export HETERO_PI_MODEL="volcengine-coding/deepseek-v4-flash"
+  unset HETERO_IMPLEMENTER_FAMILY
+  hetero_dispatch reviewer "p" 0 2>"$FAKE_DIR/err.txt" >/dev/null
+  err=$(cat "$FAKE_DIR/err.txt" 2>/dev/null)
+  assert "stderr 提到 HETERO_IMPLEMENTER_FAMILY" "$([[ "$err" == *HETERO_IMPLEMENTER_FAMILY* ]] && echo true || echo false)"
+  assert "stderr 说明异构才是要求（不是某个具体模型）" "$([[ "$err" == *heterogene* || "$err" == *异构* ]] && echo true || echo false)"
+  rm -rf "$FAKE_DIR" "$HETERO_LOCK_DIR"; teardown_repo
+)
+
 echo
 read -r P F < "$RESULTS_FILE"
 echo "=== PASS=$P FAIL=$F ==="

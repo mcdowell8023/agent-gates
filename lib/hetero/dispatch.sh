@@ -523,6 +523,13 @@ hetero_dispatch() {
   # channel stays "exhausted" if nothing else worked
 
   export HETERO_DISPATCH_CHANNEL="$channel"
+  # Say what is missing rather than silently downgrading. Which specific model reviews is
+  # the caller's choice — the tool only checks that the families differ, so it cannot guess
+  # the implementer side and must be told.
+  if [[ "$capability" == "EVIDENCE_ONLY" && "$channel" != "exhausted" && -z "${HETERO_IMPLEMENTER_FAMILY:-}" ]]; then
+    echo "hetero: capability=EVIDENCE_ONLY because HETERO_IMPLEMENTER_FAMILY is unset. Declare the implementing model family (e.g. HETERO_IMPLEMENTER_FAMILY=anthropic) so the heterogeneity check can run. Heterogeneity is the requirement; picking the specific reviewer model is up to you." >&2
+  fi
+
   export HETERO_DISPATCH_CAPABILITY="$capability"
 
   # Wall-clock watcher for successfully spawned channels

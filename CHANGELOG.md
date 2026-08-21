@@ -2,6 +2,82 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.3.0 — 审查不再是卡点
+
+起因是真实反馈：「每天没有一个 agent 能跑过，开发不是卡点，审查才是卡点」。
+查下来是**五环死锁**，每一环单看都合理：
+
+```
+① 审查真的 PASS 了
+② 通道给的 capability=EVIDENCE_ONLY
+③ gate：high-risk + EVIDENCE_ONLY + PASS → 强制改写成 INCOMPLETE
+④ INCOMPLETE 要 USER_ACK
+⑤ verify-ack 在 AGENT_MODE=1 时硬性 exit 1
+⇒ 用户手工签
+```
+
+### Fixed — capability 的评级是反的
+
+`capability` 此前回答「有没有走 paseo 通道」，而 paseo 分支**硬编码
+`--provider claude/opus`**。主会话本身就是 Claude ⇒ **唯一能拿 FULL 的通道
+派的是同族评审（自审）**；而 pi / opencode 明确配了异构模型，永远只能拿
+EVIDENCE_ONLY。它还与 `_paseo_verify_agent`（要求被核实 agent 的 `Provider`
+非 claude）自相矛盾——dispatch 派的就是 claude，所以 paseo 的 FULL 从来没
+真正работ过。
+
+现在只回答一个问题：**dispatch 层是否记录了一个模型族可证不同于实施族的评审方**。
+三个通道共用 `_hetero_capability_for`。
+
+⚠️ 边界写清楚：这**不是**「审查正文出自该模型」的证明——这一层无法证明，旧的
+FULL 也没有。它记录一个可核对的派发事实。
+
+### Fixed — ack 门控从「谁签的」改成「是否如实」
+
+`verify-ack` 不记录、也无法记录签署者身份（能运行它的人就能设任何环境变量），
+所以卡 `ASK_USER_CONFIRMED` 没有证明力，只换来用户必须亲手签。v2.1.0 的文档
+已改口径说「agent 可以代跑 ack」，**但代码里这道拦截一直在**。
+
+- `AGENT_MODE=1` 且无 `ASK_USER_CONFIRMED` ⇒ 必须显式给 reason，因为默认
+  reason（"user confirmed"）在 agent 代签时是假话
+- `.ack` 新增 `signed_by: human|agent`，产物自己说清
+- ack 时效改为可配（`AGENT_GATES_ACK_TTL`，默认仍 14400）
+
+### Added — 异构判定改为族级，不绑任何具体 provider
+
+新增 `lib/hetero/family.sh`。provider 会变（opencode 要卸载、订阅会换、新厂商
+会加），不变的只有「评审族 ≠ 实施族」。
+
+- 解析前剥掉 provider 前缀：族是模型的属性，不是谁在提供它。
+  `github-copilot/gpt-5.4` 与 `azure/gpt-5.4` 同为 openai；
+  `volcengine-coding/deepseek-v4-flash` 与 `volcengine-chat/…` 同为 deepseek
+- 内置 14 个族的规则，可在 `.agent/hetero-check.json` 的 `model_families`
+  覆盖或新增（配置优先于内置）
+- 新增 `HETERO_IMPLEMENTER_FAMILY`（调用方声明实施族）、`HETERO_PASEO_MODEL`
+  （paseo 通道模型可配，默认仍 claude/opus）
+- ⛔ fail-closed：族解析不出来时永远不满足「不同」。否则任何不认识的 model id
+  都能静默通过异构要求
+
+### 选型口径：工具只校验异构，具体模型交给调用方
+
+工具**不推荐、也不硬编码**任何特定模型。原则是：优先 gpt-5.5 及以上；没有就用
+任何满足异构的模型；`deepseek-v4-flash` 性价比很高，推荐使用，**前提是先过异构
+校验**。capability 降级时会明确打印缺什么，而不是静默降级。
+
+### ⚠️ 这次改动对 ack 需求的净效果
+
+单看 capability 那条改动，**ack 会变多**——同族自审从 FULL 降成
+EVIDENCE_ONLY，高风险路径因此需要 ack。这是有意的：同族自审本来就不该算最高等级。
+
+净效果取决于配置。配好之后高风险路径直接 FULL、无需 ack：
+
+```bash
+export HETERO_IMPLEMENTER_FAMILY=anthropic                     # 主会话是 Claude
+export HETERO_PI_MODEL=volcengine-coding/deepseek-v4-flash     # 异构评审方
+```
+
+没配好也不再阻塞——agent 可以自己签 ack，只要说清用户授权了什么。方向是把
+「绕过门禁」换成「配置正确就直接通过」。
+
 ## v2.2.0 — pi 通道 + oc-reaper 三层空转判据
 
 两件事都源自 2026-08-20 的一次现场：机器可用内存掉到 70MB、load 14.6，三个
