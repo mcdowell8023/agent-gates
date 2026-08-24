@@ -57,6 +57,12 @@ SPIN_CPU="${OC_REAPER_SPIN_CPU:-80}"
 SPIN_WINDOW="${OC_REAPER_SPIN_WINDOW:-2}"
 # Main thread must be this idle (percent of samples in kevent64) to call it GC spin.
 SPIN_IDLE_PCT="${OC_REAPER_SPIN_IDLE_PCT:-95}"
+# Age cap for the SHARED serve. It belongs to oc-review so the reaper normally leaves it
+# alone, but "belongs to" cannot mean "immortal": observed 2026-08-24 at age 352476s
+# (4 days), 133 minutes of CPU burned, zero clients anywhere on the machine — and the
+# KEEP_PORT exemption meant nothing would ever reclaim it. Reclaimed past this age ONLY
+# when no client is in flight (see _shared_serve_in_use).
+SHARED_MAX_AGE="${OC_REAPER_SHARED_MAX_AGE:-86400}"
 SPIN_SAMPLE_SECS="${OC_REAPER_SPIN_SAMPLE_SECS:-2}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -163,6 +169,28 @@ serve_main_thread_idle() {
   [[ $(( kev * 100 / tot )) -ge "$SPIN_IDLE_PCT" ]]
 }
 
+# Is a client using the shared serve right now? A client in flight is an `opencode run`,
+# or the `agent-gates-review` that blocks while such a run completes. Checked before
+# reclaiming the shared serve so an in-progress review is never cut off — observed
+# 2026-08-24: reclaiming it mid-review forced a cold start of a fresh 717MB replacement.
+_shared_serve_in_use() {
+  pgrep -f "opencode run" >/dev/null 2>&1 && return 0
+  pgrep -f "agent-gates-review" >/dev/null 2>&1 && return 0
+  return 1
+}
+
+# Reap (or report) one serve. Extracted so the shared-serve branch can act directly: left
+# to fall through, it would be caught by the three-layer spin check further down and kept.
+_reap_one() {
+  local pid="$1" port="$2" age="$3" reason="$4" reap_pgid
+  if [[ "$APPLY" -eq 1 ]]; then
+    reap_pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+    hetero_kill_tree "${reap_pgid:-$pid}" 0 2>/dev/null && echo "reaped serve :$port pid=$pid (age ${age}s, ${reason})"
+  else
+    echo "[dry-run] would reap serve :$port pid=$pid (age ${age}s, ${reason})"
+  fi
+}
+
 reaped=0
 kept=0
 while IFS= read -r pid; do
@@ -173,8 +201,15 @@ while IFS= read -r pid; do
   [[ -z "$port" ]] && continue
   age=$(etime_to_secs "$(ps -o etime= -p "$pid" 2>/dev/null)")
   if [[ -n "$KEEP_PORT" && "$port" == "$KEEP_PORT" ]]; then
-    # Say so rather than counting it silently: its lifecycle belongs to oc-review, so if
-    # it ever wedges or spins, the reaper will not touch it and the user needs to know.
+    # Past SHARED_MAX_AGE with no client in flight, this is residue rather than a shared
+    # resource — reclaim it. Being told about a wedged serve ("the user needs to know",
+    # as the old comment put it) is not a mechanism; a 4-day-old idle serve proved that.
+    if [[ "$age" -gt "$SHARED_MAX_AGE" ]] && ! _shared_serve_in_use; then
+      _reap_one "$pid" "$port" "$age" "shared serve idle beyond ${SHARED_MAX_AGE}s"
+      reaped=$((reaped+1)); continue
+    fi
+    # Otherwise say so rather than counting it silently: its lifecycle belongs to
+    # oc-review, so the reaper will not touch it and the user needs to see that.
     [[ "$APPLY" -eq 0 ]] && echo "[keep] shared serve :$port pid=$pid (managed by oc-review, age ${age}s)"
     kept=$((kept+1)); continue
   fi
@@ -210,12 +245,7 @@ while IFS= read -r pid; do
     reason="spinning ${spin}% CPU in GC, no working children"
   fi
   # orphan
-  if [[ "$APPLY" -eq 1 ]]; then
-    reap_pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
-    hetero_kill_tree "${reap_pgid:-$pid}" 0 2>/dev/null && echo "reaped serve :$port pid=$pid (age ${age}s, ${reason})"
-  else
-    echo "[dry-run] would reap serve :$port pid=$pid (age ${age}s, ${reason})"
-  fi
+  _reap_one "$pid" "$port" "$age" "$reason"
   reaped=$((reaped+1))
 done < <(pgrep -f "opencode serve")
 
