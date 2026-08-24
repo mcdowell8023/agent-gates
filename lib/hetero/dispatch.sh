@@ -381,7 +381,21 @@ hetero_dispatch() {
         --title "hetero-dispatch-${role}" --thinking "$effort" "$prompt" 2>/dev/null; then
         # For paseo, we just mark channel (actual agent startup is async)
         channel="paseo"
-        capability=$(_hetero_capability_for "$paseo_model")
+        # ⛔ Capped at EVIDENCE_ONLY regardless of model family. hetero_spawn_pg reports
+        # only whether the SPAWN succeeded; this channel is fire-and-forget, so at this
+        # moment nothing here knows whether an agent was actually created. Measured
+        # 2026-08-24 with the same binary and got opposite outcomes — `hetero_dispatch`
+        # returned success with no matching agent in `paseo agent ls`, while a hand-run
+        # spawn of the identical command did create one. Grading FULL on an unverified
+        # spawn is precisely the "receipt for an agent that never existed" that the comment
+        # above this channel warns about.
+        #
+        # To earn FULL through Paseo, use the path that actually verifies:
+        #   agent-gates-review --route paseo --dispatch-out <file>
+        #   agent-gates-review --import-result <md> --token <t> --paseo-agent <id>
+        # That one calls `paseo agent inspect` and checks the agent exists, its provider,
+        # and that it was created after dispatch.
+        capability="EVIDENCE_ONLY"
         agent_pid="${HETERO_LAST_ROOT_PID:-}"
         agent_pgid="${HETERO_LAST_PGID:-}"
         # Update registration with real PID/PGID now that spawn succeeded

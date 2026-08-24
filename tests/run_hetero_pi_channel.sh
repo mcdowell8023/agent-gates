@@ -38,6 +38,12 @@ source_dispatch() {
   _OC_SERVE_SOURCED=""
   HETERO_LOCK_DIR=$(mktemp -d)
   export HETERO_LOCK_DIR
+  # Isolate from the machine's real hetero-check.json: channel selection and capability are
+  # both configurable, so without this the result depends on the user's config. Observed
+  # 2026-08-24 — a real config with pi_models.primary + implementer_family made pi win the
+  # dispatch and earn FULL, failing five assertions that assumed opencode/EVIDENCE_ONLY.
+  AGENT_GATES_DIR=$(mktemp -d); export AGENT_GATES_DIR
+  unset HETERO_IMPLEMENTER_FAMILY HETERO_PI_MODEL HETERO_PASEO_MODEL
   source "$CONFIG_LIB"
   source "$DISPATCH_LIB"
 }

@@ -31,8 +31,16 @@ assert() {
 
 source_dispatch() {
   _HETERO_CONFIG_SOURCED=""; _HETERO_DISPATCH_SOURCED=""; _OC_SERVE_SOURCED=""
-  _HETERO_FAMILY_SOURCED=""
+  _HETERO_FAMILY_SOURCED=""; _HETERO_FAMILY_CACHE=""
   HETERO_LOCK_DIR=$(mktemp -d); export HETERO_LOCK_DIR
+  # Isolate from the machine's real hetero-check.json. These cases assert on channel
+  # selection and capability, and BOTH are configurable — so without isolation the results
+  # depend on whatever the user happens to have configured. Observed 2026-08-24: a real
+  # config carrying implementer_family + channels.paseo.enabled=false flipped seven
+  # assertions at once, which reads like a code regression and is not one.
+  AGENT_GATES_DIR=$(mktemp -d); export AGENT_GATES_DIR
+  unset HETERO_IMPLEMENTER_FAMILY HETERO_PI_MODEL HETERO_PASEO_MODEL \
+        HETERO_CHAN_PASEO HETERO_CHAN_PI HETERO_CHAN_OPENCODE
   source "$CONFIG_LIB"; source "$DISPATCH_LIB"
 }
 setup_repo() {
@@ -111,13 +119,33 @@ echo "C5: ⭐ paseo 默认派 claude/opus + 实施族 anthropic → EVIDENCE_ONL
   rm -rf "$FAKE_DIR" "$HETERO_LOCK_DIR"; teardown_repo
 )
 
-echo "C6: paseo 配异构模型 + 实施族 anthropic → FULL"
+# C6 previously asserted that configuring a heterogeneous model for the paseo channel
+# earned FULL. Overturned 2026-08-24: hetero_spawn_pg reports only whether the SPAWN
+# succeeded, and this channel is fire-and-forget — at that moment nothing knows whether an
+# agent was created. Measured twice with the same binary and got opposite outcomes
+# (`hetero_dispatch reviewer` produced no agent in `paseo agent ls`; a hand-run spawn did).
+# Grading FULL on an unverified spawn is the "receipt for an agent that never existed"
+# that dispatch.sh's own comment warns about.
+echo "C6: ⛔ paseo 通道即使配了异构模型也不得给 FULL（spawn 成功 ≠ agent 存在）"
 (
   setup_repo; source_dispatch; mkfakes
   export HETERO_IMPLEMENTER_FAMILY="anthropic"
   export HETERO_PASEO_MODEL="opencode/volcengine-coding/deepseek-v4-flash"
   hetero_dispatch reviewer "p" 0 2>/dev/null
-  assert "配异构后给 FULL (实际 $(cap))" "$([[ "$(cap)" == FULL ]] && echo true || echo false)"
+  assert "channel=paseo (实际 ${HETERO_DISPATCH_CHANNEL:-})" "$([[ "${HETERO_DISPATCH_CHANNEL:-}" == paseo ]] && echo true || echo false)"
+  assert "未核实的 spawn 不给 FULL (实际 $(cap))" "$([[ "$(cap)" == EVIDENCE_ONLY ]] && echo true || echo false)"
+  rm -rf "$FAKE_DIR" "$HETERO_LOCK_DIR"; teardown_repo
+)
+
+echo "C6b: 对比——pi 通道同样条件下仍可拿 FULL（限制只针对无法核实的 paseo）"
+(
+  setup_repo; source_dispatch; mkfakes
+  export HETERO_BIN_PASEO=/nonexistent-paseo
+  export HETERO_IMPLEMENTER_FAMILY="anthropic"
+  export HETERO_PI_MODEL="volcengine-coding/deepseek-v4-flash"
+  hetero_dispatch reviewer "p" 0 2>/dev/null
+  assert "pi 仍给 FULL (实际 ${HETERO_DISPATCH_CHANNEL:-}/$(cap))" \
+    "$([[ "${HETERO_DISPATCH_CHANNEL:-}" == pi && "$(cap)" == FULL ]] && echo true || echo false)"
   rm -rf "$FAKE_DIR" "$HETERO_LOCK_DIR"; teardown_repo
 )
 
