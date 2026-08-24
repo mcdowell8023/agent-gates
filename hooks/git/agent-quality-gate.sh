@@ -229,8 +229,16 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
       ANCHORED_REVIEW_COUNT=$((ANCHORED_REVIEW_COUNT + 1))
 
       rf_files=$(sed -n 's/^<!-- REVIEW_FILE: \(.*\) -->$/\1/p' "$rf")
-      rf_files_sha256=$(sed -n 's/^<!-- REVIEW_FILES_SHA256: \([0-9a-fA-F]*\) -->$/\1/p' "$rf" | head -1 | tr '[:upper:]' '[:lower:]')
-      rf_diff_sha256=$(sed -n 's/^<!-- REVIEW_DIFF_SHA256: \([0-9a-fA-F]*\) -->$/\1/p' "$rf" | head -1 | tr '[:upper:]' '[:lower:]')
+      # `[[:space:]-]*` after the hex, not a single space: `shasum` reading stdin prints
+      # `<hex>  -` (that trailing `-` is a filename placeholder), and pasted into an anchor
+      # it became `<!-- REVIEW_FILES_SHA256: <hex>  - -->`. Requiring ` -->` immediately
+      # after the hex made that not match ⇒ empty variable ⇒ the `|| continue` below
+      # skipped the ENTIRE report, with the most misleading symptom possible: report
+      # present, VERDICT: PASS present, hex correct, and the gate reporting no review at
+      # all (observed 2026-08-24). Non-hex content still fails to match — this widens what
+      # may follow the hex, not what counts as one.
+      rf_files_sha256=$(sed -n 's/^<!-- REVIEW_FILES_SHA256: \([0-9a-fA-F]*\)[[:space:]-]*-->$/\1/p' "$rf" | head -1 | tr '[:upper:]' '[:lower:]')
+      rf_diff_sha256=$(sed -n 's/^<!-- REVIEW_DIFF_SHA256: \([0-9a-fA-F]*\)[[:space:]-]*-->$/\1/p' "$rf" | head -1 | tr '[:upper:]' '[:lower:]')
       [[ -n "$rf_files" && -n "$rf_files_sha256" && -n "$rf_diff_sha256" ]] || continue
 
       computed_files_sha256=$(printf '%s\n' "$rf_files" | gate_sha256_stream)
