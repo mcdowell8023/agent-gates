@@ -391,17 +391,42 @@ if [[ "${SKIP_VERIFY:-0}" != "1" ]]; then
       fail "No verifier evidence (.agent/verify/ missing)"
       echo "   Fix: Run verifier agent, save output to .agent/verify/<date>-<topic>.md"
     elif [[ -d .agent/verify ]]; then
-      # Pick the newest verify file by mtime (within 4h); mirrors Gate 2 selection logic
+      # Prefer the verify doc whose dispatch record binds the CURRENT staged diff; fall
+      # back to newest-by-mtime only when nothing is anchored.
+      #
+      # mtime alone is not enough: `git worktree add` stamps every file with the same
+      # mtime, so in a fresh worktree ALL historical verify docs land inside the -mmin
+      # window with IDENTICAL mtimes, and "newest" under a strict `>` degenerates into
+      # "whichever find happened to return first". Observed 2026-08-24 in a fresh
+      # worktree: 38 docs all at the creation timestamp, the gate picked an unrelated one
+      # from three weeks earlier, and reported it as missing a VERIFY_VERDICT line — an
+      # error naming a file the agent had never seen, which reads as "my artifact was
+      # never generated". CHECK 5 already anchors on the diff hash; do the same here.
       VERIFY_FILE=""
       VERIFY_NEWEST_MTIME=0
+      VERIFY_ANCHORED=""
+      if command -v sha256sum >/dev/null 2>&1; then
+        _V6_CUR_HASH=$(git diff --cached -- ':!.agent/verify' 2>/dev/null | sha256sum | cut -d' ' -f1)
+      else
+        _V6_CUR_HASH=$(git diff --cached -- ':!.agent/verify' 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
+      fi
       while IFS= read -r vf; do
         [[ -z "$vf" || ! -f "$vf" ]] && continue
+        if [[ -n "$_V6_CUR_HASH" ]]; then
+          _v6_dj=".agent/verify/$(basename "$vf" .md).dispatch.json"
+          if [[ -f "$_v6_dj" ]]; then
+            _v6_h=$(sed -n 's/.*"staged_diff_hash"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F]*\)".*/\1/p' "$_v6_dj" 2>/dev/null | head -1)
+            [[ "$_v6_h" == "$_V6_CUR_HASH" ]] && VERIFY_ANCHORED="$vf"
+          fi
+        fi
         vf_mtime=$(stat -f %m "$vf" 2>/dev/null || stat -c %Y "$vf" 2>/dev/null || echo "0")
         if [[ "$vf_mtime" -gt "$VERIFY_NEWEST_MTIME" ]]; then
           VERIFY_NEWEST_MTIME="$vf_mtime"
           VERIFY_FILE="$vf"
         fi
       done < <(find .agent/verify/ -name "*.md" -mmin -240 2>/dev/null)
+      # An anchored match is deterministic, so it wins over the mtime guess.
+      [[ -n "$VERIFY_ANCHORED" ]] && VERIFY_FILE="$VERIFY_ANCHORED"
 
       if [[ -z "$VERIFY_FILE" ]]; then
         fail "Verifier evidence missing or stale (>4h old)"
