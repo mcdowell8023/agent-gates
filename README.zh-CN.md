@@ -146,6 +146,19 @@ agent 在 session 内开发时，agent-gates 自动：
 
 ## 新特性
 
+### v2.4.0 — opencode 不再是默认审查通道
+
+⚠️ **行为变更**：`opencode` 通道默认关闭。
+
+同一个审查任务实测：走 opencode 的 `agent-gates-review` **120s 超时（极小 prompt 也一样）**、
+手动 `opencode run --pure --attach` 200s 超时、而 `pi -p` **约 7 秒返回**。它还需要常驻
+`opencode serve`——实测一个跑了 **4 天、烧掉 133 分钟 CPU、机器上零客户端**。
+多个会话反馈卡点在审查而不在开发。
+
+⛔ **不是删除**。通道代码完整保留，别人可能仍依赖。恢复用
+`{"channels":{"opencode":{"enabled":true}}}` 或 `HETERO_CHAN_OPENCODE=1`。
+`agent-gates-review --route paseo` / `--import-result` 是独立路径，不受影响。
+
 ### v2.2.0 — pi 通道 + 三层空转判据
 
 **新增 `pi` 通道，排在 opencode 之前。** 顺序变为

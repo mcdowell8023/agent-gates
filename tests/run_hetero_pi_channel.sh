@@ -44,6 +44,10 @@ source_dispatch() {
   # dispatch and earn FULL, failing five assertions that assumed opencode/EVIDENCE_ONLY.
   AGENT_GATES_DIR=$(mktemp -d); export AGENT_GATES_DIR
   unset HETERO_IMPLEMENTER_FAMILY HETERO_PI_MODEL HETERO_PASEO_MODEL
+  # These cases exercise the opencode channel itself, and opencode now defaults to OFF
+  # (2026-08-26: it was timing out as a review channel while pi returned in ~7s). So the
+  # dependency has to be stated explicitly rather than relied on as a default.
+  export HETERO_CHAN_OPENCODE=1
   source "$CONFIG_LIB"
   source "$DISPATCH_LIB"
 }

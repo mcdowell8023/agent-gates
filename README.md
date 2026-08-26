@@ -146,6 +146,20 @@ While the agent works inside a session, agent-gates automatically:
 
 ## What's New
 
+### v2.4.0 — opencode is no longer a default review channel
+
+⚠️ **Behaviour change**: the `opencode` channel now defaults to OFF.
+
+Measured, reviewing the same change: `agent-gates-review` through opencode timed out at
+120s (**even with a minimal prompt**), a manual `opencode run --pure --attach` timed out at
+200s, and `pi -p` returned in **~7s**. opencode also needs a long-lived `opencode serve` —
+one was observed at **4 days uptime, 133 minutes of CPU, zero clients on the machine**.
+Multiple sessions reported being blocked on review rather than on development.
+
+⛔ **Not removed.** The channel code is intact; others may still depend on it. Re-enable
+with `{"channels":{"opencode":{"enabled":true}}}` or `HETERO_CHAN_OPENCODE=1`.
+`agent-gates-review --route paseo` / `--import-result` are separate paths, unaffected.
+
 ### v2.2.0 — pi channel + three-layer spin judgment
 
 **New `pi` channel, ahead of opencode.** Order is now

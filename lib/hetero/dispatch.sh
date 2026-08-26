@@ -457,9 +457,9 @@ hetero_dispatch() {
     # caller polls for a result that never comes. HETERO_OC_MODEL had no definition in
     # config.sh at all, so this was the default state of the verify channel.
     local oc_model="${HETERO_OC_MODEL:-}"
-    if [[ "${HETERO_CHAN_OPENCODE:-1}" == "1" ]] && [[ -z "$oc_model" ]]; then
+    if [[ "${HETERO_CHAN_OPENCODE:-0}" == "1" ]] && [[ -z "$oc_model" ]]; then
       echo "hetero: skipping opencode channel — no model configured. Set HETERO_OC_MODEL, or hetero_models.primary / review_models.primary in the capability file." >&2
-    elif [[ "${HETERO_CHAN_OPENCODE:-1}" == "1" ]] && command -v "$oc_bin" >/dev/null 2>&1; then
+    elif [[ "${HETERO_CHAN_OPENCODE:-0}" == "1" ]] && command -v "$oc_bin" >/dev/null 2>&1; then
       if _hetero_check_breaker "opencode/${role}"; then
         # fail-closed: must get OC_SERVE_URL from oc_serve_ensure, otherwise skip
         local serve_ok=0

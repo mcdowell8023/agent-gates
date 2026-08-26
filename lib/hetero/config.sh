@@ -89,10 +89,10 @@ _hetero_resolve() {
   export "$env_var=$val"
 }
 
-# Resolve a channel enable flag: env > hetero-check.json.channels.<name>.enabled > default 1.
-# Usage: _hetero_resolve_chan <env_var> <channel_name>
+# Resolve a channel enable flag: env > hetero-check.json.channels.<name>.enabled > default.
+# Usage: _hetero_resolve_chan <env_var> <channel_name> [default=1]
 _hetero_resolve_chan() {
-  local env_var="$1" chan="$2"
+  local env_var="$1" chan="$2" default="${3:-1}"
   if [[ -n "${!env_var:-}" ]]; then
     export "$env_var"
     return 0
@@ -101,7 +101,7 @@ _hetero_resolve_chan() {
   file="$(_hetero_gates_dir)/hetero-check.json"
   val=$(_hetero_json_get "$file" "channels.${chan}.enabled")
   if [[ -z "$val" ]]; then
-    val=1  # default enabled
+    val="$default"
   fi
   export "$env_var=$val"
 }
@@ -127,7 +127,14 @@ hetero_load_config() {
   _hetero_resolve      HETERO_IMPLEMENTER_FAMILY implementer_family implementer_family ""
   _hetero_resolve_chan HETERO_CHAN_PASEO     paseo
   _hetero_resolve_chan HETERO_CHAN_PI        pi
-  _hetero_resolve_chan HETERO_CHAN_OPENCODE  opencode
+  # opencode defaults OFF as a review channel (2026-08-26). Measured repeatedly timing out
+  # — 120s through agent-gates-review, 200s through a manual `--attach`, and that was with a
+  # minimal prompt — while pi returns in ~7s. It also needs a long-lived `opencode serve`,
+  # observed at 4 days uptime and 133 minutes of CPU with no client anywhere on the machine.
+  # Sessions were being blocked on review rather than on development.
+  # ⛔ The channel is NOT removed: others may still depend on it, so it stays one flag away
+  # (channels.opencode.enabled=true, or HETERO_CHAN_OPENCODE=1).
+  _hetero_resolve_chan HETERO_CHAN_OPENCODE  opencode  0
   _hetero_resolve_chan HETERO_CHAN_CODEX     codex
   _hetero_resolve_chan HETERO_CHAN_CODEBUDDY codebuddy
 }

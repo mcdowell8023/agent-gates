@@ -2,6 +2,48 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.4.0 — opencode 不再是默认审查通道
+
+⚠️ **行为变更**：`opencode` 通道默认关闭。六通道顺序实际变为
+`paseo → pi → codex → codebuddy → echo-fallback`，opencode 需显式启用才参与。
+
+### 为什么
+
+实测它作为审查通道反复超时，而这直接堵住开发：
+
+| 路径 | 结果 |
+|---|---|
+| `agent-gates-review`（走 opencode 通道） | 120s 超时，**极小 prompt 也一样** |
+| 手动 `opencode run --pure --attach` | 200s 超时 |
+| `pi -p`（同一审查任务） | **~7s 返回，evidence 立即可得** |
+
+它还需要常驻 `opencode serve`：实测一个跑了 **4 天、烧掉 133 分钟 CPU、机器上零客户端**，
+而 `KEEP_PORT` 豁免让 reaper 永不回收（v2.3.0 已加超龄回收）。多个会话连续反馈
+「审查卡住导致任务无法进行」——**卡点在审查，不在开发**。
+
+### ⛔ 不是删除
+
+通道代码完整保留，别人可能仍依赖它。恢复只需一个开关：
+
+```json
+{ "channels": { "opencode": { "enabled": true } } }
+```
+
+或 `HETERO_CHAN_OPENCODE=1`（env 优先于配置）。`agent-gates-review --route paseo`
+与 `--import-result` 是独立路径，不受影响。
+
+### Changed
+- `_hetero_resolve_chan` 新增第三个参数（per-channel 默认值），签名
+  `_hetero_resolve_chan <env_var> <channel> [default=1]`。仅 opencode 传 0
+- `dispatch.sh` 里未 source config 时的兜底默认同步改为 0（两处），保持一致
+- 测试 `run_hetero_dispatch.sh` / `run_hetero_pi_channel.sh` 显式
+  `export HETERO_CHAN_OPENCODE=1`——它们测的就是 opencode 通道，这个依赖应当写出来
+  而不是靠默认值
+
+### Added
+- `tests/run_hetero_chan_defaults.sh`（7 断言）：默认值、配置可恢复、env 优先、
+  以及对称性（默认开启的通道也能被配置关掉）
+
 ## v2.3.0 — 审查不再是卡点
 
 起因是真实反馈：「每天没有一个 agent 能跑过，开发不是卡点，审查才是卡点」。
