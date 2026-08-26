@@ -102,6 +102,21 @@ v2.0.2 起装饰不影响判定，下面这些全部接受：
 
 #### 两条通道都不可用时：外部审查导入（v2.1.0）
 
+#### verify 侧（CHECK 6）用 `agent-gates-verify-import`
+
+⚠️ 下面两阶段讲的是 **review 侧（CHECK 5）**，产出 `REVIEW_*` 锚点。
+**CHECK 6 要的是另一种产物**（`VERIFY_VERDICT` 行 + 带 `staged_diff_hash` 的
+`.dispatch.json`），别拿 review 产物去顶——v2.5.0 起 verify 侧有对称入口：
+
+```bash
+agent-gates-verify-import <body.md> --imported-model <provider/model>
+agent-gates-verify-import <body.md> --paseo-agent <agent-id>
+```
+
+正文里必须已经有 `VERIFY_VERDICT: PASS|FAIL|QUESTIONS|INCOMPLETE`（工具不代填），
+来源必须声明，锚点由工具计算。⛔ **不要手写 `.dispatch.json`** —— 那是伪造派发记录；
+在 v2.5.0 之前那是唯一出路，现在不是了。
+
 opencode 与 codex 都跑不了时，**不要停在这里、也不要伪造锚点**。走两阶段：
 
 ```bash

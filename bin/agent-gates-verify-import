@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# agent-gates-verify-import — land an externally-completed verification as an artifact
+# CHECK 6 accepts. The counterpart to `agent-gates-review --import-result`.
+#
+# Why this exists: CHECK 6 requires a VERIFY_VERDICT document plus a dispatch record whose
+# staged_diff_hash binds the current staged diff. `agent-gates-review --route paseo` and
+# `--import-result` produce the REVIEW_* shape instead, so on a machine where the automatic
+# verify channels are unusable there was no official way to produce a compliant verify
+# artifact at all. That left agents with two choices: hand-write the dispatch.json
+# (fabricating a dispatch that never happened) or stop. Reported 2026-08-26 after a session
+# correctly refused both and stopped — with a real commit blocked behind it.
+#
+# ⛔ What this deliberately does NOT do:
+#   - it never claims a channel that was not used (provenance must be declared)
+#   - it never accepts anchors from the caller; HEAD and staged_diff_hash are computed here.
+#     That is the whole difference between importing an external review and forging a
+#     receipt: the anchors attest "the staged content at import time", which is a fact this
+#     tool can establish, whereas a hand-written hash attests nothing.
+#   - it does not invent a verdict. No VERIFY_VERDICT line in the body means refusal.
+#
+# Usage:
+#   agent-gates-verify-import <body.md> --imported-model <provider/model> [--result <file>]
+#   agent-gates-verify-import <body.md> --paseo-agent <agent-id>          [--result <file>]
+set -uo pipefail
+
+PROG="$(basename "$0")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+VERIFY_DIR=".agent/verify"
+
+usage() {
+  echo "Usage: $PROG <body.md> (--imported-model <provider/model> | --paseo-agent <id>) [--result <file>]" >&2
+  echo "" >&2
+  echo "  Lands an externally-completed verification as a CHECK 6 artifact." >&2
+  echo "  Anchors (HEAD, staged_diff_hash) are computed here — never passed in." >&2
+  exit 2
+}
+
+BODY=""; IMPORTED_MODEL=""; PASEO_AGENT=""; RESULT_OUT=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --imported-model) [[ $# -ge 2 ]] || usage; IMPORTED_MODEL="$2"; shift 2 ;;
+    --paseo-agent)    [[ $# -ge 2 ]] || usage; PASEO_AGENT="$2";    shift 2 ;;
+    --result)         [[ $# -ge 2 ]] || usage; RESULT_OUT="$2";     shift 2 ;;
+    -h|--help)        usage ;;
+    -*)               echo "$PROG: unknown option '$1'" >&2; usage ;;
+    *)                [[ -z "$BODY" ]] && BODY="$1" || { echo "$PROG: unexpected argument '$1'" >&2; usage; }; shift ;;
+  esac
+done
+
+[[ -n "$BODY" ]] || usage
+[[ -f "$BODY" ]] || { echo "$PROG: body file not found: $BODY" >&2; exit 2; }
+
+# Provenance is mandatory. An artifact whose source cannot be named is worse than no
+# artifact: it looks like evidence while attesting nothing.
+if [[ -z "$IMPORTED_MODEL" && -z "$PASEO_AGENT" ]]; then
+  echo "$PROG: provenance required — pass --imported-model <provider/model> or --paseo-agent <id>." >&2
+  echo "  A verify artifact with no declared source is not acceptable evidence." >&2
+  exit 2
+fi
+
+# The verdict must already be in the body. Supplying it via a flag would let the caller
+# state a conclusion the reviewer never reached.
+VERDICT=$(grep -oiE '^VERIFY_VERDICT:[[:space:]]*(PASS|FAIL|QUESTIONS|INCOMPLETE)' "$BODY" 2>/dev/null \
+          | grep -oiE 'PASS|FAIL|QUESTIONS|INCOMPLETE' | head -1 | tr '[:lower:]' '[:upper:]' || true)
+if [[ -z "$VERDICT" ]]; then
+  echo "$PROG: the body has no 'VERIFY_VERDICT: PASS|FAIL|QUESTIONS|INCOMPLETE' line." >&2
+  echo "  Add the reviewer's own conclusion as a bare line; this tool will not supply one." >&2
+  exit 3
+fi
+
+git rev-parse --git-dir >/dev/null 2>&1 || { echo "$PROG: not inside a git repository" >&2; exit 2; }
+
+# Anchors. Excluding .agent/verify avoids the chicken-and-egg of hashing our own output,
+# and matches exactly what CHECK 6 recomputes.
+_sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1; else shasum -a 256 | cut -d' ' -f1; fi; }
+STAGED_DIFF_HASH=$(git diff --cached -- ':!.agent/verify' | _sha)
+HEAD_SHA=$(git rev-parse HEAD 2>/dev/null || echo "")
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%SZ")
+
+# Resolve the reviewer model. For --paseo-agent, ask Paseo rather than trusting a flag.
+REVIEWER_MODEL="$IMPORTED_MODEL"
+PASEO_VERIFIED="no"
+if [[ -n "$PASEO_AGENT" ]]; then
+  _paseo="${AG_REVIEW_PASEO:-paseo}"
+  if command -v "$_paseo" >/dev/null 2>&1; then
+    _pj=$("$_paseo" agent inspect "$PASEO_AGENT" --json 2>/dev/null || true)
+    if [[ -n "$_pj" ]]; then
+      _pm=$(printf '%s' "$_pj" | sed -n 's/.*"Model"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+      _pp=$(printf '%s' "$_pj" | sed -n 's/.*"Provider"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+      if [[ -n "$_pm" ]]; then
+        REVIEWER_MODEL="${_pp:+$_pp/}$_pm"
+        PASEO_VERIFIED="yes"
+      fi
+    fi
+  fi
+  [[ "$PASEO_VERIFIED" == "no" ]] && \
+    echo "$PROG: could not inspect paseo agent '$PASEO_AGENT' — recording it unverified" >&2
+fi
+
+# capability: same semantics as hetero_dispatch — FULL only when the reviewer's model family
+# provably differs from the declared implementer family. Unset/unresolvable is fail-closed.
+CAPABILITY="EVIDENCE_ONLY"
+_fam_lib="$SCRIPT_DIR/../lib/hetero/family.sh"
+if [[ -f "$_fam_lib" ]]; then
+  # shellcheck disable=SC1090
+  source "$_fam_lib"
+  if [[ -n "${HETERO_IMPLEMENTER_FAMILY:-}" ]] && declare -f hetero_families_differ >/dev/null 2>&1; then
+    hetero_families_differ "$REVIEWER_MODEL" "$HETERO_IMPLEMENTER_FAMILY" && CAPABILITY="FULL"
+  fi
+fi
+
+mkdir -p "$VERIFY_DIR"
+# Unique run id: seconds granularity plus a short random suffix, so two imports in the same
+# second do not overwrite each other.
+RUN_ID="$(date +%Y%m%d-%H%M%S)-$(od -An -N3 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || echo $$)"
+MD="$VERIFY_DIR/${RUN_ID}.md"
+DJ="$VERIFY_DIR/${RUN_ID}.dispatch.json"
+
+{
+  cat "$BODY"
+  echo ""
+  echo "<!-- VERIFY_SOURCE: imported -->"
+  echo "<!-- VERIFY_REVIEWER_MODEL: ${REVIEWER_MODEL:-<unknown>} -->"
+  [[ -n "$PASEO_AGENT" ]] && echo "<!-- VERIFY_PASEO_AGENT: ${PASEO_AGENT} (verified: ${PASEO_VERIFIED}) -->"
+  echo "<!-- VERIFY_IMPORTED_AT: ${TIMESTAMP} -->"
+} > "${MD}.tmp.$$"
+mv "${MD}.tmp.$$" "$MD"
+
+cat > "${DJ}.tmp.$$" <<JSON
+{
+  "verify_run_id": "${RUN_ID}",
+  "channel": "imported",
+  "capability": "${CAPABILITY}",
+  "verdict": "${VERDICT}",
+  "reviewer_model": "${REVIEWER_MODEL}",
+  "implementer_family": "${HETERO_IMPLEMENTER_FAMILY:-}",
+  "paseo_agent": "${PASEO_AGENT}",
+  "paseo_verified": "${PASEO_VERIFIED}",
+  "staged_diff_hash": "${STAGED_DIFF_HASH}",
+  "HEAD": "${HEAD_SHA}",
+  "imported_at": "${TIMESTAMP}"
+}
+JSON
+mv "${DJ}.tmp.$$" "$DJ"
+
+[[ -n "$RESULT_OUT" ]] && cp "$MD" "$RESULT_OUT"
+
+echo "✅ verify artifact imported"
+echo "   run_id:      $RUN_ID"
+echo "   verdict:     $VERDICT"
+echo "   capability:  $CAPABILITY"
+echo "   reviewer:    ${REVIEWER_MODEL:-<unknown>}"
+echo "   staged hash: ${STAGED_DIFF_HASH:0:16}..."
+echo "   doc:         $MD"
+if [[ "$CAPABILITY" == "EVIDENCE_ONLY" ]]; then
+  if [[ -z "${HETERO_IMPLEMENTER_FAMILY:-}" ]]; then
+    echo "   ℹ️  capability=EVIDENCE_ONLY because HETERO_IMPLEMENTER_FAMILY is unset —" >&2
+    echo "      heterogeneity cannot be checked, so it is not assumed." >&2
+  else
+    echo "   ℹ️  capability=EVIDENCE_ONLY — reviewer family does not provably differ from" >&2
+    echo "      '${HETERO_IMPLEMENTER_FAMILY}'. High-risk paths will need a USER_ACK." >&2
+  fi
+fi

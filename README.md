@@ -146,6 +146,24 @@ While the agent works inside a session, agent-gates automatically:
 
 ## What's New
 
+### v2.5.0 — a CLI entry point for the verify side
+
+`agent-gates-verify-import` lands an externally-completed verification as an artifact
+CHECK 6 accepts. Until now `--route paseo` / `--import-result` only produced the `REVIEW_*`
+shape, so on a machine where the automatic verify channels were unusable there was **no
+official way to produce a compliant verify artifact** — leaving agents to hand-write the
+dispatch record (forging a dispatch that never happened) or stop. That gap was itself an
+incentive to fabricate.
+
+```bash
+agent-gates-verify-import <body.md> --imported-model <provider/model>
+agent-gates-verify-import <body.md> --paseo-agent <agent-id>
+```
+
+Provenance is mandatory, the verdict must already be in the body, and **anchors are computed
+by the tool, never accepted from the caller** — that is the line between importing an
+external review and forging a receipt.
+
 ### v2.4.0 — opencode is no longer a default review channel
 
 ⚠️ **Behaviour change**: the `opencode` channel now defaults to OFF.

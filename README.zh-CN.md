@@ -146,6 +146,21 @@ agent 在 session 内开发时，agent-gates 自动：
 
 ## 新特性
 
+### v2.5.0 — verify 侧补上 CLI 入口
+
+`agent-gates-verify-import` 把外部完成的验收落成 CHECK 6 认的产物。此前
+`--route paseo` / `--import-result` 只产出 `REVIEW_*` 形状，于是在自动 verify 通道
+不可用的机器上**根本没有官方路径能产出合规的 verify 产物**——agent 只能手写 dispatch
+记录（伪造一次从未发生的派发）或者停下。这个缺口本身就在诱导造假。
+
+```bash
+agent-gates-verify-import <body.md> --imported-model <provider/model>
+agent-gates-verify-import <body.md> --paseo-agent <agent-id>
+```
+
+来源必须声明、结论必须已在正文里、**锚点由工具计算而绝不接受调用方传入**——
+这就是「导入外部审查」与「伪造回执」的分界线。
+
 ### v2.4.0 — opencode 不再是默认审查通道
 
 ⚠️ **行为变更**：`opencode` 通道默认关闭。

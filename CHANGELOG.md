@@ -2,6 +2,39 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.5.0 — verify 侧补上 CLI 入口
+
+### Added — `agent-gates-verify-import`
+
+CHECK 6 要的是 `VERIFY_VERDICT` 文档 + `staged_diff_hash` 锚定当前 staged 的 dispatch
+记录。而 `agent-gates-review --route paseo` / `--import-result` 产出的是 `REVIEW_*` 形状。
+⇒ 在自动 verify 通道不可用的机器上，**根本没有官方路径能产出合规的 verify 产物**，
+agent 只剩两个选择：手写 `dispatch.json`（伪造一次从未发生的派发）或者停下。
+
+2026-08-26 一个会话正确地两个都拒绝、停了下来，后面压着一个真实的提交。这个缺口
+本身就在**诱导造假**——它是 P0「为不存在的 agent 记 FULL」的同一个病因：没有合法
+路径时，就会有人去拼一条。
+
+```bash
+agent-gates-verify-import <body.md> --imported-model <provider/model> [--result <file>]
+agent-gates-verify-import <body.md> --paseo-agent <agent-id>          [--result <file>]
+```
+
+**它刻意不做的三件事**：
+- ⛔ 不声称用过没用过的通道——**来源必须显式声明**，二者给一个
+- ⛔ **锚点绝不接受调用方传入**，`HEAD` 与 `staged_diff_hash` 都在这里计算。
+  这正是「导入外部审查」与「伪造回执」的分界：工具算出的锚点证明的是
+  「导入时刻 staged 的内容」——一个它能确立的事实；而手填的 hash 什么都不证明
+- ⛔ 不代填结论。正文里没有 `VERIFY_VERDICT` 行就拒绝（exit 3）
+
+`capability` 与 `hetero_dispatch` 同一套语义：只有评审模型族**可证不同于**声明的
+实施族才给 `FULL`，未声明或解析不出一律 `EVIDENCE_ONLY`（fail-closed）。
+`--paseo-agent` 时向 Paseo `inspect` 问模型，而不是相信参数；问不到就记
+`paseo_verified: no`。
+
+测试 `tests/run_verify_import.sh`（18 断言），其中 V5 是端到端：导入后真的跑 gate，
+确认 CHECK 6 不再报「无对应 verify」「改动超限」「缺 VERIFY_VERDICT」。
+
 ## v2.4.2 — CHECK 6 在新 worktree 里的两处误判
 
 现场（2026-08-26，crm-center 的新 worktree）：28 份 verify 文档、mtime **全部相同**
