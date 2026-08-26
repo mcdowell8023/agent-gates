@@ -8,6 +8,9 @@ set -euo pipefail
 
 REPO_URL="https://github.com/mcdowell8023/agent-gates"
 REPO_DIR=""
+# Only ever set when fetch_repo creates a temp dir itself. cleanup() deletes THIS and
+# nothing else — see the comment there for why that matters.
+_TMP_FETCH_DIR=""
 TARGET_DIR=""
 INSTALL_DIR="$HOME/.agent-gates"
 # Directory of this install.sh (= the repo, for a local checkout run). Empty when
@@ -374,6 +377,7 @@ fetch_repo() {
 
   local tmp_dir
   tmp_dir=$(mktemp -d)
+  _TMP_FETCH_DIR="$tmp_dir"
   REPO_DIR="$tmp_dir/agent-gates"
   info "Source: remote $REPO_URL (main) — use --local to install the checkout you are in"
 
@@ -828,8 +832,19 @@ with open(sys.argv[1], 'w') as f: json.dump(d, f, indent=2)
 }
 
 # --- Cleanup ---
+# ⛔ Deletes ONLY the temp dir this script created. It used to be
+#     rm -rf "$(dirname "$REPO_DIR")"
+# which is correct in remote mode (REPO_DIR="$tmp/agent-gates", so dirname is the temp dir)
+# and catastrophic under --local, where REPO_DIR is the user's own checkout and dirname is
+# its PARENT. Every --local install therefore wiped the checkout and everything beside it —
+# observed six times over 2026-08-21..26 on ~/AgentWorkspace/projects/tools, each time
+# misdiagnosed as syncthing propagating a remote deletion. What finally located it: the
+# syncthing DB reported the delete as originating from THIS device, not the peer.
+#
+# Never derive a deletion target from a path that may point at user data. Track what you
+# created and delete exactly that.
 cleanup() {
-  [[ -n "$REPO_DIR" ]] && rm -rf "$(dirname "$REPO_DIR")" 2>/dev/null || true
+  [[ -n "${_TMP_FETCH_DIR:-}" ]] && rm -rf "$_TMP_FETCH_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
 
