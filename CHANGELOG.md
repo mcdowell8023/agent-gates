@@ -2,6 +2,42 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.4.1 — 堵住绕过 opencode 通道开关的那条路
+
+v2.4.0 把 opencode 通道默认关了，但**只有 `hetero_dispatch` 会看那个开关**。
+`oc-review` 是独立入口：agent、skill 或习惯直接调它，就完全绕过了这个决定——
+起一个共享 `opencode serve`，然后阻塞整个 `AG_REVIEW_TIMEOUT`。会话继续反馈
+「审查卡住导致任务无法进行」，而通道名义上是禁用的。
+
+### Fixed
+- `oc-review` 在 opencode 通道被显式禁用时**立即拒绝**（exit 69 `EX_UNAVAILABLE`），
+  在碰到 serve 之前就返回。实测 **0 秒**返回，对比之前挂满超时。
+  报错直接给出替代命令与恢复方式，而不是只说「失败了」：
+  ```
+  Use instead:  pi -p --provider <provider> --model <model> "<prompt>"
+  Re-enable:    HETERO_CHAN_OPENCODE=1, or channels.opencode.enabled=true
+  ```
+  env 优先于配置，与 `config.sh` 同一套优先级。**没有配置文件时不拦**——
+  这道守卫只执行「显式禁用」，默认值仍由 dispatch 自己决定
+- `AG_REVIEW_TIMEOUT` 默认 **300s → 120s**（三处：`oc-review`、
+  `agent-gates-review`、`lib/hetero/select.sh`）。五分钟才浮出水面的挂起，
+  读起来就是「门禁坏了」；而 pi 对同一任务约 7s 返回，120s 对正常审查够用
+
+### Added
+- `tests/run_oc_review_guard.sh`（10 断言）。**fake 的 opencode 会 sleep 300** ——
+  守卫失效时测试会超时而不是静默通过，所以「快速拒绝」是可证的而非假设的
+
+### Changed
+- `tests/run_oc_review.sh` 显式 `export HETERO_CHAN_OPENCODE=1`：它测的就是
+  oc-review，这个依赖应当写出来而不是继承本机配置
+
+### 同期改的（不在本仓）
+审查工具优先级已在指令层同步调整——**agent 读到的东西才决定它调什么**：
+- `agent-review-protocol/SKILL.md` §8：pi 升为首选，opencode 降到第 3 并标注原因
+- `agent-workflow-rules/SKILL.md`：路由描述改为 `pi → codex → codebuddy`
+- 全局规则 `30-delegation.md`：工具优先级同步，并写明「撞到 opencode 超时不要收窄
+  prompt 重试——极小 prompt 也超时」
+
 ## v2.4.0 — opencode 不再是默认审查通道
 
 ⚠️ **行为变更**：`opencode` 通道默认关闭。六通道顺序实际变为

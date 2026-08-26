@@ -48,7 +48,7 @@ MAX_CHARS="${AG_REVIEW_MAX_CHARS:-800}"
 # since v1.x but had zero call sites, so a reviewer that never returned hung the whole
 # gate — one observed run burned 80 minutes and produced nothing at exit 0.
 _WT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/with-timeout.mjs"
-TIMEOUT_SECS="${AG_REVIEW_TIMEOUT:-300}"
+TIMEOUT_SECS="${AG_REVIEW_TIMEOUT:-120}"
 if [[ ! -f "$_WT" ]] || ! command -v node >/dev/null 2>&1; then
   # fail-closed rather than fail-open: silently dropping the timeout would restore the
   # original hang risk while the code still claims every invocation is bounded.

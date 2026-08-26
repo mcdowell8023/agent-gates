@@ -15,7 +15,9 @@
 #   OC_REVIEW_RETRIES   extra attempts after the first (default 2 → up to 3 total)
 #   OC_REVIEW_OPENCODE  opencode binary (default "opencode"; overridable for tests)
 #   OC_SERVE_DISABLED   set to 1 to skip shared serve integration
-#   AG_REVIEW_TIMEOUT   seconds allowed per attempt (default 300). A timeout is not
+#   AG_REVIEW_TIMEOUT   seconds allowed per attempt (default 120; was 300 until v2.4.1 —
+#                       a hang that takes 5 minutes to surface reads as "the gate is broken").
+#                       A timeout is not
 #                       retried — it exits 75 so the caller can fall back instead.
 # Source: https://github.com/mcdowell8023/agent-gates
 set -uo pipefail
@@ -62,6 +64,54 @@ _build_args() {
   done
 }
 
+# v2.4.1: refuse fast when the opencode channel is disabled.
+#
+# v2.4.0 turned that channel off by default, but only hetero_dispatch consults the flag.
+# oc-review is a standalone entry point: called directly — by an agent, a skill, or habit —
+# it bypassed the decision entirely, started a shared `opencode serve`, and then blocked for
+# the full AG_REVIEW_TIMEOUT. Sessions kept reporting "审查卡住导致任务无法进行" while the
+# channel was supposedly disabled.
+#
+# Five minutes of hanging is strictly worse than an immediate error that names the
+# alternative, so this refuses before touching the serve.
+_oc_chan_enabled() {
+  # env wins, same precedence as config.sh
+  if [[ -n "${HETERO_CHAN_OPENCODE:-}" ]]; then
+    [[ "$HETERO_CHAN_OPENCODE" == "1" ]]
+    return
+  fi
+  local f="${AGENT_GATES_DIR:-$HOME/.agent-gates}/hetero-check.json"
+  # No config file here means "nothing said to disable it" — dispatch applies its own
+  # default. This guard only enforces an explicit disable.
+  [[ -f "$f" ]] || return 0
+  local v
+  v=$(python3 -c '
+import json,sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+c = (d.get("channels") or {}).get("opencode") or {}
+e = c.get("enabled")
+print("" if e is None else ("1" if e else "0"))
+' "$f" 2>/dev/null)
+  [[ "$v" != "0" ]]
+}
+
+if ! _oc_chan_enabled; then
+  {
+    echo "oc-review: the opencode channel is disabled — refusing to start a serve."
+    echo "  Why: measured timing out as a review channel — 120s through agent-gates-review,"
+    echo "       200s through a manual --attach, and that was with a minimal prompt — while"
+    echo "       pi returns in ~7s. Retrying with a narrower prompt does NOT help."
+    echo "  Use instead:  pi -p --provider <provider> --model <model> \"<prompt>\""
+    echo "                (--provider and --model are two separate flags)"
+    echo "  Re-enable:    HETERO_CHAN_OPENCODE=1, or channels.opencode.enabled=true in"
+    echo "                \${AGENT_GATES_DIR:-~/.agent-gates}/hetero-check.json"
+  } >&2
+  exit 69   # EX_UNAVAILABLE
+fi
+
 tmp=$(mktemp); errtmp=$(mktemp)
 trap 'rm -f "$tmp" "$errtmp"' EXIT
 
@@ -69,7 +119,7 @@ trap 'rm -f "$tmp" "$errtmp"' EXIT
 # caller indefinitely — and because the retry loop below only reacts to exit codes,
 # a hang was never even reached, let alone retried.
 _WT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/with-timeout.mjs"
-_TIMEOUT_SECS="${AG_REVIEW_TIMEOUT:-300}"
+_TIMEOUT_SECS="${AG_REVIEW_TIMEOUT:-120}"
 if [[ ! -f "$_WT" ]] || ! command -v node >/dev/null 2>&1; then
   # fail-closed, matching the serve guard above: exit 75 so the caller falls back, rather
   # than quietly running an unbounded opencode that can hang the whole gate.

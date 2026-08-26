@@ -4,6 +4,11 @@
 # simulate empty-output (P2) and verify oc-review retries / falls back deterministically.
 set -uo pipefail
 
+# These cases exercise oc-review itself, and since v2.4.1 it refuses to run when the
+# opencode channel is disabled (v2.4.0 turned that off by default). The dependency has to
+# be stated rather than inherited from whatever the machine happens to be configured with.
+export HETERO_CHAN_OPENCODE=1
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OC_REVIEW="$SCRIPT_DIR/../bin/oc-review"
 # File-based counter: tests run in ( ) subshells for isolation, so plain vars would

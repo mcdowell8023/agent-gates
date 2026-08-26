@@ -163,7 +163,7 @@ _try_review_model() {
   # never wired to any call site, so a request that never came back hung the whole
   # review chain — one observed run burned 80 minutes and produced nothing.
   local _wt="${BASH_SOURCE[0]%/*}/../../bin/with-timeout.mjs"
-  local _timeout_secs="${AG_REVIEW_TIMEOUT:-300}"
+  local _timeout_secs="${AG_REVIEW_TIMEOUT:-120}"
   if [[ ! -f "$_wt" ]] || ! command -v node >/dev/null 2>&1; then
     # fail-closed, same posture as the serve guard above. Degrading to an unbounded run
     # would silently drop the guarantee this block exists to provide, and an unbounded
