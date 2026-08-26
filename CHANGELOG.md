@@ -2,6 +2,45 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.4.2 — CHECK 6 在新 worktree 里的两处误判
+
+现场（2026-08-26，crm-center 的新 worktree）：28 份 verify 文档、mtime **全部相同**
+（`git worktree add` 的 checkout 时刻）、23 份带 `staged_diff_hash`、**0 份锚定当前改动**。
+报错是：
+
+```
+❌ Significant changes (115 lines) made AFTER verification — re-verify required
+```
+
+**这个报错指向了完全错误的方向**——听起来像「你改太多了」，实际是「它随机挑了一份
+跟这次改动无关的旧 PASS 来比」。两处独立缺陷叠加：
+
+### Fixed — 「一份都没锚定」不等于「回落 mtime 猜一个」
+
+v2.4.0 让锚定命中优先，但**无匹配时仍回落 mtime**。两种情况被混为一谈：
+
+| 情况 | 含义 | 现在 |
+|---|---|---|
+| 有 `staged_diff_hash` 但全不匹配 | **可判定：这次改动没有 verify** | 明确报错，不猜 |
+| 无 `staged_diff_hash`（旧产物） | 不可判定 | 回落 mtime（兼容） |
+
+新报错带诊断：候选份数、其中多少可判定，以及「这 N 份 mtime 全同——典型的新建
+worktree，此时『按 mtime 选最新』本就是任意挑一个，所以不猜」。
+
+⚠️ 「可判定」要求**真的有 `staged_diff_hash` 字段**，不是「有 dispatch.json 就算」。
+只带 `channel`/`capability` 的旧记录无法锚定，把它们算作可判定会把「没有 hash 可比」
+变成「等于没验证」——这样写会打掉 16 条既有断言。
+
+### Fixed — 锚定命中后不该再被 mtime 推翻
+
+`PASS` 分支的新鲜度检查比较「源文件 mtime vs verify 文档 mtime」，超过 20 行就拦。
+但 `git worktree add` 让**每个源文件都比每份 verify 文档新**，于是全部改动被算作
+「验证后的」。而锚点命中意味着 staged 内容与验证时**逐字节相同**——「验证后改了吗」
+已经有答案了：没有。
+
+⇒ 锚定命中时跳过 mtime 比较。**强证据不该被弱证据推翻**；mtime 只在没有锚点可比时
+才是唯一信号（此时报错会附一句说明用的是 mtime 判据）。
+
 ## v2.4.1 — 堵住绕过 opencode 通道开关的那条路
 
 v2.4.0 把 opencode 通道默认关了，但**只有 `hetero_dispatch` 会看那个开关**。

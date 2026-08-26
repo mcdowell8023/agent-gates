@@ -405,6 +405,9 @@ if [[ "${SKIP_VERIFY:-0}" != "1" ]]; then
       VERIFY_FILE=""
       VERIFY_NEWEST_MTIME=0
       VERIFY_ANCHORED=""
+      _V6_CAND=0          # candidates in the window
+      _V6_DECIDABLE=0     # candidates carrying a dispatch.json (i.e. anchorable)
+      _V6_MTIME_SET=""    # distinct mtimes seen, to detect the fresh-worktree shape
       if command -v sha256sum >/dev/null 2>&1; then
         _V6_CUR_HASH=$(git diff --cached -- ':!.agent/verify' 2>/dev/null | sha256sum | cut -d' ' -f1)
       else
@@ -412,23 +415,58 @@ if [[ "${SKIP_VERIFY:-0}" != "1" ]]; then
       fi
       while IFS= read -r vf; do
         [[ -z "$vf" || ! -f "$vf" ]] && continue
-        if [[ -n "$_V6_CUR_HASH" ]]; then
-          _v6_dj=".agent/verify/$(basename "$vf" .md).dispatch.json"
-          if [[ -f "$_v6_dj" ]]; then
-            _v6_h=$(sed -n 's/.*"staged_diff_hash"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F]*\)".*/\1/p' "$_v6_dj" 2>/dev/null | head -1)
-            [[ "$_v6_h" == "$_V6_CUR_HASH" ]] && VERIFY_ANCHORED="$vf"
+        _V6_CAND=$((_V6_CAND+1))
+        # "Decidable" requires an actual staged_diff_hash, not merely the presence of a
+        # dispatch record. Records carrying only channel/capability (older artifacts, and
+        # every fixture in run_gate.sh) cannot be anchored either way, so counting them as
+        # decidable would turn "no hash to compare" into "verified nothing" and reject
+        # perfectly valid setups — it broke 16 assertions when written that way.
+        _v6_dj=".agent/verify/$(basename "$vf" .md).dispatch.json"
+        if [[ -f "$_v6_dj" ]]; then
+          _v6_h=$(sed -n 's/.*"staged_diff_hash"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F]*\)".*/\1/p' "$_v6_dj" 2>/dev/null | head -1)
+          if [[ -n "$_v6_h" ]]; then
+            _V6_DECIDABLE=$((_V6_DECIDABLE+1))
+            [[ -n "$_V6_CUR_HASH" && "$_v6_h" == "$_V6_CUR_HASH" ]] && VERIFY_ANCHORED="$vf"
           fi
         fi
         vf_mtime=$(stat -f %m "$vf" 2>/dev/null || stat -c %Y "$vf" 2>/dev/null || echo "0")
+        case " $_V6_MTIME_SET " in *" $vf_mtime "*) ;; *) _V6_MTIME_SET="$_V6_MTIME_SET $vf_mtime" ;; esac
         if [[ "$vf_mtime" -gt "$VERIFY_NEWEST_MTIME" ]]; then
           VERIFY_NEWEST_MTIME="$vf_mtime"
           VERIFY_FILE="$vf"
         fi
       done < <(find .agent/verify/ -name "*.md" -mmin -240 2>/dev/null)
-      # An anchored match is deterministic, so it wins over the mtime guess.
-      [[ -n "$VERIFY_ANCHORED" ]] && VERIFY_FILE="$VERIFY_ANCHORED"
 
-      if [[ -z "$VERIFY_FILE" ]]; then
+      if [[ -n "$VERIFY_ANCHORED" ]]; then
+        # Deterministic: this document's dispatch record binds exactly the staged diff.
+        VERIFY_FILE="$VERIFY_ANCHORED"
+      elif [[ "$_V6_DECIDABLE" -gt 0 ]]; then
+        # Anchorable candidates exist and NONE matches ⇒ there is simply no verify for this
+        # change. Falling back to mtime here is what produced the misleading
+        # "Significant changes (N lines) made AFTER verification": in a fresh worktree
+        # `git worktree add` stamps every doc with the same mtime, so the fallback picked an
+        # unrelated task's old PASS at random (find order) and compared line counts against
+        # it. Reported 2026-08-26: 28 docs, one single mtime, 23 anchorable, 0 matching.
+        # "Cannot prove a verify exists for this diff" must not read as "you changed too much".
+        _v6_distinct=$(printf '%s' "$_V6_MTIME_SET" | wc -w | tr -d ' ')
+        fail "No verifier evidence anchored to the current staged diff — verify this change"
+        echo "   Looked at $_V6_CAND verify doc(s) in .agent/verify/ within the 4h window;"
+        echo "   $_V6_DECIDABLE carry a dispatch record and none binds the current staged diff."
+        if [[ "$_V6_CAND" -gt 1 && "$_v6_distinct" -le 1 ]]; then
+          echo "   ⚠️  All $_V6_CAND share one mtime — typical of a fresh \`git worktree add\`,"
+          echo "       so \"newest by mtime\" would have been an arbitrary pick. Not guessing."
+        fi
+        echo "   Fix: run the verifier against THIS change so its dispatch record binds"
+        echo "        the current staged diff. Pre-existing docs from other tasks do not count."
+        VERIFY_FILE=""
+        VERIFY_VERDICT="__NO_ANCHOR__"   # skip the verdict/staleness checks below
+      fi
+      # else: nothing anchorable at all (legacy docs without dispatch records) — the mtime
+      # pick above stands, which is the only signal available.
+
+      if [[ "${VERIFY_VERDICT:-}" == "__NO_ANCHOR__" ]]; then
+        : # already reported above with full diagnostics
+      elif [[ -z "$VERIFY_FILE" ]]; then
         fail "Verifier evidence missing or stale (>4h old)"
         echo "   Fix: Run verifier agent, save to .agent/verify/\$(date +%Y-%m-%d)-<topic>.md"
       else
@@ -465,7 +503,25 @@ except Exception:
 
           case "$VERIFY_VERDICT" in
             PASS)
-              # Freshness: post-verify source changes ≤ 20 lines (mirrors Gate 2 post-review check)
+              # Freshness. Two different signals, and the strong one must win:
+              #
+              #   anchored  — the dispatch record's staged_diff_hash equals the CURRENT staged
+              #               diff, i.e. the staged content is byte-identical to what was
+              #               verified. "Did anything change since verification?" is already
+              #               answered: no.
+              #   mtime     — source file newer than the verify doc. A weak proxy, and simply
+              #               wrong in a fresh worktree: `git worktree add` stamps everything
+              #               at checkout time, so every source file ends up newer than every
+              #               verify doc and ALL changes get counted as post-verification.
+              #               That is what produced "Significant changes (115 lines) made
+              #               AFTER verification" on a change whose anchor matched exactly
+              #               (reported 2026-08-26).
+              #
+              # So when the anchor matched, skip the mtime comparison — it can only contradict
+              # a stronger proof.
+              if [[ -n "${VERIFY_ANCHORED:-}" ]]; then
+                : # anchor already proves the staged diff is unchanged since verification
+              else
               VERIFY_MTIME=$(stat -f %m "$VERIFY_FILE" 2>/dev/null || stat -c %Y "$VERIFY_FILE" 2>/dev/null || echo "0")
               POST_VERIFY_LINES=0
               while IFS= read -r sf; do
@@ -479,6 +535,8 @@ except Exception:
                 | grep -vE '(\.(lock|md|json|yaml|yml)$|generated/|migrations/|\.d\.ts$)')
               if [[ "$POST_VERIFY_LINES" -gt 20 ]]; then
                 fail "Significant changes ($POST_VERIFY_LINES lines) made AFTER verification — re-verify required"
+                echo "   (mtime-based check; no dispatch anchor was available to compare against)"
+              fi
               fi
               ;;
             FAIL)
