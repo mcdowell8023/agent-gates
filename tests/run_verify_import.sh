@@ -127,6 +127,40 @@ echo "V6: 重复导入不互相覆盖（run-id 唯一）"
   teardown
 )
 
+# V7: the implementer family must come from the config file too, not env only.
+# Caught by end-to-end run, NOT by the unit cases above — every one of them exports
+# HETERO_IMPLEMENTER_FAMILY explicitly, so none of them exercised the config path. Without
+# this the command always lands EVIDENCE_ONLY in real use, every high-risk path downgrades
+# to INCOMPLETE, and the user is back to signing an ACK every time — precisely the problem
+# this whole line of work was meant to remove. Same mistake as the one fixed in af4c6c8,
+# repeated in a new command.
+echo "V7: ⭐ implementer_family 从配置文件读（不只认 env）"
+(
+  setup
+  unset HETERO_IMPLEMENTER_FAMILY
+  cat > "$AGENT_GATES_DIR/hetero-check.json" <<'JSON'
+{ "implementer_family": "anthropic" }
+JSON
+  bash "$IMPORT" "$BODY" --imported-model "volcengine-coding/deepseek-v4-flash" >/dev/null 2>&1
+  DJ=$(ls .agent/verify/*.dispatch.json | head -1)
+  assert "配置里的 implementer_family 生效 → FULL" "$(grep -q '"capability"[^,]*FULL' "$DJ" 2>/dev/null && echo true || echo false)"
+  assert "dispatch 记录了实施族" "$(grep -q '"implementer_family"[^,]*anthropic' "$DJ" 2>/dev/null && echo true || echo false)"
+  teardown
+)
+
+echo "V8: env 仍优先于配置"
+(
+  setup
+  cat > "$AGENT_GATES_DIR/hetero-check.json" <<'JSON'
+{ "implementer_family": "deepseek" }
+JSON
+  HETERO_IMPLEMENTER_FAMILY=anthropic bash "$IMPORT" "$BODY" --imported-model "volcengine-coding/deepseek-v4-flash" >/dev/null 2>&1
+  DJ=$(ls .agent/verify/*.dispatch.json | head -1)
+  # env=anthropic vs reviewer=deepseek → 异构 → FULL；若错用配置的 deepseek 则同族 → EVIDENCE_ONLY
+  assert "env 覆盖配置（异构 → FULL）" "$(grep -q '"capability"[^,]*FULL' "$DJ" 2>/dev/null && echo true || echo false)"
+  teardown
+)
+
 echo
 read -r P F < "$RESULTS_FILE"
 echo "=== PASS=$P FAIL=$F ==="

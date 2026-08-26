@@ -2,6 +2,19 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.5.1 — verify-import 读不到配置
+
+`agent-gates-verify-import` 只 source 了 `family.sh`，没有 source `config.sh` 并调
+`hetero_load_config` ⇒ `implementer_family` **只认 env**，读不到
+`hetero-check.json`。实际使用中该变量不会被设置，于是 capability 永远落
+`EVIDENCE_ONLY`、高风险路径永远降级 INCOMPLETE、用户每次都要签 ACK——
+正是这一系列工作要消除的问题。
+
+与 `af4c6c8` 修的是同一个坑，在新命令里又犯了一次。**单元测试全部显式
+`export` 了那个变量，所以一条都没暴露；只有端到端跑真实流程时才发现。**
+
+新增 V7/V8：配置文件里的 `implementer_family` 生效、env 仍优先于配置。
+
 ## v2.5.0 — verify 侧补上 CLI 入口
 
 ### Added — `agent-gates-verify-import`

@@ -100,6 +100,18 @@ fi
 # capability: same semantics as hetero_dispatch — FULL only when the reviewer's model family
 # provably differs from the declared implementer family. Unset/unresolvable is fail-closed.
 CAPABILITY="EVIDENCE_ONLY"
+# Load config so implementer_family can come from hetero-check.json, not env only. Without
+# this the command reads env exclusively, so in real use HETERO_IMPLEMENTER_FAMILY is unset,
+# capability always lands EVIDENCE_ONLY, every high-risk path downgrades to INCOMPLETE, and
+# the user signs an ACK every single time — exactly the problem this line of work exists to
+# remove. Same mistake as af4c6c8 fixed in config.sh, repeated here in a new command; the
+# unit tests all exported the variable explicitly, so only the end-to-end run caught it.
+_cfg_lib="$SCRIPT_DIR/../lib/hetero/config.sh"
+if [[ -f "$_cfg_lib" ]]; then
+  # shellcheck disable=SC1090
+  source "$_cfg_lib"
+  declare -f hetero_load_config >/dev/null 2>&1 && hetero_load_config 2>/dev/null || true
+fi
 _fam_lib="$SCRIPT_DIR/../lib/hetero/family.sh"
 if [[ -f "$_fam_lib" ]]; then
   # shellcheck disable=SC1090
