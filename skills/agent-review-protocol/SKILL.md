@@ -33,7 +33,7 @@ Instead of manually choosing a review tool, use the unified review command:
 ~/.agent-gates/bin/agent-gates-review <prompt-file> [--result <result-file>]
 ```
 
-It reads `~/.agent-gates/review-capability.json`, routes to the best available heterogeneous tool (L3→opencode→codex, L2→opencode, L1→codex), and auto-appends `REVIEW_TOOL` / `REVIEW_MODEL` / `REVIEW_LEVEL` markers to the output. On L0 machines (no heterogeneous tool) it exits 78 — caller falls back to same-model agent-tool.
+It reads `~/.agent-gates/review-capability.json`, routes to the best available heterogeneous tool (pi first since v2.4.0; opencode is disabled by default — see the priority table in §8), and auto-appends `REVIEW_TOOL` / `REVIEW_MODEL` / `REVIEW_LEVEL` markers to the output. On L0 machines (no heterogeneous tool) it exits 78 — caller falls back to same-model agent-tool.
 
 **Use this command instead of spawning a Claude subagent for review.** On L1+ machines, using a same-model subagent violates the heterogeneous-review requirement (红线 #8).
 
@@ -45,7 +45,7 @@ v2.0.2 起每种失败单独报一行。`HETERO_EXHAUSTED` 只是汇总，**本�
 |---|---|---|
 | `answered N chars but produced no VERDICT line` | 模型正常答了，输出里没有可识别的结论行。**占比最高**。报错里带模型输出前 200 字符，可自行确认它答了 | 改 prompt（见下）。通道、模型、网络都没问题，别往那边查 |
 | `opencode exited 0 but produced empty output` | 传输层抖动 | 重试；持续出现用 `oc-reaper` 查共享 serve |
-| `opencode timed out after Ns` | 撞上 `AG_REVIEW_TIMEOUT`（默认 300s） | 收窄 prompt 的探索范围。「找出所有引用 X 的地方」等于放模型爬整个仓 |
+| `opencode timed out after Ns` | 撞上 `AG_REVIEW_TIMEOUT`（v2.4.1 起默认 120s） | ⭐ **别再收窄 prompt 重试**——实测极小 prompt 也超时。换 pi（§8 优先级 1），同一任务约 7s 返回 |
 | `shared opencode serve unhealthy at <url>` | fail-closed，刻意拒绝裸跑 | `oc-reaper --apply` 清掉卡死 serve，再重试 |
 | `opencode exited N` / `codex timed out` | 审查进程本身失败 | 手工跑同一条命令看 stderr |
 
@@ -139,9 +139,36 @@ Cross-check MUST use a different model/vendor. Priority order:
 
 | Priority | Tool | When to use |
 | --- | --- | --- |
-| 1. **opencode CLI + heterogeneous model** (首选) | `opencode run --pure -m <provider/model> --dir <workdir> --format json "<prompt>"` (⚠️ `--pure` 绕过 OMO 注入；`-p` 是 `--password`；prompt 是位置参数放最后；**必须 `--format json`** 否则非 TTY 无输出) | Default for all cross-checks |
-| 2. **codex CLI + GPT-5 series** (备选) | Two sub-commands (see below) | When opencode unavailable or prompt too long |
-| 3. **code-reviewer / critic agent** (兜底) | Same Claude model, different agent role | **Only when 1+2 are genuinely unavailable** (true L0 machine). NOT a shortcut when opencode/codex is installed — see §8 "L0 Fallback is a VIOLATION When L1+ is Available". |
+| 1. ⭐ **pi + heterogeneous model** (首选) | `pi -p --provider <provider> --model <model> "<prompt>"` （⚠️ `--provider` 与 `--model` 是**两个独立参数**，不能写成 `provider/model` 一串；prompt 是位置参数放最后） | **Default for all cross-checks** |
+| 2. **codex CLI + GPT-5 series** (备选) | Two sub-commands (see below) | pi 不可用，或 prompt 过长 |
+| 3. 🔻 **opencode CLI**（降级，需显式启用） | `opencode run --pure -m <provider/model> --dir <workdir> --format json "<prompt>"` | ⛔ **默认不要用**——见下方红字。仅在 pi 与 codex 都不可用时 |
+| 4. **code-reviewer / critic agent** (兜底) | Same Claude model, different agent role | **Only when 1–3 are genuinely unavailable** (true L0 machine). NOT a shortcut when a heterogeneous tool is installed — see §8 "L0 Fallback is a VIOLATION When L1+ is Available". |
+
+### ⛔ 为什么 opencode 从首选降到第 3（2026-08-26）
+
+同一个审查任务实测：
+
+| 路径 | 结果 |
+|---|---|
+| `agent-gates-review`（走 opencode 通道） | **120s 超时**，极小 prompt 也一样 |
+| 手动 `opencode run --pure --attach` | **200s 超时** |
+| `pi -p`（同一任务） | **~7s 返回**，evidence 立即可得 |
+
+opencode 需要常驻 `opencode serve`；实测一个跑了 **4 天、烧掉 133 分钟 CPU、机器上零客户端**。
+多个会话连续反馈「审查卡住导致任务无法进行」——**卡点在审查，不在开发**。
+
+⚠️ **撞到 opencode 超时不要收窄 prompt 重试**——极小 prompt 也超时。换 pi。
+
+agent-gates v2.4.0 起该通道默认关闭，v2.4.1 起 `oc-review` 在禁用时会**立即拒绝**
+（exit 69，0 秒返回）并提示替代命令。要恢复：`HETERO_CHAN_OPENCODE=1` 或
+`channels.opencode.enabled=true`。
+
+### pi 的模型怎么选
+
+⛔ 硬约束仍是**评审族 ≠ 实施族**，不是「必须用某个模型」。优先 gpt-5.5 及以上；没有就用
+任何满足异构的模型；`deepseek-v4-flash` 性价比很高、推荐使用，**前提是先过异构校验**。
+`~/.agent-gates/hetero-check.json` 里可配 `pi_models.primary` 与 `implementer_family`，
+配了之后走 `agent-gates-review` **不需要每次指定**。
 
 ### Model Selection for Cross-Check
 
