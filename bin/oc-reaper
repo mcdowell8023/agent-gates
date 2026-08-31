@@ -35,6 +35,8 @@
 #      OC_REAPER_SPIN_CPU (default 80, percent; 0 disables spin detection),
 #      OC_REAPER_SPIN_WINDOW (default 2, cputime sample seconds),
 #      OC_REAPER_SPIN_IDLE_PCT (default 95), OC_REAPER_SPIN_SAMPLE_SECS (default 2),
+#      OC_REAPER_CHILD_WINDOW (default 1, seconds; cputime sample window used to tell a
+#        working child from one that finished and hung — see serve_has_working_children),
 #      OC_REVIEW_PORT (shared port to always keep).
 # Source: https://github.com/mcdowell8023/agent-gates
 set -uo pipefail
@@ -122,15 +124,51 @@ spin_cpu_pct() {
 # protected six abandoned serves, and the reaper reported "0 reapable, 7 kept" while three
 # serves burned 130-158% CPU each.
 serve_has_working_children() {
-  local pid="$1" c
+  # A child that EXISTS is not a child that is WORKING.
+  #
+  # Reported 2026-08-31: jest processes that had finished their entire run but never exited.
+  # The test code left a listening server (TCP 127.0.0.1:7777) plus other open handles, so
+  # Node's event loop refused to exit, and none of the commands carried --forceExit. Those
+  # processes sit at CPU=0 indefinitely while remaining children of the serve. The previous
+  # rule read that as "real work in flight", so such a serve would never be reclaimed — the
+  # very "existence stands in for liveness" substitution the comments in this file warn
+  # about, committed here in the check itself.
+  #
+  # So: require at least one non-lsp child to be actually consuming CPU. Two cputime samples
+  # are needed — `ps -o pcpu=` is a lifetime average and still shows the historical burn for
+  # a process that finished and hung. The sampling cost is paid only when children exist.
+  #
+  # Conservative on every unknown: if a child vanishes mid-sample, or its cputime cannot be
+  # read, treat it as working and keep the serve.
+  local pid="$1" c cmd kids="" pairs="" k b t2
   while IFS= read -r c; do
     [[ -z "$c" ]] && continue
-    case "$(ps -o command= -p "$c" 2>/dev/null)" in
+    cmd=$(ps -o command= -p "$c" 2>/dev/null)
+    case "$cmd" in
       *lsp-daemon*) ;;
       "")           ;;
-      *)            return 0 ;;
+      *)            kids="${kids}${c}
+" ;;
     esac
   done < <(pgrep -P "$pid" 2>/dev/null)
+  [[ -z "$kids" ]] && return 1
+
+  while IFS= read -r k; do
+    [[ -z "$k" ]] && continue
+    pairs="${pairs}${k}:$(cputime_cs "$(ps -o time= -p "$k" 2>/dev/null)")
+"
+  done <<< "$kids"
+
+  sleep "${OC_REAPER_CHILD_WINDOW:-1}"
+
+  while IFS=: read -r k b; do
+    [[ -z "$k" ]] && continue
+    # Vanished between samples -> cannot prove it was idle.
+    ps -p "$k" >/dev/null 2>&1 || return 0
+    t2=$(cputime_cs "$(ps -o time= -p "$k" 2>/dev/null)")
+    [[ -z "$t2" || -z "$b" ]] && return 0
+    [[ "$t2" -gt "$b" ]] && return 0
+  done <<< "$pairs"
   return 1
 }
 

@@ -82,6 +82,12 @@ spawn_serve() {
       inner='bash -c "exec -a work-child sleep 300" & exec -a "opencode serve --port PORT" sleep 300' ;;
     with_lsp_child)
       inner='bash -c "exec -a node-lsp-daemon-cli sleep 300" & exec -a "opencode serve --port PORT" yes' ;;
+    # 跑完不退的 jest：进程在、CPU 恒为 0
+    with_idle_child)
+      inner='bash -c "exec -a jest-finished-but-hanging sleep 300" & exec -a "opencode serve --port PORT" yes' ;;
+    # 真在跑的测试：子进程持续烧 CPU
+    with_busy_child)
+      inner='bash -c "exec -a jest-actually-running yes" & exec -a "opencode serve --port PORT" yes' ;;
   esac
   inner="${inner//PORT/$port}"
   perl <<PERL >/dev/null 2>&1 &
@@ -225,6 +231,32 @@ out=$(env -u OC_REVIEW_PORT -u OC_SERVE_PORT PATH="$FAKEBIN:$PATH" \
 assert "port 4096 kept by default and announced" "$r"
 [[ "$out" == *"4096"* && "$out" == *"would reap"* ]] && r2=false || r2=true
 assert "port 4096 never listed as reapable" "$r2"
+kill_last
+
+# L1c: a child that EXISTS is not the same as a child that is WORKING.
+#
+# Reported 2026-08-31: jest processes that finished their run but never exited — test code
+# left a listening server (TCP 127.0.0.1:7777) and other open handles, so Node's event loop
+# refused to exit, and none of the commands carried --forceExit. Those processes sit at
+# CPU=0 forever while still being children of the serve. Under the old layer-1 rule that
+# reads as "real work in flight", so the serve would never be reclaimed — the exact
+# "existence stands in for liveness" substitution this file's own comments warn about.
+echo "L1c: ⭐ 子进程存在但 CPU=0（跑完不退的 jest）→ 不算在干活"
+spawn_serve 9921 with_idle_child
+sleep 1
+assert_fake_up 9921
+out=$(FAKE_SAMPLE_KEV=2231 run_reaper)
+[[ "$out" == *"9921"* && "$out" == *"would reap"* ]] && r=true || r=false
+assert "闲置子进程不再阻止回收" "$r"
+kill_last
+
+echo "L1d: 子进程真在烧 CPU → 仍然保留（不能误杀在跑的测试）"
+spawn_serve 9922 with_busy_child
+sleep 1
+assert_fake_up 9922
+out=$(FAKE_SAMPLE_KEV=2231 run_reaper)
+[[ "$out" == *"9922"* && "$out" == *"would reap"* ]] && r=false || r=true
+assert "活跃子进程仍然保护 serve" "$r"
 kill_last
 
 echo

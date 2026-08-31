@@ -2,6 +2,29 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.6.1 — 层1：子进程「存在」不等于「在干活」
+
+外部反馈（2026-08-31）报了一批 jest 进程：**测试全部跑完、结果 3.6 MB 已落盘
+（345 套件 / 8037 用例），但进程永不退出**。原因是测试代码留下未关闭的 handle
+（`TCP 127.0.0.1:7777 (LISTEN)` + 5 个 ESTABLISHED + PIPE/KQUEUE），Node 事件循环
+因此拒绝退出，而这批命令**一个都没带 `--forceExit`**。它们此后 CPU 恒为 0。
+
+jest 本身不属于 agent-gates，但它**削弱了 v2.2.0 引入的三层判据**：
+`serve_has_working_children` 只检查「有没有非 lsp 子进程」，于是一个跑完不退的
+jest 会永久充当「在干活」的证据 ⇒ **那个 serve 永不回收**。
+
+⚠️ 这正是本文件注释自己警告过的替换——*judge whether the business entity is still
+alive, not whether some parent or socket still exists*——却在层1 的实现里又犯了一次：
+**用「存在」代替「在干活」**。
+
+### Fixed
+- 层1 现在要求至少一个非 lsp 子进程**真的在消耗 CPU**：取两次 cputime 采样求差。
+  `ps -o pcpu=` 不能用——它是生命周期均值，对「跑完后挂住」的进程仍显示历史占用
+- 采样成本只在**确实存在子进程**时才付（新增 `OC_REAPER_CHILD_WINDOW`，默认 1 秒）
+- ⛔ 每个未知都保守处理：子进程采样中途消失、或 cputime 读不到 → 当作在干活、保留 serve
+
+新增 L1c（闲置子进程不再阻止回收）/ L1d（活跃子进程仍然保护 serve，不能误杀在跑的测试）。
+
 ## v2.6.0 — 补上 dispatch 与 CHECK 6 之间的那段断链
 
 ### 缺口（2026-08-31 反馈）
