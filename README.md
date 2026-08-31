@@ -146,6 +146,23 @@ While the agent works inside a session, agent-gates automatically:
 
 ## What's New
 
+### v2.6.0 — the missing link between dispatch and CHECK 6
+
+`hetero_dispatch` wrote only `evidence.json` + `dispatch.json`, while CHECK 6 reads
+`.agent/verify/*.md` anchored on a bare `^VERIFY_VERDICT:` line. Nothing ever wrote that
+`.md`, so callers hand-wrote one — and hand-writing the `.md` means hand-writing the
+verdict, which is the entry point for forging a judgement. **A gap that forces fabrication
+is a design defect.**
+
+```bash
+agent-gates-verify-harvest <run-id>
+```
+
+The verdict comes from the model's own output; the tool only relabels mechanically
+(`VERDICT:` → `VERIFY_VERDICT:`, review vocabulary → CHECK 6 vocabulary) and records the
+original line verbatim so the transcription is checkable. No conclusion in the evidence
+means refusal — it will not supply one.
+
 ### v2.5.0 — a CLI entry point for the verify side
 
 `agent-gates-verify-import` lands an externally-completed verification as an artifact

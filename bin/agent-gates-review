@@ -192,20 +192,19 @@ output_result() {
   fi
 }
 
-parse_opencode_json() {
-  python3 -c "
-import sys, json
-for line in sys.stdin:
-    line = line.strip()
-    if not line: continue
-    try:
-        obj = json.loads(line)
-        if obj.get('type') == 'text':
-            print(obj.get('part', {}).get('text', ''), end='')
-    except:
-        pass
-"
-}
+# parse_opencode_json / has_valid_conclusion moved to lib/hetero/conclusion.sh so the
+# verify side (agent-gates-verify-harvest) uses the same code instead of a second copy.
+# lib/hetero/select.sh already probed for them with `declare -f`, which was the tell that
+# they belonged in a library. Fail closed if the library is missing: a silently absent
+# conclusion check would accept any output as a valid review.
+_CONCL_LIB="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/../lib/hetero/conclusion.sh"
+if [[ -f "$_CONCL_LIB" ]]; then
+  # shellcheck disable=SC1090
+  source "$_CONCL_LIB"
+else
+  echo "agent-gates-review: lib/hetero/conclusion.sh not found — refusing to run without the conclusion check" >&2
+  exit 69
+fi
 
 # Accept a VERDICT line even when the model wraps it in ordinary markdown. Models
 # routinely emit `**VERDICT: PASS**`, `## VERDICT: PASS`, a list item, a blockquote,
@@ -228,11 +227,7 @@ for line in sys.stdin:
 # Still rejected: values outside the list (VERDICT: OK, VERDICT: NEEDS_WORK), qualified
 # verdicts of any punctuation, and text with no VERDICT line.
 # POSIX classes only — \s is a GNU extension and this ships to other platforms.
-has_valid_conclusion() {
-  local text="$1"
-  echo "$text" | grep -qiE '^[[:blank:]]*[#>*_`[:blank:]-]*VERDICT[[:blank:]]*(:|：)[[:blank:]]*[*`]*(PASS|PASSED|REVISE|REVISED|FAIL|FAILED|ISSUES|ISSUES_FOUND|APPROVED|APPROVE|REJECT|REJECTED)[*`[:blank:].]*$' && return 0
-  return 1
-}
+
 
 capture_review_anchor
 

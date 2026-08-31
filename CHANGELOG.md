@@ -2,6 +2,50 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.6.0 — 补上 dispatch 与 CHECK 6 之间的那段断链
+
+### 缺口（2026-08-31 反馈）
+
+`hetero_dispatch` 只写 `<run-id>.evidence.json` + `<run-id>.dispatch.json`。
+CHECK 6 读的是 `.agent/verify/*.md`，并以**裸行** `^VERIFY_VERDICT:` 锚定。
+`grep -rn VERIFY_VERDICT lib/ bin/` 在此版本之前**一处都不命中** —— 也就是说
+中间从来没有任何官方步骤把 evidence 变成 `.md`。
+
+于是走这条路的人只能**手工补 `.md`**。而手工写 `.md` 就是手工写 verdict——
+**那正是伪造判定的入口**。反馈者这次是逐字转写并主动说明了，但机制不该逼人这么做。
+⇒ 一个迫使人伪造的缺口是设计缺陷，不是使用者的问题。
+
+### Added — `agent-gates-verify-harvest <run-id>`
+
+```bash
+agent-gates-verify-harvest 20260831-120000-abc123 [--result <file>]
+```
+
+- 按 `dispatch.json` 里的 `channel` 决定怎么解析 evidence：`opencode` 是 NDJSON
+  （`obj["part"]["text"]`），其余通道是模型 stdout 原文。⚠️ 两者扩展名都叫
+  `.evidence.json`，所以靠 channel 判断而不是嗅探内容
+- **verdict 取自模型自己的输出**。工具只做机械改写：`VERDICT:` → `VERIFY_VERDICT:`，
+  以及 review 词表 → CHECK 6 词表（`ISSUES`/`REVISE` → `FAIL`）。**原始结论行逐字
+  记进产物**，所以转写可核对而不是靠信任
+- ⛔ evidence 里没有结论行 → **拒绝**（exit 3），并提示去 prompt 里要求结论行。
+  工具不代填：reviewer 没说过的结论就是伪造
+- ⛔ evidence 为 0 字节（通道挂了）→ 拒绝（exit 4），并明确写出「不要手写 .md 绕过」
+- 产出的 `VERIFY_VERDICT` 是**裸行无装饰**——CHECK 6 的 `^VERIFY_VERDICT:` 对
+  markdown 零容忍，而模型常输出 `**VERDICT: PASS**`，装饰在这里被剥掉
+
+`hetero_dispatch` 现在会在派发后打印 evidence 路径与这条 harvest 命令，
+并写明「⛔ 不要手写那个文件」。
+
+### Changed — `parse_opencode_json` / `has_valid_conclusion` 提取到 lib
+
+移到 `lib/hetero/conclusion.sh`，review 与 verify 两侧共用同一份实现。
+`lib/hetero/select.sh` 早就在用 `declare -f` 探测这两个函数，那本身就是它们该在
+库里的信号。`agent-gates-review` 现在 source 它，**库缺失时 fail-closed 退出 69**——
+静默缺失的结论检查会把任何输出都当成合格审查。
+
+新增 `extract_conclusion_line`（取原文，供核对）、`extract_verdict_value`（剥装饰取值）、
+`map_verdict_to_verify`（词表映射）。
+
 ## v2.5.1 — verify-import 读不到配置
 
 `agent-gates-verify-import` 只 source 了 `family.sh`，没有 source `config.sh` 并调

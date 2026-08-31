@@ -102,7 +102,22 @@ v2.0.2 起装饰不影响判定，下面这些全部接受：
 
 #### 两条通道都不可用时：外部审查导入（v2.1.0）
 
-#### verify 侧（CHECK 6）用 `agent-gates-verify-import`
+#### verify 侧（CHECK 6）两个入口，别手写 `.md`
+
+**① 走了 `hetero_dispatch`（自动通道）⇒ 用 `agent-gates-verify-harvest`**
+
+dispatch 只写 `evidence.json` + `dispatch.json`，**不写 `.md`**；而 CHECK 6 读
+`.agent/verify/*.md` 并以裸行 `^VERIFY_VERDICT:` 锚定。v2.6.0 起用这条命令收割：
+
+```bash
+agent-gates-verify-harvest <verify-run-id>
+```
+
+它从 evidence 里提取**模型自己写的结论行**，机械改写成 CHECK 6 的词表，并把原文逐字
+记进产物供核对。⛔ **不要手写那个 `.md`** —— 手写 `.md` 就是手写 verdict。
+evidence 没有结论行时它会拒绝并让你去 prompt 里加要求，那是对的，别绕过。
+
+**② 审查在别处完成（外部模型、人工）⇒ 用 `agent-gates-verify-import`**
 
 ⚠️ 下面两阶段讲的是 **review 侧（CHECK 5）**，产出 `REVIEW_*` 锚点。
 **CHECK 6 要的是另一种产物**（`VERIFY_VERDICT` 行 + 带 `staged_diff_hash` 的

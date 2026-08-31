@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# agent-gates-verify-harvest — turn what hetero_dispatch produced into the artifact CHECK 6
+# actually reads.
+#
+# The gap this closes (reported 2026-08-31): hetero_dispatch writes only
+# <run-id>.evidence.json and <run-id>.dispatch.json. CHECK 6 reads .agent/verify/*.md and
+# anchors on a bare `^VERIFY_VERDICT:` line. Nothing in lib/ or bin/ ever wrote a .md, so
+# every caller of that path had to hand-write one — and hand-writing the .md means
+# hand-writing the verdict, which is exactly the entry point for forging a judgement. A gap
+# that forces fabrication is a design defect, not a user error.
+#
+# ⛔ The verdict is taken from the MODEL's own output. This tool only relabels mechanically
+# (VERDICT: -> VERIFY_VERDICT:, and review vocabulary -> CHECK 6 vocabulary) and records the
+# original line verbatim beside it, so the transcription can be checked rather than trusted.
+# No conclusion in the evidence means refusal — see exit 3.
+#
+# Usage: agent-gates-verify-harvest <verify-run-id> [--result <file>]
+set -uo pipefail
+
+PROG="$(basename "$0")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+VERIFY_DIR=".agent/verify"
+
+usage() {
+  echo "Usage: $PROG <verify-run-id> [--result <file>]" >&2
+  echo "" >&2
+  echo "  Reads  $VERIFY_DIR/<run-id>.evidence.json + .dispatch.json (written by hetero_dispatch)" >&2
+  echo "  Writes $VERIFY_DIR/<run-id>.md with a bare VERIFY_VERDICT line for CHECK 6." >&2
+  exit 2
+}
+
+RUN_ID=""; RESULT_OUT=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --result) [[ $# -ge 2 ]] || usage; RESULT_OUT="$2"; shift 2 ;;
+    -h|--help) usage ;;
+    -*) echo "$PROG: unknown option '$1'" >&2; usage ;;
+    *) [[ -z "$RUN_ID" ]] && RUN_ID="$1" || usage; shift ;;
+  esac
+done
+[[ -n "$RUN_ID" ]] || usage
+
+EV="$VERIFY_DIR/${RUN_ID}.evidence.json"
+DJ="$VERIFY_DIR/${RUN_ID}.dispatch.json"
+MD="$VERIFY_DIR/${RUN_ID}.md"
+
+[[ -f "$EV" ]] || { echo "$PROG: no evidence at $EV — has the dispatch finished?" >&2; exit 2; }
+[[ -s "$EV" ]] || {
+  echo "$PROG: evidence at $EV is EMPTY — the channel produced nothing." >&2
+  echo "  A zero-byte evidence file means the reviewer never answered (timeout, wedged serve," >&2
+  echo "  empty model, …). ⛔ Do not write a .md by hand to work around it: that would be" >&2
+  echo "  recording a verdict nobody reached. Re-dispatch, or import an external review with" >&2
+  echo "  agent-gates-verify-import." >&2
+  exit 4
+}
+
+# shellcheck disable=SC1090
+[[ -f "$SCRIPT_DIR/../lib/hetero/conclusion.sh" ]] && source "$SCRIPT_DIR/../lib/hetero/conclusion.sh"
+declare -f extract_verdict_value >/dev/null 2>&1 || {
+  echo "$PROG: lib/hetero/conclusion.sh not found — cannot parse the conclusion safely" >&2; exit 69; }
+
+CHANNEL=$(sed -n 's/.*"channel"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$DJ" 2>/dev/null | head -1)
+CAPABILITY=$(sed -n 's/.*"capability"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$DJ" 2>/dev/null | head -1)
+
+# opencode emits NDJSON; every other channel writes the model's text straight to the file.
+# The extension says .json for both, so the channel is what decides — not sniffing.
+if [[ "$CHANNEL" == "opencode" ]]; then
+  BODY=$(parse_opencode_json < "$EV")
+else
+  BODY=$(cat "$EV")
+fi
+[[ -n "${BODY//[[:space:]]/}" ]] || {
+  echo "$PROG: evidence parsed to empty text (channel=${CHANNEL:-?}) — nothing to harvest" >&2; exit 4; }
+
+RAW_LINE=$(extract_conclusion_line "$BODY")
+RAW_VALUE=$(extract_verdict_value "$BODY" || true)
+if [[ -z "$RAW_VALUE" ]]; then
+  echo "$PROG: the evidence contains no conclusion line, so there is no verdict to harvest." >&2
+  echo "  Expected a bare line such as:  VERDICT: PASS   (or VERIFY_VERDICT: PASS)" >&2
+  echo "  ⛔ This tool will not supply one — a verdict the reviewer did not state is a forgery." >&2
+  echo "  Fix the dispatch prompt to require the conclusion line, then re-dispatch." >&2
+  exit 3
+fi
+MAPPED=$(map_verdict_to_verify "$RAW_VALUE") || {
+  echo "$PROG: conclusion value '$RAW_VALUE' has no CHECK 6 equivalent" >&2; exit 3; }
+
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%SZ")
+{
+  printf '%s\n' "$BODY"
+  echo ""
+  echo "<!-- harvested from ${EV} by ${PROG} at ${TIMESTAMP} -->"
+  echo "<!-- channel: ${CHANNEL:-unknown}  capability: ${CAPABILITY:-unknown} -->"
+  echo "<!-- reviewer's own conclusion line, verbatim: ${RAW_LINE:-<none>} -->"
+  if [[ "$RAW_VALUE" != "$MAPPED" ]]; then
+    echo "<!-- mechanical relabel: ${RAW_VALUE} -> ${MAPPED} (review vocabulary -> CHECK 6 vocabulary) -->"
+  fi
+  echo ""
+  # Bare line, no decoration: CHECK 6 anchors on ^VERIFY_VERDICT: with no tolerance for
+  # markdown, so the normalised line must be written exactly like this.
+  echo "VERIFY_VERDICT: ${MAPPED}"
+} > "${MD}.tmp.$$"
+mv "${MD}.tmp.$$" "$MD"
+[[ -n "$RESULT_OUT" ]] && cp "$MD" "$RESULT_OUT"
+
+echo "✅ verify artifact harvested"
+echo "   run_id:     $RUN_ID"
+echo "   channel:    ${CHANNEL:-unknown}  capability: ${CAPABILITY:-unknown}"
+echo "   reviewer said: ${RAW_LINE:-<none>}"
+[[ "$RAW_VALUE" != "$MAPPED" ]] && echo "   relabelled: $RAW_VALUE -> $MAPPED"
+echo "   VERIFY_VERDICT: $MAPPED"
+echo "   doc:        $MD"

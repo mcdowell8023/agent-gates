@@ -544,6 +544,17 @@ hetero_dispatch() {
     echo "hetero: capability=EVIDENCE_ONLY because HETERO_IMPLEMENTER_FAMILY is unset. Declare the implementing model family (e.g. HETERO_IMPLEMENTER_FAMILY=anthropic) so the heterogeneity check can run. Heterogeneity is the requirement; picking the specific reviewer model is up to you." >&2
   fi
 
+  # Tell the caller how to turn this into what CHECK 6 reads. dispatch writes only
+  # evidence.json + dispatch.json; the gate reads .agent/verify/*.md anchored on a bare
+  # ^VERIFY_VERDICT: line. Nothing here writes that .md, so without this pointer every
+  # caller ends up hand-writing one — and hand-writing the .md means hand-writing the
+  # verdict (reported 2026-08-31).
+  if [[ "$channel" != "exhausted" ]]; then
+    echo "hetero: evidence will land at ${evidence_path}. Once it is non-empty, run:" >&2
+    echo "        agent-gates-verify-harvest ${verify_run_id}" >&2
+    echo "        (it extracts the model's own conclusion line into the .md CHECK 6 reads; ⛔ do not hand-write that file)" >&2
+  fi
+
   export HETERO_DISPATCH_CAPABILITY="$capability"
 
   # Wall-clock watcher for successfully spawned channels

@@ -146,6 +146,21 @@ agent 在 session 内开发时，agent-gates 自动：
 
 ## 新特性
 
+### v2.6.0 — 补上 dispatch 与 CHECK 6 之间的断链
+
+`hetero_dispatch` 只写 `evidence.json` + `dispatch.json`，而 CHECK 6 读
+`.agent/verify/*.md` 并以裸行 `^VERIFY_VERDICT:` 锚定。中间从来没有官方步骤产出那个
+`.md`，于是只能手工补——**而手工写 `.md` 就是手工写 verdict，那正是伪造判定的入口。
+一个迫使人伪造的缺口是设计缺陷。**
+
+```bash
+agent-gates-verify-harvest <run-id>
+```
+
+verdict 取自模型自己的输出，工具只做机械改写（`VERDICT:` → `VERIFY_VERDICT:`、
+review 词表 → CHECK 6 词表），并把原始结论行逐字记进产物，使转写可核对。
+evidence 里没有结论行就拒绝——工具不代填。
+
 ### v2.5.0 — verify 侧补上 CLI 入口
 
 `agent-gates-verify-import` 把外部完成的验收落成 CHECK 6 认的产物。此前
