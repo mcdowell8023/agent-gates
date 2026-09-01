@@ -62,7 +62,13 @@ if src.endswith(".feature"):
         if m:
             items.append(m.group(1))
 else:
-    hre = re.compile(r"^(#{2,6})\s*(?:" + headings + r")\s*$")
+    # A trailing qualifier is allowed: `## 验收标准（MVP）`, `## Acceptance Criteria:`,
+    # `## 验收清单——最小集` are all how people actually write it, and rejecting them dropped
+    # the doc to the `bad-source` tier — a hard failure on a strict branch over punctuation.
+    # The qualifier must START with a bracket / colon / dash, so `## 验收标准之外的说明` is
+    # still NOT an acceptance section: widening to `.*` would swallow neighbouring sections
+    # and throw the item count off, which is worse than the friction.
+    hre = re.compile(r"^(#{2,6})\s*(?:" + headings + r")\s*(?:[（(\[:：\-—–].*)?$")
     depth = None
     inside = False
     for ln in lines:
@@ -247,7 +253,11 @@ reqmatrix_check_citations() {
   local vf="$1" rows
   rows=$(reqmatrix_parse "$vf") || return $?
   # Lists via env, not argv: a large repo's staged list can approach ARG_MAX.
-  _RM_STAGED=$(git diff --cached --name-only --diff-filter=ACMRD 2>/dev/null || true) \
+  # --no-renames on purpose: with rename detection, `--name-only` reports ONLY the
+  # destination, so a requirement like "把 old.ts 挪走" citing the old path was a false
+  # failure. Disabling detection makes a rename appear as delete(old) + add(new), and both
+  # paths are genuinely "touched by this change". Verified against git, not assumed.
+  _RM_STAGED=$(git diff --cached --name-only --diff-filter=ACMRD --no-renames 2>/dev/null || true) \
   _RM_DIRTY=$(git diff --name-only 2>/dev/null || true) \
   _RM_SURF_PATH="$_REQMATRIX_PATH_SURFACES" \
   _RM_SURF_FREE="$_REQMATRIX_FREE_SURFACES" \
@@ -404,6 +414,12 @@ for line in rows:
         if surface == "ui":
             ui_seen += 1
         if re.match(r"^(RUN|EXT)\s*:", e):
+            # A run artifact or an out-of-repo change also answers "can the user get to it".
+            # §4.6 calls a real run the STRONGER form of evidence, so demanding an in-repo
+            # `ui:` on top of it contradicted the design and false-flagged items whose UI
+            # lives in another repo or is only provable by an E2E result. They still land in
+            # EXTERNAL_ONLY below, so nothing inside the repo backing them stays visible.
+            ui_seen += 1
             touched += 1
             continue
         if not rest.startswith("~"):

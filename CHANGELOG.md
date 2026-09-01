@@ -98,6 +98,72 @@ verify 产物是旧格式」的 fixture，而那正是已部署仓库的样子�
   → 新增 `DEFERRED`
 - **`REQ_SOURCE` 指向无验收块的文件时降级为告警 = 绕过口** → 新增 `bad-source` 档直接 FAIL
 
+### Fixed — 三处会造成假失败的地方（交叉审查抓到）
+
+**结论解析器我重新发明了一遍。** `lib/hetero/conclusion.sh` 早就有规范实现，
+容忍 markdown 装饰与全角冒号、并用完整取值表拒绝带限定的结论。`agent-gates-plan-review`
+第一版自己写了个只认裸 ASCII 的，后果两条：协议明确允许的 `**VERDICT: PASS**` /
+`## VERDICT: PASS` / `VERDICT：PASS` 全被误拒 —— 正是 v2.0.2 那次被报成「所有审查模型都失败」、
+把排查方向指向传输层花掉一天的同一形状；更糟的是 `VERDICT: PASS_WITH_ISSUES` 匹配到 `PASS`
+前缀被记成干净通过，**把审查结论反了过来**。改为委托 `conclusion.sh`。
+
+**多计划共存时首个命中掩盖有效计划。** `find` 按字母序返回，一个旧计划锚点失配就 `break`，
+当前那个有效计划根本没机会被看到。改为：任一计划成立即通过，只在无一成立时报告。
+
+**dangerous 路径判定用子串匹配。** `auth` 命中 `author.ts` / `oauth.ts`，`acl` 命中
+`oracle.ts`（or-**acl**-e）。每一次都让「已批准的 skip」被拒成「危险改动」—— 一次重命名就撞上。
+改为按路径分隔符切词；`author` 与 `authentication` 共享前缀、没有边界规则能分开，
+所以 auth 系拼法改成显式列举。
+
+**另三条来自 select.sh 超时改动的审查**：`2>/dev/null` 加在调用点，把 fail-closed 的诊断
+一起吞掉了（检查点会说话，但没人听得见）—— 改成只静音被探测工具自己的 stderr；
+`HETERO_PROBE_TIMEOUT=08` 通过 `^[0-9]+$` 后被 bash 当八进制，`value too great for base`
+漏到终端（实测）—— 改用 `10#` 强制十进制；`_hetero_bounded` 的 69 状态被管道吞掉，
+「node 缺失」和「这个工具没有模型」变成同一个可观测现象 —— 改为先取值再判状态。
+
+### Fixed — CHECK 3 的修复路径不存在，手写标记就是通过
+
+跑本仓库自己的门禁时撞上：CHECK 3 报 `Plan exists but missing PLAN_REVIEW markers`，
+提示 `Fix: run agent-gates-review --plan <plan>` —— 而**那个 flag 在 `bin/` `lib/` 里
+根本不存在**，`PLAN_REVIEW` / `_TOOL` / `_MODEL` 三个标记也没有任何工具会写
+（`bin/` `lib/` `skills/` `templates/` 全 grep 不到）。`plan-decision` 只支持 `skip`。
+
+于是唯一能满足 CHECK 3 的路径就是手写那三行注释，而门禁只 grep 它们存不存在 ——
+**手写即通过**。同一形状还有两个洞：标记能活过计划重写（上个月的审查满足今天的计划）；
+审查结论是 FAIL 也照样过。
+
+新增 `bin/agent-gates-plan-review`，照 `verify-import` 的形状：
+- 来源必填（`--model <provider/model>`），无来源的产物看着像证据、实际什么都没证明
+- **拒绝代填判定**：审查正文没有 `VERDICT:` 行就 exit 3
+- 锚点由工具算（`PLAN_REVIEW_SHA256`，哈希排除标记自身，否则写入标记就把自己的锚点作废）
+- 异构判定 fail-closed：族不可解析记 `L0`，绝不记 `L1`
+
+CHECK 3 现在真的读这些标记：锚点失配 → 拦；结论非 PASS → 拦；L3 机器上的 `L0`
+（同族自审）→ 拦。⚠️ 旧标记（无哈希无结论）仍然通过、只告警 —— 每个已部署仓库都是那个样子，
+改成硬失败会让它们下一次提交全部撞墙。
+
+### Fixed — 模型探测没有超时，导致模型配置从不刷新
+
+`_probe_model` 直接跑 `opencode run --pure -m <model> "say OK"` —— 真实模型调用，
+走的正是已知会挂 120–200s 的通道，**每个候选模型一次、且没有超时**。
+实测 doctor.sh 卡在 6 分钟、CPU 0%，从未走到写 hetero-check.json 那一步。
+
+可见的症状在别处：`review_models.primary` 长期停在一个已下架的型号，因为唯一能刷新它的路径
+既依赖 opencode、又慢到没人跑得完。**一个慢到永远跑不完的维护步骤，和不存在没有区别。**
+
+两个探测都套上硬超时（`HETERO_PROBE_TIMEOUT`，列表默认 20s、探测默认 60s，非法值有兜底 ——
+配错不能退化成无超时）。超时按「无法确认」处理，绝不当「可用」：一个无法确认的模型被写成
+primary，正是配置指向不可达型号的成因。超时用 `bin/with-timeout.mjs`（杀整个进程组，
+只杀直接子进程的话孙子还占着管道、命令替换照样阻塞）；wrapper 不可用时**拒绝执行**而非无超时调用。
+
+### Fixed — `run_oc_serve.sh` T11 是确定性失败，不是 flaky
+
+我之前记它「既有 flaky」，实测**连跑 5 次全失败**。真因：`_oc_serve_start` 用 `&` 后台起进程，
+然后健康检查（fake curl 立即成功）让它马上返回，而断言**立刻**读 fake 的日志 ——
+后台的 nohup+bash+append 每次都输。后台化是正确的生产行为，是断言假设了一个代码
+从未承诺的顺序。改成有界轮询等日志；T7 同形态一并改（它此前只是靠 `oc_serve_ensure`
+多做几步碰巧赢了竞态）。
+
 ### Fixed — `doctor.sh` 每次运行都在抹掉手工配置
 
 `hetero-check.json` 的写入是固定 heredoc + `mv`，而 `implementer_family` / `pi_models` /

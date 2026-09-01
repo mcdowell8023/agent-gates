@@ -292,16 +292,71 @@ for m in rm.get('panel_pool', [])[:rm.get('panel_active', 2)]:
 # D6: Doctor selection algorithm (v1.13.0)
 # ============================================================
 
+# Both probes shell out to opencode — the one channel already measured wedging for
+# 120–200s — and neither had a timeout. doctor.sh was observed at 6+ minutes, CPU 0%,
+# having never reached the point where it writes hetero-check.json. The visible symptom was
+# elsewhere: `review_models.primary` sat on a retired model, because the only path that
+# refreshes it both required opencode AND never finished. A maintenance step slow enough to
+# never complete is indistinguishable from one that does not exist.
+#
+# ⚠️ Still opencode-only. When opencode is uninstalled, build_review_models returns 1 and
+# `review_models` simply is not refreshed — which is survivable now only because doctor
+# MERGES rather than rewrites (lib/hetero/persist.sh); before that fix the key was dropped
+# entirely. Moving the probe to `pi` (~7s, the documented primary channel) is the real fix
+# and is not done here.
+_hetero_probe_timeout() {  # _hetero_probe_timeout <default>
+  local t="${HETERO_PROBE_TIMEOUT:-$1}"
+  # A misconfigured value must not degrade to "no timeout" — that is the state being fixed.
+  [[ "$t" =~ ^[0-9]+$ ]] || t="$1"
+  # 10# forces base 10. `^[0-9]+$` happily passes "08", and bash arithmetic then reads it as
+  # octal: `[[ 08 -lt 1 ]]` prints `value too great for base` and leaks a baffling error to
+  # the terminal. Measured, not theorised.
+  t=$((10#$t))
+  [[ "$t" -lt 1 ]] && t=$((10#$1))
+  [[ "$t" -gt 300 ]] && t=300
+  echo "$t"
+}
+
+# Runs <cmd...> with a hard bound. with-timeout.mjs kills the whole process group, which is
+# what makes the bound real: killing only the direct child leaves grandchildren holding the
+# pipe and the command substitution keeps blocking anyway.
+_hetero_bounded() {  # _hetero_bounded <secs> <cmd> [args...]
+  local secs="$1"; shift
+  local wrapper
+  wrapper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../bin/with-timeout.mjs"
+  if [[ -f "$wrapper" ]] && command -v node >/dev/null 2>&1; then
+    # The probed tool's own noise is silenced HERE, not at the call site. Putting
+    # `2>/dev/null` on the call swallowed this function's own fail-closed diagnostic too,
+    # so the refusal below was invisible and the whole thing degraded silently into
+    # "no models available" — a checkpoint that speaks where nobody can hear it.
+    node "$wrapper" "$secs" "$@" 2>/dev/null
+    return $?
+  fi
+  # No wrapper: refuse rather than run unbounded. An unbounded probe is the defect.
+  echo "hetero: with-timeout.mjs 或 node 不可用 —— 跳过模型探测，不做无超时调用" >&2
+  return 69
+}
+
 detect_available_models() {
-  local opencode_bin="${1:-opencode}"
-  "$opencode_bin" models 2>/dev/null | grep -E '^[a-zA-Z]' | sed 's/[[:space:]]*$//'
+  local opencode_bin="${1:-opencode}" out rc t
+  t=$(_hetero_probe_timeout 20)
+  # Not a pipeline: piping straight into grep threw away the 69 status, so "node is missing"
+  # and "this tool lists no models" became the same observable — and with the diagnostic
+  # suppressed as well, the environment defect was completely masked.
+  out=$(_hetero_bounded "$t" "$opencode_bin" models); rc=$?
+  [[ "$rc" -eq 69 ]] && return 69
+  printf '%s\n' "$out" | grep -E '^[a-zA-Z]' | sed 's/[[:space:]]*$//'
 }
 
 _probe_model() {
   local model="$1" opencode_bin="${2:-opencode}"
-  local raw
-  raw=$("$opencode_bin" run --pure -m "$model" --dir "${PWD}" --format json "say OK" 2>/dev/null)
-  [[ $? -ne 0 ]] && return 1
+  local raw rc t
+  t=$(_hetero_probe_timeout 60)
+  raw=$(_hetero_bounded "$t" "$opencode_bin" run --pure -m "$model" --dir "${PWD}" --format json "say OK")
+  rc=$?
+  # 124 = timed out. Treat as "could not verify", never as available: an unverifiable model
+  # recorded as primary is how the config ends up pointing at something unreachable.
+  [[ $rc -ne 0 ]] && return 1
   [[ -z "$raw" ]] && return 1
   return 0
 }
@@ -434,8 +489,12 @@ build_review_models() {
   local primary
   primary=$(select_primary "$coding_vendor")
 
-  local available
-  available=$(detect_available_models "$opencode_bin")
+  local available avail_rc
+  available=$(detect_available_models "$opencode_bin"); avail_rc=$?
+  if [[ "$avail_rc" -eq 69 ]]; then
+    echo "hetero: 模型探测环境不可用（见上）—— review_models 保持原值不刷新" >&2
+    return 69
+  fi
   [[ -z "$available" ]] && return 1
 
   if ! _probe_model "$primary" "$opencode_bin"; then

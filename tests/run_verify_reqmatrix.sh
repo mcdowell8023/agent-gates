@@ -86,6 +86,17 @@ for h in "## Acceptance" "## 验收清单" "## Acceptance Criteria"; do
   eq "识别 '$h'" "$(reqmatrix_extract_items "$T/alias.md" | wc -l | tr -d ' ')" 1
 done
 
+echo "X3b: 章节名带限定词也要识别（接入摩擦 = 严格分支上的硬失败）"
+for h in "## 验收标准（MVP）" "## Acceptance Criteria:" "## 验收标准 (第一期)" "### 验收清单——最小集"; do
+  printf '%s\n- 一条需求\n- 又一条\n' "$h" > "$T/alias2.md"
+  eq "识别 '$h'" "$(reqmatrix_extract_items "$T/alias2.md" | wc -l | tr -d ' ')" 2
+done
+
+echo "X3c: ⛔ 但不能宽到把别的章节也当验收（否则条数全乱）"
+printf '## 验收标准之外的说明\n- 不是需求\n' > "$T/alias3.md"
+reqmatrix_extract_items "$T/alias3.md" >/dev/null 2>&1
+eq "「验收标准之外的说明」不算验收章节" "$?" 3
+
 echo "X4: 到下一个同级标题为止"
 cat > "$T/stop.md" <<'EOF'
 ## 验收标准
@@ -233,10 +244,12 @@ G=$(mktemp -d)
   echo "old" > src/deleted.ts
   echo "old" > src/untouched.ts
   echo "old" > src/dirty.ts
+  echo "long enough content that rename detection pairs these two paths" > src/renamed-from.ts
   git add -A && git commit -qm init
   echo "new" >> src/kept.ts
   git rm -q src/deleted.ts
   echo "brand new" > src/added.ts
+  git mv src/renamed-from.ts src/renamed-to.ts
   git add -A
   # modified in the worktree, deliberately NOT staged — a pre-commit hook must judge the
   # staged tree, but the message for this case has to say WHY, not just "not in this change"
@@ -315,6 +328,13 @@ assert "G19 引用改了但未 staged 的文件 → 非零" "$([[ "$(rc_g "$T/g1
 # "存在但不在本次改动内" would send the operator looking for the wrong problem.
 contains "G19 ⭐ 报错说清是「未 git add」而非「不在本次改动内」" "$(run_g "$T/g19.md")" "git add"
 
+# rename 的旧路径在 `--name-only` 里根本不出现（只报目标），所以「把 old 挪走」这类需求
+# 引用旧路径会假失败。实测确认过 git 的行为，不是推断。
+printf 'REQ_ITEM: 1 | COVERED | api:src/renamed-from.ts:1 | 改名的旧路径\n' > "$T/g27.md"
+eq "G27 rename 的旧路径算本次改动 → 0" "$(rc_g "$T/g27.md")" 0
+printf 'REQ_ITEM: 1 | COVERED | api:src/renamed-to.ts:1 | 改名的新路径\n' > "$T/g28.md"
+eq "G28 rename 的新路径算本次改动 → 0" "$(rc_g "$T/g28.md")" 0
+
 printf 'REQ_ITEM: 1 | COVERED | api:src/kept.ts:2 , ui:~src/untouched.ts:1 | 逗号两边都有空格\n' > "$T/g20.md"
 eq "G20 逗号前后空白不影响切分 → 0" "$(rc_g "$T/g20.md")" 0
 
@@ -387,6 +407,23 @@ notcontains "不报 no-ui" "$(reqmatrix_surface_report "$T/s9.md")" "NO_UI_EVIDE
 echo "S11: 只有 RUN:/EXT: 证据 → 计数打印（设计上允许，但要可见）"
 printf 'REQ_ITEM: 1 | COVERED | RUN:.agent/verify/runs/e2e.json | 只有运行产物\n' > "$T/s11.md"
 contains "报 EXTERNAL_ONLY" "$(reqmatrix_surface_report "$T/s11.md")" "EXTERNAL_ONLY=1"
+
+echo "S13: ⭐ 只有 RUN: 运行产物 → 不该误报缺 UI（运行本身就证明了可达）"
+# 计划 §4.6 说运行产物是更强的证据，E6 又把可达性硬绑定到仓内 ui: —— 两处打架。
+# 真实完成但 UI 在别的仓、或只能靠 E2E 结果证明可达的条目会被误报。
+printf 'REQ_ITEM: 1 | COVERED | RUN:.agent/verify/runs/e2e.json | E2E 跑通了完整用户路径\n' > "$T/s13.md"
+OUT=$(reqmatrix_surface_report "$T/s13.md")
+notcontains "不报 no-ui" "$OUT" "NO_UI_EVIDENCE"
+contains "但仍计入 EXTERNAL_ONLY（可见）" "$OUT" "EXTERNAL_ONLY=1"
+
+echo "S14: EXT: 仓外证据同样算可达，也同样计数"
+printf 'REQ_ITEM: 1 | COVERED | EXT:阿里云控制台已配置 | 仓外变更\n' > "$T/s14.md"
+OUT=$(reqmatrix_surface_report "$T/s14.md")
+notcontains "不报 no-ui" "$OUT" "NO_UI_EVIDENCE"
+
+echo "S15: ⛔ 纯 api: 证据仍然要报缺 UI（这才是纵向漏层）"
+printf 'REQ_ITEM: 1 | COVERED | api:src/a.ts:1 | 只有后端\n' > "$T/s15.md"
+contains "报 NO_UI_EVIDENCE" "$(reqmatrix_surface_report "$T/s15.md")" "NO_UI_EVIDENCE"
 
 echo "S12: COVERED 证据为空 → 报 NO_EVIDENCE（别静默）"
 printf 'REQ_ITEM: 1 | COVERED | - | 我说做了\n' > "$T/s12.md"

@@ -293,24 +293,113 @@ if [[ "${SKIP_PLAN_CHECK:-0}" != "1" ]] && [[ -d .agent/plans ]]; then
     PLAN_REVIEWED=0
     SKIP_APPROVED=0
 
+    # Capability level, read up front: the same-model check below needs it, and it is also
+    # used further down for the "plan exists but unmarked" downgrade.
+    PLAN_CAP_LEVEL_EARLY="L0"
+    _PLAN_CAP_FILE_EARLY="${AGENT_GATES_DIR:-$HOME/.agent-gates}/review-capability.json"
+    if [[ -f "$_PLAN_CAP_FILE_EARLY" ]]; then
+      PLAN_CAP_LEVEL_EARLY=$(grep -oE '"level"[[:space:]]*:[[:space:]]*"L[0-3]"' "$_PLAN_CAP_FILE_EARLY" 2>/dev/null | grep -oE 'L[0-3]' | head -1 || echo "L0")
+      [[ -n "$PLAN_CAP_LEVEL_EARLY" ]] || PLAN_CAP_LEVEL_EARLY="L0"
+    fi
+
     # Dangerous-category detection (requires-plan, skip NOT accepted)
     DANGEROUS=0
     while IFS= read -r df; do
       [[ -z "$df" ]] && continue
-      if echo "$df" | grep -qiE 'migration|\.sql$|auth|security|permission|acl|schema'; then
+      # Token-bounded, not substring. `auth` as a substring matched `author.ts` and
+      # `oauth.ts`; `acl` matched `oracle.ts` (or-ACL-e). Every one of those made an
+      # approved skip get refused as "dangerous change" — a false failure on a rename.
+      # Auth-ish spellings are listed explicitly because `author` and `authentication`
+      # share a prefix and no boundary rule can separate them.
+      if echo "$df" | grep -qiE '(^|[/._-])(migrations?|auth|authn|authz|oauth|authentication|authorization|security|permissions?|acl|schemas?)([/._-]|$)|\.sql$'; then
         DANGEROUS=1; break
       fi
     done < <(git diff --cached --name-only --diff-filter=ACMR)
 
     # Check for reviewed plans (带 PLAN_REVIEW 三件套)
+    #
+    # Presence used to be the whole check, which made three things true at once:
+    #   - hand-writing three comment lines was indistinguishable from a real review, and
+    #     the command this check told you to run (`agent-gates-review --plan`) did not
+    #     exist anywhere in bin/ or lib/ — so hand-writing was the ONLY path
+    #   - markers survived a plan rewrite: a review of last month's plan satisfied today's
+    #   - a plan review whose verdict was FAIL still passed
+    # Now the markers are read. `agent-gates-plan-review` writes them (provenance required,
+    # anchor computed there, refuses to invent a verdict).
+    #
+    # ⚠️ Legacy markers (no _SHA256, no _VERDICT) must still pass — every deployed repo has
+    # them, and turning this into a hard failure would break them all on the next commit.
+    _PR_PROBLEM=""      # non-empty ⇒ markers exist but do not hold up
+    _PR_WARN=""
+    _PR_ANY_CLEAN=0     # at least one plan whose review holds up
     while IFS= read -r pf; do
       [[ -z "$pf" || ! -f "$pf" ]] && continue
       PLAN_FOUND=1
       if grep -q 'PLAN_REVIEW:' "$pf" && grep -q 'PLAN_REVIEW_TOOL:' "$pf" && grep -q 'PLAN_REVIEW_MODEL:' "$pf"; then
+        # Per-plan findings. They must NOT be committed to the shared variables until we
+        # know no other plan validates: `find` returns plans alphabetically, so a stale
+        # a-old.md with a dead anchor used to break the loop and the actually-current plan
+        # was never looked at — a pure false failure.
+        _this_problem=""
+        _this_warn=""
+        _pr_get() { sed -n "s|^<!--[[:space:]]*$1:[[:space:]]*\(.*\)-->$|\1|p" "$pf" 2>/dev/null | head -1 | sed 's/[[:space:]]*$//'; }
+        _pr_level=$(_pr_get PLAN_REVIEW || true)
+        _pr_verdict=$(_pr_get PLAN_REVIEW_VERDICT || true)
+        _pr_hash=$(_pr_get PLAN_REVIEW_SHA256 || true)
+        _pr_model=$(_pr_get PLAN_REVIEW_MODEL || true)
+
+        # Anchor. Recomputed by the SAME tool that wrote it — duplicating the hashing here
+        # would eventually diverge, and a divergent anchor produces false failures, which is
+        # how a gate earns a --no-verify habit.
+        if [[ -n "$_pr_hash" ]]; then
+          _pr_bin="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../bin/agent-gates-plan-review"
+          if [[ -x "$_pr_bin" ]]; then
+            _pr_actual=$(bash "$_pr_bin" "$pf" --print-hash 2>/dev/null || true)
+            if [[ -n "$_pr_actual" && "$_pr_actual" != "$_pr_hash" ]]; then
+              _this_problem="计划在审查之后被改过 —— PLAN_REVIEW_SHA256 对不上 ($pf)"
+              _this_problem="$_this_problem
+   审查时记录: $_pr_hash
+   现在算出的: $_pr_actual
+   改的是「当初被审过的是什么」。要么改回去，要么按新计划重新审。"
+            fi
+          else
+            _pr_warn_bin=1
+          fi
+        else
+          _this_warn="$pf 的计划审查标记无锚点（缺 PLAN_REVIEW_SHA256）—— 无法判断计划是否在审查后被改过"
+        fi
+
+        # The verdict. A recorded FAIL used to pass because only presence was checked.
+        if [[ -n "$_pr_verdict" ]]; then
+          case "$(printf '%s' "$_pr_verdict" | tr '[:lower:]' '[:upper:]')" in
+            PASS) : ;;
+            *) _this_problem="${_this_problem:+$_this_problem
+}计划审查的结论是 ${_pr_verdict}，不是 PASS ($pf) —— 先处理审查提出的问题" ;;
+          esac
+        fi
+
+        # Same-model plan review on a machine that can do better. Mirrors CHECK 5's
+        # REVIEW_LEVEL check: the implementer has a blind spot about its own plan, so a
+        # review by its own family is not a review.
+        if [[ "$_pr_level" == "L0" && "$PLAN_CAP_LEVEL_EARLY" != "L0" ]]; then
+          _this_problem="${_this_problem:+$_this_problem
+}计划审查是同族的 (PLAN_REVIEW: L0) 而本机支持异构 (${PLAN_CAP_LEVEL_EARLY}) —— 换一个不同族的模型重审
+   审查者: ${_pr_model:-<未记录>}"
+        fi
+
         PLAN_REVIEWED=1
-        break
+        if [[ -z "$_this_problem" ]]; then
+          # A clean plan settles it: drop anything remembered from earlier candidates.
+          _PR_ANY_CLEAN=1
+          _PR_PROBLEM=""
+          _PR_WARN="$_this_warn"
+          break
+        fi
+        # Remember the first problem only as a fallback for "nothing clean was found".
+        [[ -z "$_PR_PROBLEM" ]] && _PR_PROBLEM="$_this_problem"
       fi
     done < <(find .agent/plans/ -maxdepth 1 -name '*.md' ! -name '*.skip.md' 2>/dev/null)
+    [[ "$_PR_ANY_CLEAN" -eq 1 ]] && _PR_PROBLEM=""
 
     # Check for approved skip (.skip.md with GENERATED_BY)
     while IFS= read -r sf; do
@@ -327,11 +416,23 @@ if [[ "${SKIP_PLAN_CHECK:-0}" != "1" ]] && [[ -d .agent/plans ]]; then
 
     if [[ "$DANGEROUS" -eq 1 && "$SKIP_APPROVED" -eq 1 && "$PLAN_REVIEWED" -ne 1 ]]; then
       fail "Dangerous change (auth/security/migration/schema) requires a reviewed plan — skip not accepted"
-      echo "   Fix: write .agent/plans/<topic>.md + run agent-gates-review --plan <plan>"
+      echo "   Fix: write .agent/plans/<topic>.md, 让异构模型审它, 然后"
+      echo "        ~/.agent-gates/bin/agent-gates-plan-review .agent/plans/<topic>.md --result <审查正文>.md --model <provider/model>"
     elif [[ "$SKIP_APPROVED" -eq 1 ]]; then
       : # skip-with-approval — decision recorded, pass (non-dangerous only)
     elif [[ "$PLAN_REVIEWED" -eq 1 ]]; then
-      : # reviewed plan found, pass
+      if [[ -n "$_PR_PROBLEM" ]]; then
+        if relaxed_waive "plan review does not hold up" review; then
+          :
+        else
+          fail "$_PR_PROBLEM"
+          echo "   Fix: ~/.agent-gates/bin/agent-gates-plan-review .agent/plans/<plan>.md \\"
+          echo "          --result <审查正文>.md --model <provider/model>"
+        fi
+      elif [[ -n "$_PR_WARN" ]]; then
+        echo "⚠️  CHECK 3: $_PR_WARN"
+        echo "   重新记录一次即可补上: ~/.agent-gates/bin/agent-gates-plan-review .agent/plans/<plan>.md --result <审查正文>.md --model <provider/model>"
+      fi
     elif [[ "$PLAN_FOUND" -eq 1 ]]; then
       # Plan exists but no PLAN_REVIEW markers — check capability level
       PLAN_CAP_LEVEL="L0"
@@ -343,11 +444,12 @@ if [[ "${SKIP_PLAN_CHECK:-0}" != "1" ]] && [[ -d .agent/plans ]]; then
         echo "⚠️  CHECK 3: L0 — plan exists but no PLAN_REVIEW markers (no heterogeneous tool to verify)"
       else
         fail "Plan exists but missing PLAN_REVIEW markers (machine is $PLAN_CAP_LEVEL — heterogeneous review required)"
-        echo "   Fix: run agent-gates-review --plan .agent/plans/<your-plan>.md"
+        echo "   Fix: ~/.agent-gates/bin/agent-gates-plan-review .agent/plans/<your-plan>.md --result <审查正文>.md --model <provider/model>"
       fi
     else
       fail "Non-trivial change but no plan or approved skip in .agent/plans/"
-      echo "   Fix: write a plan to .agent/plans/<topic>.md + run agent-gates-review --plan <plan>"
+      echo "   Fix: 写 .agent/plans/<topic>.md, 让异构模型审它, 然后"
+      echo "        ~/.agent-gates/bin/agent-gates-plan-review .agent/plans/<topic>.md --result <审查正文>.md --model <provider/model>"
       echo "   Or: agent-gates-plan-decision skip --reason \"<reason>\" --topic <name>"
     fi
   fi

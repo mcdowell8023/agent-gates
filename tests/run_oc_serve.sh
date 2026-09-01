@@ -57,6 +57,22 @@ NOHUP
   export PATH="$FAKE_DIR:$PATH"
 }
 
+# Wait for the fake opencode to actually record its invocation.
+#
+# `_oc_serve_start` backgrounds the process (`/usr/bin/nohup … &`) and then returns as soon
+# as the health check passes — and the fake curl passes instantly. So reading $OC_LOG right
+# after the call reads it before nohup+bash+append have run: T11 failed 5/5 this way, which
+# I had written off as "flaky". Backgrounding is correct production behaviour; the assertion
+# was assuming an ordering the code never promised.
+wait_for_log() {  # wait_for_log <file> <pattern> [tries]
+  local f="$1" pat="$2" tries="${3:-40}" i
+  for ((i=0; i<tries; i++)); do
+    grep -q "$pat" "$f" 2>/dev/null && return 0
+    sleep 0.05
+  done
+  return 1
+}
+
 # Source the lib with guard reset and overrides.
 source_lib() {
   _OC_SERVE_SOURCED=""
@@ -189,6 +205,7 @@ CURL
     oc_serve_ensure; rc=$?
     assert "exit 0 (serve started)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
     # Verify opencode was called with serve --pure --port
+    wait_for_log "$OC_LOG" "serve --pure --port"
     invocations=$(cat "$OC_LOG")
     assert "opencode called with 'serve --pure --port'" "$(echo "$invocations" | grep -q 'serve --pure --port' && echo true || echo false)"
     rm -rf "$FAKE_DIR" "$(dirname "$LOCK_DIR")" )
@@ -255,6 +272,7 @@ CURL
     source_lib
     _oc_serve_start; rc=$?
     assert "exit 0" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+    wait_for_log "$OC_LOG" "serve --pure --port 19876"
     invocations=$(cat "$OC_LOG")
     assert "called 'serve --pure --port 19876'" "$(echo "$invocations" | grep -q "serve --pure --port 19876" && echo true || echo false)"
     rm -rf "$FAKE_DIR" "$(dirname "$LOCK_DIR")" )

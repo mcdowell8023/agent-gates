@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# agent-gates-plan-review — record a completed plan review as the artifact CHECK 3 accepts.
+#
+# WHY THIS EXISTS (found 2026-09-01 by running this repo's own gate on its own commit):
+# CHECK 3 blocked with `Fix: run agent-gates-review --plan <plan>` — and that flag exists
+# nowhere in bin/ or lib/. Nothing wrote PLAN_REVIEW / PLAN_REVIEW_TOOL / PLAN_REVIEW_MODEL
+# either. The only way to satisfy CHECK 3 was to hand-write the three markers, and the gate
+# only grepped for their presence, so hand-writing WAS passing. Same defect class as the
+# dispatch→CHECK 6 break fixed in v2.6.0: a gap that forces fabrication is a design defect,
+# not a user error.
+#
+# ⛔ What this deliberately does NOT do:
+#   - it does not invent a verdict. No `VERDICT:` line in the review body means refusal.
+#   - it does not accept the anchor from the caller; the plan hash is computed here.
+#   - it does not assume heterogeneity. An unresolvable model family records L0, never L1 —
+#     otherwise any unrecognised model id would silently count as a cross-model review.
+#
+# The anchor exists because markers used to survive a plan rewrite: a review of last
+# month's plan satisfied today's completely different one. The hash covers the plan with
+# its own marker lines stripped, so writing the markers does not invalidate them.
+#
+# Usage:
+#   agent-gates-plan-review <plan.md> --result <review.md> --model <provider/model> [--tool <name>]
+#   agent-gates-plan-review <plan.md> --print-hash        # recompute, write nothing
+set -uo pipefail
+
+PROG="$(basename "$0")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+
+usage() {
+  echo "Usage: $PROG <plan.md> --result <review.md> --model <provider/model> [--tool <name>]" >&2
+  echo "       $PROG <plan.md> --print-hash" >&2
+  echo "" >&2
+  echo "  Records a plan review as CHECK 3 markers inside <plan.md>." >&2
+  echo "  The review body must already contain 'VERDICT: PASS|FAIL|QUESTIONS' —" >&2
+  echo "  this tool will not supply one." >&2
+  exit 2
+}
+
+PLAN=""; RESULT=""; MODEL=""; TOOL=""; PRINT_HASH=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --result)     [[ $# -ge 2 ]] || usage; RESULT="$2"; shift 2 ;;
+    --model)      [[ $# -ge 2 ]] || usage; MODEL="$2";  shift 2 ;;
+    --tool)       [[ $# -ge 2 ]] || usage; TOOL="$2";   shift 2 ;;
+    --print-hash) PRINT_HASH=1; shift ;;
+    -h|--help)    usage ;;
+    -*)           echo "$PROG: unknown option '$1'" >&2; usage ;;
+    *)            [[ -z "$PLAN" ]] && PLAN="$1" || { echo "$PROG: unexpected argument '$1'" >&2; usage; }; shift ;;
+  esac
+done
+
+[[ -n "$PLAN" ]] || usage
+[[ -f "$PLAN" ]] || { echo "$PROG: plan not found: $PLAN" >&2; exit 2; }
+
+# Hash the plan with its own PLAN_REVIEW* marker lines stripped, and with trailing
+# whitespace normalised. Stripping the markers is what makes the anchor self-consistent:
+# otherwise writing the marker would immediately invalidate the hash it contains.
+_plan_hash() {
+  # Trailing blank lines are dropped too: the marker block is appended after a blank line,
+  # so without this the second run hashes one more empty line than the first and the anchor
+  # changes on every re-record — the tool would invalidate its own receipt.
+  grep -vE '^<!--[[:space:]]*PLAN_REVIEW(_[A-Z0-9]+)?:' "$1" \
+    | sed -e 's/[[:space:]]*$//' \
+    | awk '{l[NR]=$0} END{n=NR; while(n>0 && l[n]=="") n--; for(i=1;i<=n;i++) print l[i]}' \
+    | { command -v sha256sum >/dev/null 2>&1 && sha256sum || shasum -a 256; } \
+    | awk '{print $1}'
+}
+
+if [[ "$PRINT_HASH" -eq 1 ]]; then
+  _plan_hash "$PLAN"
+  exit 0
+fi
+
+# Provenance is mandatory. An artifact whose source cannot be named is worse than no
+# artifact: it looks like evidence while attesting nothing.
+[[ -n "$MODEL" ]] || {
+  echo "$PROG: provenance required — pass --model <provider/model>." >&2
+  echo "  A plan-review marker with no declared reviewer is not acceptable evidence." >&2
+  exit 2
+}
+[[ -n "$RESULT" ]] || { echo "$PROG: --result <review.md> required" >&2; exit 2; }
+[[ -f "$RESULT" ]] || { echo "$PROG: review body not found: $RESULT" >&2; exit 2; }
+
+# The verdict comes from the reviewer. Refusal is the correct outcome when it is missing —
+# supplying one here would be recording a judgement nobody reached.
+#
+# ⚠️ Parsing is delegated to lib/hetero/conclusion.sh, NOT reimplemented here. The first cut
+# of this file did reimplement it with `grep -oiE 'PASS|FAIL|…'`, and cross-review caught two
+# consequences: the协议-sanctioned decorated forms (`**VERDICT: PASS**`, `## VERDICT: PASS`,
+# a full-width `：`) were all rejected — the exact shape that in v2.0.2 got reported as "all
+# review models failed" and sent troubleshooting into the transport layer for a day — and,
+# worse, `VERDICT: PASS_WITH_ISSUES` matched the PASS prefix and was recorded as a clean
+# PASS, inverting the review's meaning.
+CONCLUSION_LIB="$SCRIPT_DIR/../lib/hetero/conclusion.sh"
+[[ -f "$CONCLUSION_LIB" ]] || {
+  echo "$PROG: lib/hetero/conclusion.sh not found — refusing to parse the verdict with a second implementation" >&2
+  exit 69; }
+# shellcheck disable=SC1090
+source "$CONCLUSION_LIB"
+
+BODY=$(cat "$RESULT")
+if ! has_valid_conclusion "$BODY"; then
+  echo "$PROG: 审查正文里没有可用的结论行，没有可记录的判定。" >&2
+  echo "  需要一行**只有结论**：VERDICT: PASS   （或 FAIL / ISSUES / REVISE / REJECT）" >&2
+  echo "  允许 markdown 装饰和全角冒号；⛔ 但带限定的结论（PASS_WITH_ISSUES 之类）一律拒绝," >&2
+  echo "     因为它会被读成 PASS，把审查结论反过来。" >&2
+  echo "  ⛔ 本工具不会代填 —— 审查者没给出的判定，记下来就是伪造。" >&2
+  echo "  Fix: 在审查 prompt 里要求最后一行给出裸 VERDICT，然后重新审。" >&2
+  exit 3
+fi
+RAW_LINE=$(extract_conclusion_line "$BODY")
+RAW_VALUE=$(extract_verdict_value "$BODY" || true)
+VERDICT=$(map_verdict_to_verify "$RAW_VALUE" 2>/dev/null || true)
+if [[ -z "$VERDICT" ]]; then
+  echo "$PROG: 结论值 '${RAW_VALUE:-<空>}' 没有对应的判定词" >&2
+  exit 3
+fi
+
+# Heterogeneity. fail-closed: unresolvable family is never treated as different, or any
+# unrecognised model id would silently satisfy the cross-model requirement.
+LEVEL="L0"
+FAMILY_LIB="$SCRIPT_DIR/../lib/hetero/family.sh"
+CONFIG_LIB="$SCRIPT_DIR/../lib/hetero/config.sh"
+if [[ -f "$FAMILY_LIB" ]]; then
+  # shellcheck disable=SC1090
+  source "$FAMILY_LIB"
+  IMPL_FAMILY="${HETERO_IMPLEMENTER_FAMILY:-}"
+  if [[ -z "$IMPL_FAMILY" ]]; then
+    _hc="${AGENT_GATES_DIR:-$HOME/.agent-gates}/hetero-check.json"
+    IMPL_FAMILY=$(python3 -c '
+import json,sys
+try: print(json.load(open(sys.argv[1])).get("implementer_family","") or "")
+except Exception: print("")' "$_hc" 2>/dev/null || true)
+  fi
+  if [[ -n "$IMPL_FAMILY" ]] && declare -f hetero_families_differ >/dev/null 2>&1; then
+    if hetero_families_differ "$MODEL" "$IMPL_FAMILY" 2>/dev/null; then LEVEL="L1"; fi
+  fi
+fi
+
+[[ -n "$TOOL" ]] || TOOL="external"
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%SZ")
+HASH=$(_plan_hash "$PLAN")
+
+# Idempotent: strip any previous marker block, then append the current one. Appending
+# without stripping would leave two PLAN_REVIEW lines and the gate would read whichever
+# came first — i.e. possibly a stale review of an older plan.
+TMP="${PLAN}.tmp.$$"
+{
+  grep -vE '^<!--[[:space:]]*PLAN_REVIEW(_[A-Z0-9]+)?:' "$PLAN"
+  echo ""
+  echo "<!-- PLAN_REVIEW: ${LEVEL} -->"
+  echo "<!-- PLAN_REVIEW_TOOL: ${TOOL} -->"
+  echo "<!-- PLAN_REVIEW_MODEL: ${MODEL} -->"
+  echo "<!-- PLAN_REVIEW_VERDICT: ${VERDICT} -->"
+  echo "<!-- PLAN_REVIEW_SHA256: ${HASH} -->"
+  echo "<!-- PLAN_REVIEW_AT: ${TIMESTAMP} -->"
+  echo "<!-- PLAN_REVIEW_RAW: ${RAW_LINE:-<none>} -->"
+  if [[ -n "${RAW_VALUE:-}" && "$RAW_VALUE" != "$VERDICT" ]]; then
+    # A relabel is mechanical, not a judgement — record both so it can be checked.
+    echo "<!-- PLAN_REVIEW_RELABEL: ${RAW_VALUE} -> ${VERDICT} -->"
+  fi
+} > "$TMP"
+mv "$TMP" "$PLAN"
+
+echo "✅ plan review recorded"
+echo "   plan:      $PLAN"
+echo "   reviewer:  $MODEL  (tool: $TOOL)"
+echo "   level:     $LEVEL$([[ "$LEVEL" == "L0" ]] && echo "  ⚠️ 同族或族不可解析 —— 不算异构审查" || echo "  (异构)")"
+echo "   verdict:   $VERDICT   ← 审查者原文: ${RAW_LINE:-<none>}"
+[[ -n "${RAW_VALUE:-}" && "$RAW_VALUE" != "$VERDICT" ]] && echo "   relabelled: $RAW_VALUE -> $VERDICT （机械改写，非判断）"
+echo "   anchor:    ${HASH:0:16}…  (计划正文改动后失效)"
