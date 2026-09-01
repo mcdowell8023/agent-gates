@@ -50,7 +50,7 @@ seed_unrelated() {
     printf '{"capability":"FULL","channel":"pi","staged_diff_hash":"beef%02d"}\n' "$i" \
       > ".agent/verify/2026-08-0$((i%9))-other-$i.dispatch.json"
   done
-  touch -t 202608261358.57 .agent/verify/*
+  touch .agent/verify/*
 }
 
 echo "=== CHECK 6 no-anchor semantics ==="
@@ -84,7 +84,7 @@ echo "N3: 有一份锚定匹配时正常通过（不能因为收紧而拒掉合�
   printf 'VERIFY_VERDICT: PASS\nreal one\n' > .agent/verify/2026-08-26-real.md
   printf '{"capability":"FULL","channel":"pi","staged_diff_hash":"%s"}\n' "$CUR" \
     > .agent/verify/2026-08-26-real.dispatch.json
-  touch -t 202608261358.57 .agent/verify/*
+  touch .agent/verify/*
   out=$(SKIP_REVIEW=1 bash "$GATE" 2>&1 || true)
   [[ "$out" == *"No verifier evidence"* || "$out" == *"made AFTER verification"* ]] && r=false || r=true
   assert "锚定命中时不报错" "$r"
@@ -95,7 +95,7 @@ echo "N4: 纯旧格式（无 dispatch.json）仍回落 mtime（向后兼容）"
 (
   setup
   printf 'VERIFY_VERDICT: PASS\nlegacy doc\n' > .agent/verify/2026-08-26-legacy.md
-  touch -t 202608261358.57 .agent/verify/*.md
+  touch .agent/verify/*.md
   out=$(SKIP_REVIEW=1 bash "$GATE" 2>&1 || true)
   [[ "$out" == *"No verifier evidence"* ]] && r=false || r=true
   assert "旧格式不被新规则拒掉" "$r"

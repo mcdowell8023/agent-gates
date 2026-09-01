@@ -2,6 +2,70 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.7.0 — 门禁分级：迭代时宽松，进集成分支时严格
+
+**起因**（2026-09-01）：审查成了瓶颈而非开发本身——一个改动被反复审了 5 轮。
+门禁对「业务分支上的一次 commit」和「合并进 test/master」施加同等严厉度，
+于是每次迭代都付全额代价。
+
+模型：**在业务分支上迭代时宽松，在工作进入集成分支的那个边界上严格。**
+
+### Added — 三种模式
+
+| mode | 语义 |
+|---|---|
+| `strict` | 默认。强制 verdict，即 v2.6.x 之前的行为 |
+| `relaxed` | 产物必须**存在**且锚定当前 diff，但**不强制其结论**——「审过一次，成败都放行」 |
+| `off` | 不做任何检查，**并且大声说出来**，绝不静默 |
+
+⚠️ **`relaxed` 不等于 `off`**：「审过一次但不看结果」仍然要求审查真的发生过、
+且锚定到这次改动。否则两种模式就是同一件事的两个名字。完全没审的改动在
+relaxed 下**照样被拦**。
+
+配置解析顺序（先命中者生效）：
+
+```
+AGENT_GATES_MODE  →  .agent/gates.json  →  $AGENT_GATES_DIR/gates.json  →  strict
+```
+
+```json
+{ "mode": "relaxed", "strict_branches": ["test", "master", "main", "release/*"] }
+```
+
+项目级覆盖用户级；env 覆盖两者，便于单次提交临时切换。
+
+### Added — `strict_branches`：严格性落在边界上
+
+在这些分支上、以及**合并进这些分支时**，无论配置什么都强制 `strict`。
+默认 `test` / `master` / `main`，支持 glob（`release/*`）。
+
+这就是「业务分支合并进 test、master 之前要求一次全面审查」的落点。
+
+### Fixed — merge 不再被无条件跳过
+
+```bash
+# 此前：agent-quality-gate.sh:10
+git rev-parse MERGE_HEAD &>/dev/null 2>&1 && exit 0
+```
+
+merge 曾被无条件放行——而那恰恰是最该全面审查的时刻：工作正在进入集成分支。
+现在只在**目标分支不是 strict 分支**时才跳过（业务分支之间的合并不卡）。
+
+### Changed — gate 会说出自己在什么模式
+
+非 `strict` 时打印 `ℹ️ Agent Quality Gate mode: <mode> (from <来源>)`。
+一个悄悄改变严厉度的门禁比严格的门禁更糟：没人能判断一次提交为什么通过了。
+`relaxed` 放行时也明说「⛔ 这是宽松放行，不是通过；合并进 strict 分支会重新全面审查」。
+
+### Fixed — 测试里的硬编码时间戳（4 个文件）
+
+`touch -t 202608261358.57` 这类绝对时间戳会随日期漂移失效：CHECK 6 只看
+`-mmin -240`（4 小时），写死的 8-26 到 9-01 就全部掉出窗口，测试于是走了完全
+不同的分支并给出误导性的失败。改用 `touch`（当前时间，且一次 touch 多个文件
+天然 mtime 相同，「fresh worktree 全同 mtime」这个形状照样能造）。
+⚠️ `run_gate_verify_select.sh` 的 V2 是**相反**的场景（需要 mtime 有差异），
+单独用 `sleep 1` 跨过秒级粒度，注释里标清了两类场景的区别。
+
 ## v2.6.1 — 层1：子进程「存在」不等于「在干活」
 
 外部反馈（2026-08-31）报了一批 jest 进程：**测试全部跑完、结果 3.6 MB 已落盘

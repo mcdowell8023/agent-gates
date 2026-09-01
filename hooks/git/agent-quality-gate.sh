@@ -7,7 +7,139 @@ set -euo pipefail
 
 [[ "${AGENT_MODE:-0}" != "1" ]] && exit 0
 
-git rev-parse MERGE_HEAD &>/dev/null 2>&1 && exit 0
+# ---------------------------------------------------------------------------
+# Gate mode (v2.7.0)
+#
+# Review had become the bottleneck rather than development — one change went through five
+# rounds. The gate applied the same severity to every commit on a feature branch as to a
+# merge into test/master, so iteration paid the full price every time.
+#
+# The model: permissive while iterating, strict at the boundary where work enters an
+# integration branch.
+#
+#   strict   (default)  verdicts enforced — the behaviour up to v2.6.x
+#   relaxed             evidence must EXIST and be anchored to this diff, but its verdict is
+#                       not enforced. ⚠️ NOT the same as off: "reviewed once, outcome not
+#                       enforced" still requires a review to have happened, otherwise the
+#                       two modes would be one thing with two names
+#   off                 no checks — and it says so loudly, never silently
+#
+# Resolution order (first hit wins):
+#   AGENT_GATES_MODE  →  .agent/gates.json  →  $AGENT_GATES_DIR/gates.json  →  strict
+#
+# strict_branches: on these branches, and on merges INTO them, strict is forced regardless
+# of configuration. That is where "one full review before it reaches test/master" lands.
+# ---------------------------------------------------------------------------
+_GATE_CFG_PROJECT=".agent/gates.json"
+_GATE_CFG_USER="${AGENT_GATES_DIR:-$HOME/.agent-gates}/gates.json"
+GATE_MODE_SOURCE=""
+
+_gate_cfg_mode() {
+  [[ -f "$1" ]] || return 1
+  local m
+  m=$(sed -n 's/.*"mode"[[:space:]]*:[[:space:]]*"\([a-zA-Z]*\)".*/\1/p' "$1" 2>/dev/null | head -1 | tr '[:upper:]' '[:lower:]')
+  case "$m" in strict|relaxed|off) printf '%s' "$m"; return 0 ;; esac
+  return 1
+}
+
+GATE_MODE=""
+if [[ -n "${AGENT_GATES_MODE:-}" ]]; then
+  case "$(printf '%s' "$AGENT_GATES_MODE" | tr '[:upper:]' '[:lower:]')" in
+    strict|relaxed|off) GATE_MODE="$(printf '%s' "$AGENT_GATES_MODE" | tr '[:upper:]' '[:lower:]')"
+                        GATE_MODE_SOURCE="env AGENT_GATES_MODE" ;;
+    *) echo "⚠️  AGENT_GATES_MODE='${AGENT_GATES_MODE}' is not one of strict|relaxed|off — ignored" >&2 ;;
+  esac
+fi
+if [[ -z "$GATE_MODE" ]] && GATE_MODE=$(_gate_cfg_mode "$_GATE_CFG_PROJECT"); then
+  GATE_MODE_SOURCE="$_GATE_CFG_PROJECT"
+fi
+if [[ -z "$GATE_MODE" ]] && GATE_MODE=$(_gate_cfg_mode "$_GATE_CFG_USER"); then
+  GATE_MODE_SOURCE="$_GATE_CFG_USER"
+fi
+if [[ -z "$GATE_MODE" ]]; then GATE_MODE="strict"; GATE_MODE_SOURCE="default"; fi
+
+# strict_branches: project config wins over user config; fall back to the usual integration
+# branch names. Patterns are globs, so release/* works.
+_gate_strict_branches() {
+  local f
+  for f in "$_GATE_CFG_PROJECT" "$_GATE_CFG_USER"; do
+    [[ -f "$f" ]] || continue
+    local out
+    out=$(python3 -c '
+import json,sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+b = d.get("strict_branches")
+if isinstance(b, list):
+    for x in b:
+        if x: print(x)
+' "$f" 2>/dev/null)
+    [[ -n "$out" ]] && { printf '%s' "$out"; return 0; }
+  done
+  printf '%s' 'test
+master
+main'
+}
+
+_GATE_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+_gate_branch_is_strict() {
+  local b="${1:-}" pat
+  [[ -z "$b" || "$b" == "HEAD" ]] && return 1
+  while IFS= read -r pat; do
+    [[ -z "$pat" ]] && continue
+    # Unquoted $pat on purpose — these are globs (release/*).
+    [[ "$b" == $pat ]] && return 0
+  done <<< "$(_gate_strict_branches)"
+  return 1
+}
+
+_GATE_ON_STRICT_BRANCH=0
+if _gate_branch_is_strict "$_GATE_BRANCH"; then
+  _GATE_ON_STRICT_BRANCH=1
+  if [[ "$GATE_MODE" != "strict" ]]; then
+    echo "ℹ️  branch '${_GATE_BRANCH}' is a strict branch — mode forced to strict (config said '${GATE_MODE}')"
+    GATE_MODE="strict"; GATE_MODE_SOURCE="strict_branches override"
+  fi
+fi
+
+# A merge used to be skipped unconditionally, which is exactly where a full review is most
+# warranted: it is the moment feature work enters an integration branch. Skip only when the
+# destination is NOT a strict branch.
+if git rev-parse MERGE_HEAD &>/dev/null 2>&1; then
+  if [[ "$_GATE_ON_STRICT_BRANCH" -eq 1 ]]; then
+    echo "ℹ️  merge into strict branch '${_GATE_BRANCH}' — gate applies (merges are skipped only outside strict branches)"
+  else
+    exit 0
+  fi
+fi
+
+if [[ "$GATE_MODE" == "off" ]]; then
+  echo "⚠️  Agent Quality Gate: DISABLED by configuration (mode=off, from ${GATE_MODE_SOURCE})"
+  echo "   No checks ran. Set \"mode\": \"relaxed\" or \"strict\" in ${_GATE_CFG_PROJECT} or"
+  echo "   ${_GATE_CFG_USER} to re-enable, or AGENT_GATES_MODE=strict for one commit."
+  exit 0
+fi
+
+# Say which mode is in effect whenever it is not the default. A gate that silently changed
+# severity would be worse than one that is strict: nobody could tell why a commit passed.
+if [[ "$GATE_MODE" != "strict" ]]; then
+  echo "ℹ️  Agent Quality Gate mode: ${GATE_MODE} (from ${GATE_MODE_SOURCE})"
+fi
+
+RELAXED_WAIVES=0
+# In relaxed mode, "already reviewed but the conclusion is not clean" is waived; "never
+# reviewed at all" still blocks. Callers use it as:  relaxed_waive "..." || fail "..."
+relaxed_waive() {
+  [[ "$GATE_MODE" == "relaxed" ]] || return 1
+  echo "⚠️  GATE (relaxed): $1"
+  echo "     Waived because anchored review evidence exists for this change; relaxed mode"
+  echo "     does not enforce the verdict. ⛔ This is a relaxed pass, NOT an approval —"
+  echo "     merging into a strict branch will require a full review."
+  RELAXED_WAIVES=$((RELAXED_WAIVES + 1))
+  return 0
+}
 
 # Version stamped into THIS copy by install.sh / init-project-gates when copied from
 # the repo source (sed replaces the placeholder). Shows "dev" if run from an unstamped
@@ -271,8 +403,12 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
 
     REVIEW_FILE="$PASS_REVIEW_FILE"
     if [[ -n "$NEGATIVE_REVIEW_FILE" ]]; then
+      if relaxed_waive "review verdict is ISSUES/FAIL ($NEGATIVE_REVIEW_FILE)"; then
+        :
+      else
       fail "Applicable review verdict is ISSUES/FAIL — resolve before committing"
       echo "   Review: $NEGATIVE_REVIEW_FILE"
+      fi
     elif [[ -z "$PASS_REVIEW_FILE" ]]; then
       if [[ "$ANCHORED_REVIEW_COUNT" -eq 0 ]]; then
         fail "No content-anchored review evidence covers the staged change"
@@ -540,10 +676,17 @@ except Exception:
               fi
               ;;
             FAIL)
-              fail "Verifier found real defects — fix before commit"
-              echo "   Review: $VERIFY_FILE"
+              if relaxed_waive "verifier verdict is FAIL ($VERIFY_FILE)"; then
+                :
+              else
+                fail "Verifier found real defects — fix before commit"
+                echo "   Review: $VERIFY_FILE"
+              fi
               ;;
             QUESTIONS|INCOMPLETE)
+              if relaxed_waive "verifier verdict is ${VERIFY_VERDICT} ($VERIFY_FILE)"; then
+                :
+              else
               ACK_FILE=".agent/verify/${VERIFY_RUN_ID}.ack"
               if [[ -f "$ACK_FILE" ]]; then
                 _ACK_MTIME=$(stat -f %m "$ACK_FILE" 2>/dev/null || stat -c %Y "$ACK_FILE" 2>/dev/null || echo "0")
@@ -597,6 +740,7 @@ except Exception:
               else
                 fail "Verifier returned ${VERIFY_VERDICT} — needs the user's go-ahead"
                 _v6_ack_help "$VERIFY_RUN_ID" "$VERIFY_VERDICT"
+              fi
               fi
               ;;
           esac

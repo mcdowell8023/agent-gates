@@ -55,7 +55,7 @@ setup() {
     > .agent/verify/2026-08-24-real.dispatch.json
 
   # Stamp every doc with the SAME mtime, exactly as `git worktree add` does.
-  touch -t 202608241358.57 .agent/verify/*.md .agent/verify/*.dispatch.json
+  touch .agent/verify/*.md .agent/verify/*.dispatch.json
 }
 teardown() { cd /; [[ -n "${REPO:-}" && -d "$REPO" ]] && rm -rf "$REPO"; }
 
@@ -68,8 +68,11 @@ echo "V0: 前置——确认 CHECK 6 真的运行了（否则下面全是平凡�
   out=$(SKIP_REVIEW=1 bash "$GATE" 2>&1 || true)
   [[ -n "$out" ]] && r=true || r=false
   assert "gate 有输出（不是直接 exit 0）" "$r"
-  [[ "$out" == *"CHECK 6"* || "$out" == *"Verifier"* || "$out" == *"verify"* ]] && r=true || r=false
-  assert "输出涉及 verify 检查" "$r"
+  # ⚠️ 不能断言「输出里有 verify 字样」——CHECK 6 通过时是完全静默的，而这个用例的
+  # fixture 恰好有一份锚定命中的产物，于是它就该静默通过。可靠的前置信号是「没有走
+  # 那两条早退路径」：AGENT_MODE 未设（gate:8）、或 trivial 豁免（gate:29）。
+  [[ "$out" != *"trivial change skipped"* ]] && r=true || r=false
+  assert "未被 trivial 豁免（说明真的进入了检查阶段）" "$r"
   teardown
 )
 
@@ -91,9 +94,12 @@ echo "V2: 无锚点匹配时回落 mtime（向后兼容，不能因为找不到�
   # 把真实那份的 hash 改掉,使没有任何 dispatch 命中当前 staged
   printf '{"capability":"FULL","channel":"pi","staged_diff_hash":"nomatch"}\n' \
     > .agent/verify/2026-08-24-real.dispatch.json
-  touch -t 202608241358.57 .agent/verify/2026-08-24-real.dispatch.json
-  # real 那份 mtime 设为最新,mtime 回落应选中它
-  touch -t 202608241400.00 .agent/verify/2026-08-24-real.md
+  touch .agent/verify/2026-08-24-real.dispatch.json
+  # ⚠️ 这个用例与 V1 相反：V1 要「mtime 全同」，V2 要「real 那份严格更新」，否则
+  # 回落 mtime 就没有可选的最新项。sleep 1 是为了跨过秒级粒度——同一秒内 touch
+  # 出来的 mtime 相同，会把这条测成 V1 的场景。
+  sleep 1
+  touch .agent/verify/2026-08-24-real.md
   out=$(SKIP_REVIEW=1 bash "$GATE" 2>&1 || true)
   [[ "$out" == *"missing VERIFY_VERDICT"* ]] && r=false || r=true
   assert "回落 mtime 仍选中有 verdict 的那份" "$r"

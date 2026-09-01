@@ -531,6 +531,11 @@ test_stale_processing_recovered() {
   mkdir -p "$(PROC)"
   mv "$(PEND)/$TOKEN" "$(PROC)/$TOKEN"
   # make it look like it has been sitting there
+  # ⚠️ 刻意的极旧值，别改成 `touch`。时间戳分三类，只有第二类需要改：
+  #   ① 故意的远古值（2000-01-01）——永远是过去，不会漂移，测「超过阈值被回收」靠它
+  #   ② 接近今天的写死值（2026-08-26）——会掉出 -mmin 窗口而静默改变测试路径，必须换掉
+  #   ③ 需要相对先后的（V2 里那种）——用 sleep 跨过秒级粒度
+  # 2026-09-01 我批量把①也换成了 `touch`，于是这个残留不再 stale，T24 直接失败。
   touch -t 200001010000 "$(PROC)/$TOKEN"
   make_review "VERDICT: PASS"
   AG_REVIEW_PROCESSING_STALE=1 import_result "$TOKEN" "agent-ok-1"

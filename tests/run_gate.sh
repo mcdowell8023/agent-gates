@@ -670,7 +670,7 @@ test_worktree_refreshed_legacy_review_does_not_pass() {
     printf '{"capability":"FULL","channel":"fixture"}\n' > .agent/verify/legacy.dispatch.json
     git add .
     git commit -q -m legacy-review
-    touch -t 202608010101 .agent/reviews/legacy-pass.md
+    touch .agent/reviews/legacy-pass.md
     linked="${MOCK_REPO}-linked"
     git worktree add -q "$linked" -b test/legacy-worktree
     cd "$linked" || exit 1
