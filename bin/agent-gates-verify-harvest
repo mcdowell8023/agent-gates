@@ -22,22 +22,90 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 VERIFY_DIR=".agent/verify"
 
 usage() {
-  echo "Usage: $PROG <verify-run-id> [--result <file>]" >&2
+  echo "Usage: $PROG <verify-run-id> [--result <file>] [--req-source <file>]" >&2
+  echo "       $PROG --emit-prompt --req-source <file>" >&2
   echo "" >&2
   echo "  Reads  $VERIFY_DIR/<run-id>.evidence.json + .dispatch.json (written by hetero_dispatch)" >&2
   echo "  Writes $VERIFY_DIR/<run-id>.md with a bare VERIFY_VERDICT line for CHECK 6." >&2
+  echo "" >&2
+  echo "  --req-source <file>  requirement doc with a '## 验收标准' section (or Gherkin)." >&2
+  echo "                       Every item must be answered in the evidence, or this refuses." >&2
+  echo "  --emit-prompt        print the per-item question block to feed the verifier." >&2
   exit 2
 }
 
-RUN_ID=""; RESULT_OUT=""
+RUN_ID=""; RESULT_OUT=""; REQ_SOURCE=""; EMIT_PROMPT=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --result) [[ $# -ge 2 ]] || usage; RESULT_OUT="$2"; shift 2 ;;
+    --req-source) [[ $# -ge 2 ]] || usage; REQ_SOURCE="$2"; shift 2 ;;
+    --emit-prompt) EMIT_PROMPT=1; shift ;;
     -h|--help) usage ;;
     -*) echo "$PROG: unknown option '$1'" >&2; usage ;;
     *) [[ -z "$RUN_ID" ]] && RUN_ID="$1" || usage; shift ;;
   esac
 done
+
+# The requirement matrix lives in lib/verify/reqmatrix.sh; only load it when asked for, so
+# an old-style harvest keeps working on an install that predates the library.
+_RM_LIB="$SCRIPT_DIR/../lib/verify/reqmatrix.sh"
+if [[ -n "$REQ_SOURCE" || "$EMIT_PROMPT" -eq 1 ]]; then
+  [[ -f "$_RM_LIB" ]] || {
+    echo "$PROG: lib/verify/reqmatrix.sh not found — reinstall agent-gates" >&2; exit 69; }
+  # shellcheck disable=SC1090
+  source "$_RM_LIB"
+fi
+
+# --emit-prompt: the skeleton belongs in the QUESTION, never in the answer.
+#
+# Filling unanswered items in ourselves is the forgery this whole tool exists to avoid.
+# COVERED would invent a pass; MISSING would mislabel "nobody asked" as "it was not built".
+# The only honest move is to make the verifier answer, so the item list goes into its prompt.
+if [[ "$EMIT_PROMPT" -eq 1 ]]; then
+  [[ -n "$REQ_SOURCE" ]] || { echo "$PROG: --emit-prompt needs --req-source <file>" >&2; usage; }
+  [[ -f "$REQ_SOURCE" ]] || { echo "$PROG: no such requirement source: $REQ_SOURCE" >&2; exit 2; }
+  if ! _RM_ITEMS=$(reqmatrix_extract_items "$REQ_SOURCE" 2>/dev/null); then
+    echo "$PROG: $REQ_SOURCE 里找不到可提取的验收条目。" >&2
+    echo "  需要一个 '## 验收标准'（或 Acceptance / 验收清单）章节，其下每个一级列表项算一条需求；" >&2
+    echo "  Gherkin 的 .feature 也可以，每个 Scenario: 算一条。" >&2
+    echo "  ⛔ 不会去数「## 实现步骤」下的 checkbox —— 那些是任务不是需求，数出来是噪音。" >&2
+    exit 3
+  fi
+  _RM_N=$(printf '%s\n' "$_RM_ITEMS" | grep -c '[^[:space:]]' || true)
+  cat <<PROMPT_EOF
+以下是本次需要逐条验收的需求（共 ${_RM_N} 条）。请对每一条给出一行结论，格式严格如下：
+
+REQ_ITEM: <编号> | <状态> | <证据> | <说明>
+
+状态取值：
+  COVERED      本次改动实现了它
+  PREEXISTING  既有代码已覆盖，本次未改动
+  PARTIAL      只做了一部分（说明里写清还缺什么）
+  DEFERRED     明确不在本次范围（说明里写去向，如下个 PR / issue 号）
+  NA           不适用（说明里写理由）
+  MISSING      该做而没做
+
+证据格式：<层面>:<路径>[:行号]，多个用逗号分隔
+  层面：ui（用户可达入口）/ api / db / job / cfg
+  路径不带 ~ = 本次改动过；带 ~ = 既有且本次未改动（例：ui:~src/List.vue:88）
+  非代码证据：RUN:<运行产物路径> / EXT:<仓外变更> / NO_UI:<该需求无界面的理由>
+
+⚠️ 重点看「用户是否真的能用」：后端接口写了但前端没有入口，等于没做。
+   每条用户可达类需求都要给出 ui: 层面的证据。
+
+⛔ 每一条都必须回答。漏答会被拒绝，不会被当成通过。
+
+需求清单：
+PROMPT_EOF
+  printf '%s\n' "$_RM_ITEMS" | grep -n '[^[:space:]]' | sed 's/^\([0-9]*\):/  \1. /'
+  cat <<'PROMPT_EOF2'
+
+最后另起一行给出总结论：
+VERDICT: PASS|FAIL|QUESTIONS
+PROMPT_EOF2
+  exit 0
+fi
+
 [[ -n "$RUN_ID" ]] || usage
 
 EV="$VERIFY_DIR/${RUN_ID}.evidence.json"
@@ -72,6 +140,50 @@ fi
 [[ -n "${BODY//[[:space:]]/}" ]] || {
   echo "$PROG: evidence parsed to empty text (channel=${CHANNEL:-?}) — nothing to harvest" >&2; exit 4; }
 
+# --- requirement matrix: every acceptance item must have been answered ---
+#
+# Refuse rather than fill. A half-written .md is worse than none: CHECK 6 would read it,
+# find a verdict, and report a pass over a requirement nobody looked at.
+RM_HEADERS=""
+if [[ -n "$REQ_SOURCE" ]]; then
+  [[ -f "$REQ_SOURCE" ]] || { echo "$PROG: no such requirement source: $REQ_SOURCE" >&2; exit 2; }
+  if ! RM_ITEMS=$(reqmatrix_extract_items "$REQ_SOURCE" 2>/dev/null); then
+    echo "$PROG: $REQ_SOURCE 里找不到可提取的验收条目（需要 '## 验收标准' 章节或 Gherkin Scenario）" >&2
+    exit 3
+  fi
+  RM_N=$(printf '%s\n' "$RM_ITEMS" | grep -c '[^[:space:]]' || true)
+  RM_HASH=$(reqmatrix_block_hash "$REQ_SOURCE" 2>/dev/null || true)
+
+  # Answered item numbers, taken from the model's own output at line start. A decorated
+  # line ("- REQ_ITEM: 1 | ...") does not count, and is called out separately below —
+  # otherwise a near-miss of format reads as "the model answered nothing", which sends
+  # people looking in the wrong place.
+  RM_ANSWERED=$(printf '%s\n' "$BODY" | sed -n 's/^REQ_ITEM:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | sort -n -u)
+  RM_DECORATED=$(printf '%s\n' "$BODY" | grep -cE '^[^R].*REQ_ITEM:' || true)
+
+  RM_MISSING=""
+  for ((_i = 1; _i <= RM_N; _i++)); do
+    grep -qx "$_i" <<<"$RM_ANSWERED" || RM_MISSING="$RM_MISSING $_i"
+  done
+  if [[ -n "${RM_MISSING// /}" ]]; then
+    echo "$PROG: 验收模型没有逐条回答 —— 拒绝生成产物。" >&2
+    echo "  需求源 $REQ_SOURCE 有 $RM_N 条验收条目，未回答的编号:$RM_MISSING" >&2
+    for _i in $RM_MISSING; do
+      printf '    %s. %s\n' "$_i" "$(printf '%s\n' "$RM_ITEMS" | sed -n "${_i}p")" >&2
+    done
+    if [[ "${RM_DECORATED:-0}" -gt 0 ]]; then
+      echo "  ⚠️ evidence 里有 $RM_DECORATED 行含 REQ_ITEM: 但不在行首（被列表符号/缩进/加粗包住了）。" >&2
+      echo "     CHECK 6 严格按行首解析，带装饰的行一律不算。" >&2
+    fi
+    echo "  ⛔ 本工具不会代填。填 COVERED 是凭空造一个通过；填 MISSING 则把「没人问」" >&2
+    echo "     误记成「没做完」。两者都是伪造判定。" >&2
+    echo "  Fix: 用 $PROG --emit-prompt --req-source $REQ_SOURCE 生成逐条提问，重新派发。" >&2
+    exit 3
+  fi
+  RM_HEADERS=$(printf 'REQ_SOURCE: %s\nREQ_BLOCK_SHA256: %s\nREQ_ITEMS: %s' \
+    "$REQ_SOURCE" "${RM_HASH:-unknown}" "$RM_N")
+fi
+
 RAW_LINE=$(extract_conclusion_line "$BODY")
 RAW_VALUE=$(extract_verdict_value "$BODY" || true)
 if [[ -z "$RAW_VALUE" ]]; then
@@ -95,6 +207,18 @@ TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%
     echo "<!-- mechanical relabel: ${RAW_VALUE} -> ${MAPPED} (review vocabulary -> CHECK 6 vocabulary) -->"
   fi
   echo ""
+  # The REQ_ITEM lines are already in BODY above, verbatim — deliberately not reformatted,
+  # so what is recorded can be compared against the model transcript character for
+  # character. Only the headers the gate needs are added here.
+  if [[ -n "$RM_HEADERS" ]]; then
+    printf '%s\n' "$RM_HEADERS"
+  fi
+  # ⛔ Deliberately NOT deriving a stricter verdict here. harvest's contract is that the
+  # verdict comes from the model and this tool only relabels mechanically — deriving one
+  # from the matrix is a judgement, not a relabel. The gate does that derivation (E4) and
+  # PRINTS the discrepancy; doing it here as well would silently overwrite what the model
+  # said, destroying the transparency this file exists to provide.
+  # (Removed 2026-09-01: an automated reviewer added exactly that and it read plausible.)
   # Bare line, no decoration: CHECK 6 anchors on ^VERIFY_VERDICT: with no tolerance for
   # markdown, so the normalised line must be written exactly like this.
   echo "VERIFY_VERDICT: ${MAPPED}"

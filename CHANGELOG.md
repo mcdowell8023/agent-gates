@@ -2,6 +2,143 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.9.0 — 验收改成查需求遗漏，而不是第二次代码审查
+
+### 问题
+
+CHECK 6「验收」实质退化成了第二次代码审查：触发条件和 CHECK 5 一样，产物也一样是
+「让模型读代码」，`templates/verifier.md` 里那句「验收标准是否逐条满足」**没有任何机制支撑**
+—— 门禁只校验 `^VERIFY_VERDICT:` 这行存在、dispatch 锚定了 staged diff、capability 分级。
+一段关于 diff 的散文加一行 PASS 就能过。
+
+而验收真正要抓的是**漏做**，两种形态：
+
+- **纵向漏层**：后端接口写了，前端一行没写 → 用户根本用不了
+- **横向漏项**：需求「导出全部表格内容」，搜索做了，导出接口没写
+
+漏做的共同属性是**在 diff 里不留痕迹**：CHECK 5 读 diff，看到的每一行都是对的；
+实现者自己写的测试同样失明 —— 它没做的部分没写测试，**测试全绿和需求少一半可以同时成立**。
+一切从代码派生的清单（diff / 测试 / 覆盖率）对漏做结构性无效。
+
+需求清单本来就在盘上（CHECK 3 要求的 `.agent/plans/`、CHECK 2 要求的 `features/*.feature`），
+CHECK 6 从不读它 —— 和 v2.6.0 修的 dispatch→CHECK 6 断链是同一个形状：
+**承载真相的产物存在，检查点不读它。**
+
+### Added — 需求矩阵 `lib/verify/reqmatrix.sh`
+
+验收产物增加逐条矩阵，每条需求一行：
+
+```
+REQ_SOURCE: .agent/plans/2026-09-01-export.md
+REQ_BLOCK_SHA256: 3f2a…
+REQ_ITEMS: 2
+REQ_ITEM: 1 | COVERED | api:src/export.ts:18, ui:~src/List.vue:88 | 按钮既有，本次补接口
+REQ_ITEM: 2 | MISSING | - | 导出接口未实现，前端无导出入口
+```
+
+门禁强制的是**形式**，五条都是确定性可测的：
+
+| | 机制 |
+|---|---|
+| E1 | 条目数由门禁从需求源数出来，模型只能填每条的处置、**无权决定有几条** |
+| E2 | 只哈希提取出的条目块 —— 事后删改需求条目会失效，改文档别处的错别字不会 |
+| E3 | 不带 `~` 的引用必须落在本次 staged diff 内（含删除）；带 `~` 只需在工作树存在 |
+| E4 | 判定由矩阵推导，不采信模型申报那行；只收紧，不放宽 |
+| E6 | 证据按 `ui:`/`api:`/`db:`/`job:`/`cfg:` 分层声明，零 `ui:` 证据会被点出来 |
+
+状态取值 `COVERED` / `PREEXISTING` / `PARTIAL` / `DEFERRED` / `NA` / `MISSING`。
+
+### 目标是「无法静默绕过」，不是「无法绕过」
+
+铁了心撒谎的模型总能撒谎（把漏做的标 `NA`、编一个 `ui:~` 路径冒充入口）。
+想堵死只会造出一堆假失败，而假失败比漏抓更贵 —— 它让人直接绕过门禁。
+所以：**逃逸口一律计数打印**（`NA=` / `DEFERRED=` / `PREEXISTING=` / `NOTHING_TOUCHED=`），
+把「悄悄少做一半」变成「必须写下来说我少做了什么」。
+
+分工写明：**门禁管形式，异构验收模型管实质。** 「这条证据是否真的完成了这条需求」
+是语义判断，shell 做不到，不声称能做。门禁的贡献是让验收模型无法静默跳过任何一条。
+
+### Added — `verify-harvest --emit-prompt` / `--req-source`
+
+骨架进**提问**，不进结论：
+
+- `--emit-prompt --req-source <f>` 输出逐条提问块（编号需求 + 要求的回答格式）供派发
+- `--req-source <f>` 收割时校验模型答满了每一条；**漏答则拒绝生成产物**（exit 3）
+
+不代填是硬规则：填 `COVERED` 是凭空造一个通过，填 `MISSING` 则把「没人问」误记成「没做完」。
+另外，`REQ_ITEM:` 行被列表符号/缩进包住时会明确报「不在行首」，而不是含糊地说没回答 ——
+否则排查方向会跑到模型身上，而真正的问题是行首那两个字符。
+
+### 触发时机：strict 分支 + 需求源真的存在（`verify.require_matrix`，默认 `auto`）
+
+第一版按 strict 分支单独判定，当场打挂 12 个既有门禁测试 —— 全是「在 master 上提交、
+verify 产物是旧格式」的 fixture，而那正是已部署仓库的样子。照那样发布，等于
+「每次 master 提交都失败，直到你手写一个新产物」，可预见的反应是设 `mode:off`。
+
+`auto` 把要求绑定到它自己的输入是否存在：写了 `## 验收标准` 章节才启用，滚动自然发生。
+`true` 强制、`false` 关闭。特性分支上矩阵若已存在仍会解析并打印结论，不阻断 —— 迭代中
+需求只完成一部分是正常状态。
+
+### Added — `templates/plan.md`
+
+带 `## 验收标准` 章节的计划模板。gemini 的审查意见成立：发明 `<!-- REQ:BEGIN -->` 这类
+标记，强制则没人写、不强制则永远降级为告警沦为摆设。改用人本来就会写的命名章节，
+模板让写它零额外成本。
+
+### 三轮异构审查（gemini-3.1-pro + gpt-5.4）
+
+方案前两轮均 FAIL，采纳 14 条，其中改变设计的 4 条：
+
+- **E3 只查「文件存在」被一击打穿**：漏做功能时把证据指向 `package.json` 即可放行。
+  → 改为必须落在本次 staged diff 内
+- **`E3+E6` 联动误伤真完成项**：「UI 按钮早就有，本次只补 api」交付后用户确实能用，
+  却因为那个 UI 文件不在 diff 里而无法合法表达。根因是**一条 REQ_ITEM 只有一个状态，
+  表达不了逐层混合**。→ 状态下沉到每条证据，`~` 前缀
+- **「任一 MISSING → FAIL」制造反向激励**：会逼开发者回去删 plan 里的后两条需求才能提交。
+  → 新增 `DEFERRED`
+- **`REQ_SOURCE` 指向无验收块的文件时降级为告警 = 绕过口** → 新增 `bad-source` 档直接 FAIL
+
+### Fixed — `doctor.sh` 每次运行都在抹掉手工配置
+
+`hetero-check.json` 的写入是固定 heredoc + `mv`，而 `implementer_family` / `pi_models` /
+`channels` 在 `doctor.sh` 里出现 **0 次** —— 每跑一次 doctor 就把这三个键静默删掉，
+`review-capability.json` 那份 `cp` 同理。
+
+最严重的不是丢配置，是 **`channels.opencode.enabled=false` 被抹掉等于把 opencode 通道
+重新打开** —— 那个设置是专门为了让 agent 不再卡在 opencode 审查上才加的。
+一个悄悄撤销安全设置的维护命令，比一个大声失败的更糟：设置在所有人的认知里还在，实际已经没了。
+
+改为 `lib/hetero/persist.sh` 的 `hetero_merge_check_json`：doctor 只更新自己拥有的键，
+其余原样保留；嵌套对象按键合并（写 `review_models.primary` 不会带走 `panel_pool`）；
+目标文件是坏 JSON 时**拒绝覆盖并报错**（那通常是人手工编辑写坏的，里面仍有他要的内容）。
+
+⚠️ 附带查明的一件事：doctor 的 D6 模型选择走 **opencode** 探测，实测卡 6 分钟仍未写入、
+CPU 0%。这解释了为什么 `review_models.primary` 长期停在一个已下架型号 ——
+刷新路径既依赖正在退役的 opencode，又慢到没人会跑。本次未改这条路径。
+
+### Added — `agent-gates-status` 显示门禁档位
+
+档位（strict / relaxed / merge-only / off）和 `verify.require_matrix` 现在决定了到底有没有在检查，
+而它们**在真的 commit 之前完全不可见**。`off` 最危险：门禁 exit 0、仓库看起来一切正常。
+一个在「什么都没审」时还打印 "All current." 的 status，回答的是错的问题。
+
+新增 `gate mode` 行：显示 review / verify 各自档位 + 配置来源 + 需求矩阵是否强制；
+任一侧被关闭或矩阵被显式关闭都计入 needs attention。
+配套一条测试断言 **status 与门禁对同一份配置判定一致** —— 两边分叉会让 status 变成一个自信的骗子。
+
+### Fixed — bash 3.2 与 errexit 两处自伤
+
+- `${1^^}` 在 macOS 自带 bash 3.2 是运行时 bad substitution，两个 rank 都成空串，
+  `[[ "" -ge "" ]]` 被当成 `0 -ge 0` 为真 → **保留了模型那个宽松的 PASS**，
+  正好是 E4 要防的方向。改用 `tr`，并对空 rank 偏严兜底。
+- `X=$(printf … | grep -v '^$' | head -1)`：列表为空时 grep 返回 1，`pipefail` 把管道
+  状态变成 1，赋值语句本身非零，`set -e` 静默杀掉门禁 —— 输出只有横幅、exit 1，
+  16 个无关测试报「期望 exit 0」而输出看着完全正常。
+
+第二条暴露了测试口径问题：**lib 测试跑在 `set -uo pipefail` 下，而调用它的门禁开着 `-e`**，
+这一类错误测试根本抓不到。已补一整节在 `set -euo pipefail` 下复跑每个公开函数、
+断言输出未被截断（注入变异验证过不是空过）。
+
 ## v2.8.0 — merge-only 级别 + review/verify 各自分级
 
 ### Added — `merge-only`：小分支上完全不审

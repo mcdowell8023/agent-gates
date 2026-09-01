@@ -117,6 +117,54 @@ agent-gates-verify-harvest <verify-run-id>
 记进产物供核对。⛔ **不要手写那个 `.md`** —— 手写 `.md` 就是手写 verdict。
 evidence 没有结论行时它会拒绝并让你去 prompt 里加要求，那是对的，别绕过。
 
+#### ⭐ v2.9.0：验收 = 查需求遗漏，要逐条作答
+
+CHECK 6 的目标不是再审一遍代码，是回答「**需求有没有被漏做**」。两种真实形态：
+后端接口写了而前端一行没写（用户根本用不了）；需求 5 条只做了 4 条。
+
+**这两类在 diff 里不留痕迹** —— CHECK 5 读 diff，看到的每一行都是对的；实现者自己写的
+测试同样失明，它没做的部分自然没写测试。**测试全绿和需求少一半可以同时成立。**
+所以清单必须来自需求，不能来自代码。
+
+派发验收时先取出逐条提问，别让模型自己决定要答几条：
+
+```bash
+agent-gates-verify-harvest --emit-prompt --req-source .agent/plans/<需求>.md
+# → 把输出塞进验收 prompt，它含编号需求 + REQ_ITEM 回答格式 + 状态表
+agent-gates-verify-harvest <verify-run-id> --req-source .agent/plans/<需求>.md
+# → 校验模型答满每一条；漏答直接拒绝（exit 3），不代填
+```
+
+需求源要有 `## 验收标准` 章节（其下每个一级列表项算一条），或 `features/**/*.feature`
+的 `Scenario:`。`templates/plan.md` 是带该章节的模板。
+⛔ 门禁刻意**不去数** `## 实现步骤` 下的 checkbox —— 那些是任务不是需求。
+
+矩阵行格式（行首不能有列表符号或缩进，门禁严格按行首解析）：
+
+```
+REQ_ITEM: 1 | COVERED | api:src/export.ts:18, ui:~src/List.vue:88 | 按钮既有，本次补接口
+```
+
+| 状态 | 何时用 |
+|---|---|
+| `COVERED` | 本次改动实现了它（引用必须落在本次 staged diff 内） |
+| `PREEXISTING` | 既有代码已覆盖，本次未改动 |
+| `PARTIAL` | 只做了一部分 → 推导为 QUESTIONS |
+| `DEFERRED` | 明确不在本次范围，写去向。**增量交付用这个，别回去删需求文档** |
+| `NA` | 不适用，写理由 |
+| `MISSING` | 该做而没做 → 推导为 FAIL |
+
+证据 `<层面>:<路径>[:行号]`，层面 `ui`/`api`/`db`/`job`/`cfg`；路径带 `~` 表示既有未改
+（`ui:~src/List.vue:88`）；非代码证据用 `RUN:` / `EXT:` / `NO_UI:<理由>`。
+
+**触发时机**：`verify.require_matrix` 默认 `auto` —— strict 分支上、且仓库里真有带验收
+章节的需求文档时才强制。特性分支上矩阵若已存在仍会解析并打印，但不阻断（迭代中需求
+只完成一部分是正常的）。`true` 强制、`false` 关闭。
+
+⚠️ 目标是「**无法静默绕过**」，不是「无法绕过」。`NA`/`DEFERRED`/`PREEXISTING` 都能用来
+掩盖漏做，门禁只对它们计数打印。**门禁管形式，异构验收模型管实质** ——
+「这条证据是否真完成了这条需求」是语义判断，脚本做不到，别指望它。
+
 **② 审查在别处完成（外部模型、人工）⇒ 用 `agent-gates-verify-import`**
 
 ⚠️ 下面两阶段讲的是 **review 侧（CHECK 5）**，产出 `REVIEW_*` 锚点。
@@ -144,7 +192,7 @@ agent-gates-review --import-result /tmp/review.md --token <token> \
 
 # 阶段 2 · 形式 B：任意通道都行（opencode CLI / codex / 别的 agent / 人工看的）
 agent-gates-review --import-result /tmp/review.md --token <token> \
-  --imported-model "opencode/github-copilot/gpt-5.5" --result .agent/reviews/<name>.md
+  --imported-model "opencode/github-copilot/gpt-5.6-sol" --result .agent/reviews/<name>.md
 ```
 
 **不规定通道，只规定证据。** 两种形式必须给一个，差别只在对来源是否诚实：A 记录已核实的 agent；B 记 `REVIEW_TOOL: external` 并把模型标 `unverified`。锚点保证两者相同。
@@ -169,7 +217,18 @@ Cross-check MUST use a different model/vendor. Priority order:
 
 | Priority | Tool | When to use |
 | --- | --- | --- |
-| 1. ⭐ **pi + heterogeneous model** (首选) | `pi -p --provider <provider> --model <model> "<prompt>"` （⚠️ `--provider` 与 `--model` 是**两个独立参数**，不能写成 `provider/model` 一串；prompt 是位置参数放最后） | **Default for all cross-checks** |
+| 1. ⭐ **pi + heterogeneous model** (首选) | `pi -p --tools read,grep,find,ls --provider <provider> --model <model> "<prompt>"` （⚠️ `--provider` 与 `--model` 是**两个独立参数**，不能写成 `provider/model` 一串；prompt 是位置参数放最后） | **Default for all cross-checks** |
+
+> 🔴 **`--tools read,grep,find,ls` 不是可选的。** pi 默认带 `edit` / `write` / `bash`，
+> 审查者会直接动手改。2026-09-01 实测：一次代码审查里 gemini-3.1-pro 改了被审的源文件、
+> 建了 `fix-harvest-reconcile` 分支、commit 两次 amend、**push 到了 GitHub**，
+> 还顺手把工作树从我的业务分支切走了。
+>
+> 它那处改动**看起来完全合理**（在 harvest 里按矩阵推导更严的 verdict），实际违反了
+> harvest「只做机械改写、不做判断」的契约，而且抹掉了门禁 E4 本会打印的差异 ——
+> 一个似是而非的改动被静默应用，比一个明显的错误更难发现。
+>
+> 审查者只读是硬规则：它的产出是判断，不是补丁。
 | 2. **codex CLI + GPT-5 series** (备选) | Two sub-commands (see below) | pi 不可用，或 prompt 过长 |
 | 3. 🔻 **opencode CLI**（降级，需显式启用） | `opencode run --pure -m <provider/model> --dir <workdir> --format json "<prompt>"` | ⛔ **默认不要用**——见下方红字。仅在 pi 与 codex 都不可用时 |
 | 4. **code-reviewer / critic agent** (兜底) | Same Claude model, different agent role | **Only when 1–3 are genuinely unavailable** (true L0 machine). NOT a shortcut when a heterogeneous tool is installed — see §8 "L0 Fallback is a VIOLATION When L1+ is Available". |
@@ -195,6 +254,17 @@ agent-gates v2.4.0 起该通道默认关闭，v2.4.1 起 `oc-review` 在禁用�
 
 ### pi 的模型怎么选
 
+> ⚠️ **2026-09-01 实测：`github-copilot/gpt-5.5` 返回 400 `resource not found`（连测 5 次）**，
+> `gpt-5.2` 报 `model_not_supported`（已下架）。可用：`gpt-5.6-sol` / `luna` / `terra`、
+> `gpt-5.4`、`gpt-5.3-codex`。**目录里列着 ≠ 账号可用** —— `~/.pi/agent/models-store.json`
+> 里明明有 gpt-5.5。填具体型号前先探活，且**连测 ≥3 次**：我曾把一次 transient 的
+> `gpt-5.6-sol` 失败当成「不可用」报了出去。
+>
+> ⚠️ `pi` 撞到这个 400 时**退出码是 0**，输出里只有那行错误。派后台审查只看退出码，
+> 会把「模型不可用」当成「审查通过」—— 收割前必须确认输出里有 VERDICT 行。
+>
+> 策略那行不用改：`gpt-5.6` 就在「gpt-5.5 及以上」里。
+
 ⛔ 硬约束仍是**评审族 ≠ 实施族**，不是「必须用某个模型」。优先 gpt-5.5 及以上；没有就用
 任何满足异构的模型；`deepseek-v4-flash` 性价比很高、推荐使用，**前提是先过异构校验**。
 `~/.agent-gates/hetero-check.json` 里可配 `pi_models.primary` 与 `implementer_family`，
@@ -204,7 +274,7 @@ agent-gates v2.4.0 起该通道默认关闭，v2.4.1 起 `oc-review` 在禁用�
 
 | Scenario | Recommended model |
 | --- | --- |
-| Development review (find bugs/gaps) | `github-copilot/gpt-5.5` |
+| Development review (find bugs/gaps) | `github-copilot/gpt-5.6-sol` |
 | Diagnosis / root-cause verification | `openai/gpt-5.5-pro` (strong reasoning) |
 | Large document review | `github-copilot/gemini-3.1-pro-preview` (long context + different perspective) |
 | Small patch / short code | code-reviewer agent (fast, acceptable for trivial) |
@@ -237,7 +307,7 @@ for line in sys.stdin:
 Short prompt (inline, recommended — keep ≤200 chars):
 
 ```bash
-opencode run --pure -m github-copilot/gpt-5.5 --dir <workdir> --format json "<short prompt>" 2>&1 | eval "$OC_PARSE"
+opencode run --pure -m github-copilot/gpt-5.6-sol --dir <workdir> --format json "<short prompt>" 2>&1 | eval "$OC_PARSE"
 ```
 
 - Prompt file: `~/AgentWorkspace/tmp/<task>-prompt.md`
@@ -471,7 +541,7 @@ Return: PASS or ISSUES with file:line references. Max 500 words.
 EOF
 
 # 2. Run with heterogeneous model
-opencode run --pure -m github-copilot/gpt-5.5 --dir <workdir> --format json "$(cat ~/AgentWorkspace/tmp/crosscheck-prompt.md)" 2>&1 | eval "$OC_PARSE" > ~/AgentWorkspace/tmp/crosscheck-result.md &
+opencode run --pure -m github-copilot/gpt-5.6-sol --dir <workdir> --format json "$(cat ~/AgentWorkspace/tmp/crosscheck-prompt.md)" 2>&1 | eval "$OC_PARSE" > ~/AgentWorkspace/tmp/crosscheck-result.md &
 ```
 
 ### Three-Agent Pipeline Roles via oracle (same-model, for structured review)

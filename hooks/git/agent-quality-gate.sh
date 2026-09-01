@@ -690,6 +690,231 @@ except Exception:
             echo "⚠️  CHECK 6: high-risk path + EVIDENCE_ONLY capability — downgraded to INCOMPLETE (needs USER_ACK)"
           fi
 
+          # === Requirement matrix — the omission detector (v2.9.0) ===
+          #
+          # WHY: a feature that was never built leaves no trace in the diff. CHECK 5 reads
+          # the diff, sees only correct code, and passes. The implementer's own tests are
+          # just as blind — it did not build the thing, so it did not write the test.
+          # "All green" and "half the requirement missing" coexist happily. Every checklist
+          # derived from CODE is structurally blind to omission; only one derived from the
+          # REQUIREMENT can catch it.
+          #
+          # WHEN it is enforced (verify.require_matrix, default "auto"):
+          #   auto   on a strict branch, AND a requirement source with an acceptance section
+          #          actually exists (or the matrix is already there). Otherwise: a loud
+          #          notice, no block.
+          #   true   always enforce
+          #   false  never enforce
+          #
+          # `auto` exists because the first cut keyed enforcement off the strict branch alone
+          # and broke 12 pre-existing gate tests on the spot — every fixture that commits on
+          # master with an old-style verify doc. Those fixtures mirror real deployed repos,
+          # so shipping it would have meant "every master commit fails until you hand-write a
+          # new artifact", and the predictable response to that is mode:off. Tying the demand
+          # to the presence of its own input makes the rollout self-paced: writing a
+          # "## 验收标准" section is what opts a repo in.
+          #
+          # On a feature branch a present matrix is still parsed and its findings printed:
+          # free signal, no blocking, because a partial requirement is normal there.
+          _V6_RM_LIB="$_GATE_DIR/../../lib/verify/reqmatrix.sh"
+          _V6_HAS_MATRIX=0
+          grep -qE '^REQ_ITEM:' "$VERIFY_FILE" 2>/dev/null && _V6_HAS_MATRIX=1
+
+          if [[ -f "$_V6_RM_LIB" ]]; then
+            # shellcheck disable=SC1090
+            source "$_V6_RM_LIB"
+
+            # Requirement sources = docs that actually yield acceptance items. A plan full of
+            # implementation-step checkboxes does not count; refusing to number those was the
+            # whole point (they are tasks, not requirements, and counting them fails for noise).
+            #
+            # One grep narrows the candidates before any python starts. This runs on EVERY
+            # commit, and a repo with 50 plans would otherwise pay 50 interpreter startups —
+            # about a second and a half added to every `git commit`, which is how a hook earns
+            # a --no-verify habit.
+            _v6_req_sources() {
+              local f
+              while IFS= read -r f; do
+                [[ -n "$f" && -f "$f" ]] || continue
+                case "$f" in *.skip.md) continue ;; esac
+                reqmatrix_extract_items "$f" >/dev/null 2>&1 && echo "$f"
+              done < <(
+                grep -lE '^#{2,6}[[:space:]]*(验收标准|验收清单|验收条件|Acceptance([[:space:]]+Criteria)?|验收)[[:space:]]*$' \
+                  .agent/plans/*.md 2>/dev/null || true
+                find features -type f -name '*.feature' 2>/dev/null || true
+              )
+              return 0
+            }
+            # Discovery is lazy: with a matrix already present and an explicit REQ_SOURCE,
+            # nothing here is needed.
+            #
+            # ⚠️ Every assignment needs `|| true`. The gate runs under `set -euo pipefail`, and
+            # `X=$(cmd)` exits the script when cmd fails — with pipefail an empty list makes
+            # `grep -v` return 1 and takes the pipeline with it. That killed the gate silently
+            # right after its banner: no message, exit 1, and 16 unrelated tests failed with
+            # "expected exit 0" while the output looked perfectly clean.
+            _V6_SRC_LIST=""; _V6_DISCOVERED_SRC=""; _V6_SRC_COUNT=0; _V6_DISCOVERED=0
+            _v6_discover_sources() {
+              [[ "$_V6_DISCOVERED" -eq 1 ]] && return 0
+              _V6_DISCOVERED=1
+              _V6_SRC_LIST=$(_v6_req_sources || true)
+              _V6_DISCOVERED_SRC=$(printf '%s\n' "$_V6_SRC_LIST" | grep -v '^$' | head -1 || true)
+              _V6_SRC_COUNT=$(printf '%s\n' "$_V6_SRC_LIST" | grep -c '[^[:space:]]' || true)
+              [[ "$_V6_SRC_COUNT" =~ ^[0-9]+$ ]] || _V6_SRC_COUNT=0
+              return 0
+            }
+
+            _V6_RM_CFG=""
+            for _v6_f in ".agent/gates.json" "${AGENT_GATES_DIR:-$HOME/.agent-gates}/gates.json"; do
+              _v6_raw=$(_gate_cfg_get "$_v6_f" "verify.require_matrix" 2>/dev/null || true)
+              if [[ -n "$_v6_raw" ]]; then _V6_RM_CFG="$_v6_raw"; break; fi
+            done
+            _V6_MATRIX_REQUIRED=0
+            case "$(printf '%s' "$_V6_RM_CFG" | tr '[:upper:]' '[:lower:]')" in
+              true|1|yes) _V6_MATRIX_REQUIRED=1 ;;
+              false|0|no) _V6_MATRIX_REQUIRED=0 ;;
+              *)  # auto
+                if [[ "$_GATE_ON_STRICT_BRANCH" -eq 1 ]]; then
+                  [[ "$_V6_HAS_MATRIX" -eq 1 ]] || _v6_discover_sources
+                  if [[ "$_V6_HAS_MATRIX" -eq 1 || -n "$_V6_DISCOVERED_SRC" ]]; then
+                    _V6_MATRIX_REQUIRED=1
+                  else
+                    echo "ℹ️  CHECK 6: 未启用需求遗漏检查 —— 找不到带 '## 验收标准' 章节的需求文档"
+                    echo "      漏做的功能在 diff 里不留痕迹，代码审查和实现者自己写的测试都抓不到。"
+                    echo "      要启用：在 .agent/plans/<需求>.md 加 '## 验收标准' 章节逐条列出需求，"
+                    echo "      或设 verify.require_matrix=true 强制要求。"
+                  fi
+                fi
+                ;;
+            esac
+            [[ "$GATE_VERIFY_MODE" == "off" ]] && _V6_MATRIX_REQUIRED=0
+
+            if [[ "$_V6_MATRIX_REQUIRED" -eq 1 || "$_V6_HAS_MATRIX" -eq 1 ]]; then
+              # Findings block only where the matrix is required. Elsewhere they are printed
+              # and the commit proceeds — an unfinished requirement on a feature branch is
+              # the normal state, and failing there is how a gate gets bypassed.
+              _rm_problem() {
+                if [[ "$_V6_MATRIX_REQUIRED" -eq 1 ]]; then
+                  fail "$1"
+                else
+                  echo "ℹ️  CHECK 6 需求矩阵（不阻断，当前分支非 strict）: $1"
+                fi
+                [[ -n "${2:-}" ]] && printf '%s\n' "$2" | sed 's/^/   /'
+              }
+
+              if [[ "$_V6_HAS_MATRIX" -eq 0 ]]; then
+                _v6_discover_sources
+                _rm_problem "验收产物没有需求矩阵 — 无法判断需求是否有遗漏" \
+"需求源: ${_V6_DISCOVERED_SRC:-<未找到>}
+每条需求一行，格式：
+  REQ_SOURCE: ${_V6_DISCOVERED_SRC:-.agent/plans/<需求文档>.md}
+  REQ_ITEM: 1 | COVERED | ui:src/X.vue:88, api:src/y.ts:12 | 说明
+状态: COVERED / PREEXISTING / PARTIAL / DEFERRED / NA / MISSING
+证据路径不带 ~ 表示本次改动、带 ~ 表示既有未改（如 ui:~src/X.vue:88）
+⛔ 不要手写 —— 用 ~/.agent-gates/bin/agent-gates-verify-harvest 生成骨架"
+              else
+                _V6_RM_SRC=$(sed -n 's/^REQ_SOURCE:[[:space:]]*//p' "$VERIFY_FILE" 2>/dev/null | head -1 | tr -d '\r' || true)
+                # No explicit REQ_SOURCE: fall back to the discovered one, but only when it
+                # is unambiguous. Guessing among several plans would produce a count mismatch
+                # against a document nobody was verifying against — a false failure naming a
+                # file the agent never saw, which reads as "my artifact was ignored".
+                if [[ -z "$_V6_RM_SRC" ]]; then
+                  _v6_discover_sources
+                fi
+                if [[ -z "$_V6_RM_SRC" && -n "$_V6_DISCOVERED_SRC" ]]; then
+                  if [[ "${_V6_SRC_COUNT:-0}" -eq 1 ]]; then
+                    _V6_RM_SRC="$_V6_DISCOVERED_SRC"
+                    echo "   需求源未显式声明，采用唯一候选: $_V6_RM_SRC"
+                  fi
+                fi
+
+                if ! _v6_out=$(reqmatrix_parse "$VERIFY_FILE" 2>&1 >/dev/null); then
+                  _rm_problem "需求矩阵格式错误" "$_v6_out"
+                else
+                  # E1 — the count comes from the requirement source. This is the one
+                  # mechanism the model has no say in: it fills a disposition per item but
+                  # cannot decide how many items exist.
+                  if [[ -n "$_V6_RM_SRC" && -f "$_V6_RM_SRC" ]]; then
+                    if ! _v6_out=$(reqmatrix_check_count "$VERIFY_FILE" "$_V6_RM_SRC" 2>&1 >/dev/null); then
+                      _rm_problem "需求条目数与需求源不符 — 有条目被静默丢掉" "$_v6_out"
+                    fi
+                  else
+                    # bad-source tier: an explicitly named source that cannot be read must be
+                    # an error, not a downgrade to "warn". A downgrade here is a bypass:
+                    # point REQ_SOURCE at anything unparseable and the count check vanishes.
+                    if [[ -n "$_V6_RM_SRC" ]]; then
+                      _rm_problem "REQ_SOURCE 指向的文件读不到: $_V6_RM_SRC"
+                    else
+                      _rm_problem "矩阵没有 REQ_SOURCE — 条目数无从核对" \
+"补一行 REQ_SOURCE: <需求文档路径>，文档里要有 '## 验收标准' 章节或 Gherkin Scenario"
+                    fi
+                  fi
+
+                  # E2 — recompute the item-block hash. The field was being WRITTEN by
+                  # harvest and read by nobody, which made it decoration: an independent
+                  # review swapped in `REQ_BLOCK_SHA256: deadbeef` and the gate still
+                  # passed. Worse, the staged-diff anchor deliberately excludes
+                  # .agent/verify, so editing the requirement doc after verification does
+                  # not break that anchor either — this is the only line of defence, and it
+                  # was not connected. (Same shape as the `signed_by` field this project
+                  # already got caught on once.)
+                  #
+                  # The count check does not cover it: REWORDING an item keeps the count
+                  # identical while changing what was agreed.
+                  if [[ -n "$_V6_RM_SRC" && -f "$_V6_RM_SRC" ]]; then
+                    _v6_declared_hash=$(sed -n 's/^REQ_BLOCK_SHA256:[[:space:]]*//p' "$VERIFY_FILE" 2>/dev/null | head -1 | tr -d '\r' || true)
+                    if [[ -n "$_v6_declared_hash" ]]; then
+                      _v6_actual_hash=$(reqmatrix_block_hash "$_V6_RM_SRC" 2>/dev/null || true)
+                      if [[ -n "$_v6_actual_hash" && "$_v6_declared_hash" != "$_v6_actual_hash" ]]; then
+                        _rm_problem "需求条目在验收之后被改过 —— REQ_BLOCK_SHA256 对不上" \
+"验收时记录: $_v6_declared_hash
+现在算出的:   $_v6_actual_hash
+需求源:       $_V6_RM_SRC
+条数不变、只改写条目文字也会触发这条 —— 改的是「当初同意的是什么」。
+要么把需求改回去，要么按新需求重新验收。"
+                      fi
+                    fi
+                  fi
+
+                  # E3 — citations must land inside this change.
+                  if ! _v6_out=$(reqmatrix_check_citations "$VERIFY_FILE" 2>&1 >/dev/null); then
+                    _rm_problem "需求矩阵的证据引用不成立" "$_v6_out"
+                  fi
+
+                  # Escape hatches are counted and printed rather than blocked. No mechanism
+                  # can stop NA/DEFERRED/PREEXISTING abuse without producing false failures,
+                  # and the goal was never "impossible to bypass" — it is "impossible to
+                  # bypass silently".
+                  if _v6_rep=$(reqmatrix_surface_report "$VERIFY_FILE" 2>/dev/null); then
+                    echo "   需求矩阵: $(printf '%s' "$_v6_rep" | grep -E '^(COVERED|PREEXISTING|PARTIAL|DEFERRED|NA|MISSING|TOTAL)=' | tr '\n' ' ')"
+                    if grep -q '^NO_UI_EVIDENCE$' <<<"$_v6_rep"; then
+                      echo "   ⚠️  整个矩阵没有一条 ui: 证据 — 用户入口可能根本没写（纵向漏层）"
+                      echo "      纯后端/基建需求请显式写 NO_UI:<理由>"
+                    fi
+                    grep -q '^ALL_PREEXISTING$' <<<"$_v6_rep" && \
+                      echo "   ⚠️  全部条目标为 PREEXISTING — 本次改动等于没有交付任何需求"
+                    _v6_nt=$(grep -o '^NOTHING_TOUCHED=.*' <<<"$_v6_rep" || true)
+                    [[ -n "$_v6_nt" ]] && \
+                      echo "   ⚠️  条目 ${_v6_nt#NOTHING_TOUCHED=} 标为 COVERED 但证据全是既有(~) — 本次并未改动任何东西"
+                  fi
+
+                  # E4 — the verdict is derived, not accepted. Only ever tighten: the
+                  # capability rule above may already have downgraded PASS to INCOMPLETE,
+                  # and a mechanical step must never hand that back.
+                  if [[ "$_V6_MATRIX_REQUIRED" -eq 1 ]]; then
+                    _v6_derived=$(reqmatrix_reconcile_verdict "$VERIFY_FILE" 2>/dev/null || true)
+                    if [[ -n "$_v6_derived" && "$_v6_derived" != "$VERIFY_VERDICT" ]]; then
+                      if [[ "$(_reqmatrix_rank "$_v6_derived")" -gt "$(_reqmatrix_rank "$VERIFY_VERDICT")" ]]; then
+                        echo "⚠️  CHECK 6: 申报 $VERIFY_VERDICT，按矩阵推导为 $_v6_derived — 采用推导结果"
+                        VERIFY_VERDICT="$_v6_derived"
+                      fi
+                    fi
+                  fi
+                fi
+              fi
+            fi
+          fi
+
           case "$VERIFY_VERDICT" in
             PASS)
               # Freshness. Two different signals, and the strong one must win:

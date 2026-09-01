@@ -68,6 +68,74 @@ else
   row "skills" "${Y}${MISSING}${N}— re-run install.sh"
 fi
 
+# --- gate mode ---------------------------------------------------------------
+# Modes decide whether anything is actually checked, and every one of them is invisible
+# until a commit happens. `off` is the dangerous one: the gate exits 0 and everything looks
+# healthy. A status command that prints "All current." while nothing is being reviewed is
+# answering the wrong question — so a disabled gate counts as needing attention.
+_st_cfg_get() {  # _st_cfg_get <file> <dotted.path>
+  [[ -f "$1" ]] || return 1
+  python3 -c '
+import json,sys
+try: cur = json.load(open(sys.argv[1]))
+except Exception: sys.exit(0)
+for k in sys.argv[2].split("."):
+    if not isinstance(cur, dict): sys.exit(0)
+    cur = cur.get(k)
+    if cur is None: sys.exit(0)
+print(json.dumps(cur) if isinstance(cur,(dict,list,bool)) else cur)' "$1" "$2" 2>/dev/null
+}
+# Precedence must match the gate: env > project > user > default. If these two ever
+# disagree, status becomes a confident liar — tests/run_status_modes.sh asserts they agree.
+_st_resolve() {  # _st_resolve <specific.path> <fallback.path> ; echoes "<value>|<source>"
+  local v
+  for f in "$_ST_PROJ_CFG:project" "$INSTALL_DIR/gates.json:user"; do
+    local path="${f%%:*}" label="${f##*:}"
+    for key in "$1" "$2"; do
+      [[ -z "$key" ]] && continue
+      v=$(_st_cfg_get "$path" "$key" 2>/dev/null || true)
+      [[ -n "$v" ]] && { echo "${v}|${label}"; return 0; }
+    done
+  done
+  echo "strict|default"
+}
+_ST_PROJ_CFG=""
+if git rev-parse --show-toplevel >/dev/null 2>&1; then
+  _ST_PROJ_CFG="$(git rev-parse --show-toplevel 2>/dev/null)/.agent/gates.json"
+fi
+if [[ -n "${AGENT_GATES_MODE:-}" ]]; then
+  _ST_R="${AGENT_GATES_MODE}|env"; _ST_V="${AGENT_GATES_MODE}|env"
+else
+  _ST_R=$(_st_resolve "review.mode" "mode")
+  _ST_V=$(_st_resolve "verify.mode" "mode")
+fi
+_ST_RM="${_ST_R%%|*}"; _ST_RS="${_ST_R##*|}"
+_ST_VM="${_ST_V%%|*}"; _ST_VS="${_ST_V##*|}"
+
+_ST_MATRIX="auto"
+for f in "$_ST_PROJ_CFG" "$INSTALL_DIR/gates.json"; do
+  v=$(_st_cfg_get "$f" "verify.require_matrix" 2>/dev/null || true)
+  [[ -n "$v" ]] && { _ST_MATRIX="$v"; break; }
+done
+case "$_ST_MATRIX" in
+  true|1|yes)  _ST_MATRIX_TXT="需求矩阵: 强制" ;;
+  false|0|no)  _ST_MATRIX_TXT="${Y}需求矩阵: 已关闭${N}" ;;
+  *)           _ST_MATRIX_TXT="需求矩阵: auto（有验收章节才强制）" ;;
+esac
+
+if [[ "$_ST_RM" == "off" && "$_ST_VM" == "off" ]]; then
+  row "gate mode" "${R}OFF — 完全不检查${N} (来源 ${_ST_RS})  ·  $_ST_MATRIX_TXT"
+  ATTENTION=1
+elif [[ "$_ST_RM" == "off" || "$_ST_VM" == "off" ]]; then
+  row "gate mode" "${R}review=$_ST_RM verify=$_ST_VM${N} — 有一侧被关闭 (来源 ${_ST_RS}/${_ST_VS})  ·  $_ST_MATRIX_TXT"
+  ATTENTION=1
+elif [[ "$_ST_RM" == "strict" && "$_ST_VM" == "strict" ]]; then
+  row "gate mode" "${G}strict${N} (来源 ${_ST_RS})  ·  $_ST_MATRIX_TXT"
+else
+  row "gate mode" "${Y}review=$_ST_RM verify=$_ST_VM${N} (来源 ${_ST_RS}/${_ST_VS})  ·  $_ST_MATRIX_TXT"
+fi
+[[ "$_ST_MATRIX" == "false" || "$_ST_MATRIX" == "0" || "$_ST_MATRIX" == "no" ]] && ATTENTION=1
+
 # --- opencode serves --------------------------------------------------------
 # A serve with no `opencode run` client is a leak. Paseo-managed ones hold a permanent
 # connection to the daemon, so "something is connected" is not evidence of use.
