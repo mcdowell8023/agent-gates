@@ -132,6 +132,10 @@ echo "R7: ⭐ 申报 PASS 但有 MISSING → 采用推导的 FAIL"
 REQ_ITEM: 2 | MISSING | - | 没做但我申报 PASS'
   out=$(run_gate); rc=$?
   assert "拦住 (rc=$rc)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+  # ⭐ 只断言 rc≠0 是空过：门禁在这条消息里因 `$VAR，` 未加花括号而 unbound variable
+  # 退出 127，同样满足 rc≠0。必须断言这条消息真的打印出来了。
+  assert "⭐ 打印出申报与推导的差异" "$([[ "$out" == *"按矩阵推导为"* ]] && echo true || echo false)"
+  assert "⛔ 没有 unbound variable 崩溃" "$([[ "$out" != *"unbound variable"* ]] && echo true || echo false)"
   teardown )
 
 echo "R8: 零 ui: 证据 → 打印告警（纵向漏层的信号）"

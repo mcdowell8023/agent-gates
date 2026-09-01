@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# Tests for agent-gates-hooks-sync — making the merge hook reach deployed projects.
+#
+# WHY (cross-review, 2026-09-01): the pre-merge-commit fix landed only in agent-gates' own
+# repo. Every project deployed before it still has pre-commit alone, so a clean merge into
+# their test/master branch runs no gate at all. "Fixed in the tool's own repo" is not fixed:
+# the hole stays open everywhere the tool is actually used.
+#
+# It also answers a standing question — "is the gate really in effect here?" — because a
+# hooksPath pointing at a missing hook file is silently skipped by git while `git config`
+# looks perfectly correct. Two wb repos were in exactly that state.
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SYNC="$SCRIPT_DIR/../bin/agent-gates-hooks-sync"
+SHIM="$SCRIPT_DIR/../hooks/git/gate-shim.sh"
+RESULTS_FILE=$(mktemp); echo "0 0" > "$RESULTS_FILE"
+
+assert() {
+  local name="$1" cond="$2" p f
+  read -r p f < "$RESULTS_FILE"
+  if [[ "$cond" == "true" ]]; then echo "  ✓ $name"; echo "$((p+1)) $f" > "$RESULTS_FILE"
+  else echo "  ✗ $name"; echo "$p $((f+1))" > "$RESULTS_FILE"; fi
+}
+
+setup() {
+  ROOT=$(mktemp -d); export AGENT_GATES_SHIM_SRC="$SHIM"
+}
+teardown() { cd /; rm -rf "${ROOT:-}"; unset AGENT_GATES_SHIM_SRC; }
+# mk_repo <name> <layout>
+#   githooks      : .githooks/pre-commit = shim, hooksPath=.githooks
+#   external      : hooksPath -> <root>/ext/<name>, pre-commit there
+#   missing       : hooksPath=.githooks but no hook file at all
+#   foreign       : .githooks/pre-commit exists but is NOT an agent-gates shim
+#   nogate        : plain repo, no hooksPath
+mk_repo() {
+  # 分两句：bash 会在执行 local 之前把整行的词全部展开，所以 `local n="$1" d="$ROOT/$n"`
+  # 里的 $n 是在赋值之前被引用的，set -u 下直接 unbound。
+  local n="$1" kind="$2"
+  local d="$ROOT/$n"
+  mkdir -p "$d" && git -C "$d" init -q && git -C "$d" config user.email t@t && git -C "$d" config user.name t
+  case "$kind" in
+    githooks) mkdir -p "$d/.githooks"; cp "$SHIM" "$d/.githooks/pre-commit"; chmod +x "$d/.githooks/pre-commit"
+              git -C "$d" config core.hooksPath .githooks ;;
+    external) mkdir -p "$ROOT/ext/$n"; cp "$SHIM" "$ROOT/ext/$n/pre-commit"; chmod +x "$ROOT/ext/$n/pre-commit"
+              git -C "$d" config core.hooksPath "$ROOT/ext/$n" ;;
+    missing)  git -C "$d" config core.hooksPath .githooks ;;
+    foreign)  mkdir -p "$d/.githooks"; printf '#!/bin/sh\nexit 0\n' > "$d/.githooks/pre-commit"
+              chmod +x "$d/.githooks/pre-commit"; git -C "$d" config core.hooksPath .githooks ;;
+    nogate)   : ;;
+  esac
+}
+
+[[ -x "$SYNC" ]] || { echo "  ✗ bin/agent-gates-hooks-sync 不存在（未实现）"; echo "=== PASS=0 FAIL=1 ==="; exit 1; }
+
+echo "=== agent-gates-hooks-sync tests ==="
+echo
+
+echo "S1: ⭐ 默认 dry-run —— 不许动任何文件"
+( setup; mk_repo a githooks
+  out=$(bash "$SYNC" "$ROOT" 2>&1)
+  assert "报出要补的项" "$([[ "$out" == *"pre-merge-commit"* ]] && echo true || echo false)"
+  assert "⛔ 未真的创建文件" "$([[ ! -f "$ROOT/a/.githooks/pre-merge-commit" ]] && echo true || echo false)"
+  assert "提示需要 --apply" "$([[ "$out" == *"--apply"* ]] && echo true || echo false)"
+  teardown )
+
+echo "S2: --apply 后 .githooks 布局补上 pre-merge-commit"
+( setup; mk_repo a githooks
+  bash "$SYNC" --apply "$ROOT" >/dev/null 2>&1
+  assert "文件已创建" "$([[ -f "$ROOT/a/.githooks/pre-merge-commit" ]] && echo true || echo false)"
+  assert "可执行" "$([[ -x "$ROOT/a/.githooks/pre-merge-commit" ]] && echo true || echo false)"
+  assert "内容是 shim（委托全局权威）" "$(grep -q 'agent-quality-gate.sh' "$ROOT/a/.githooks/pre-merge-commit" && echo true || echo false)"
+  teardown )
+
+echo "S3: ⭐ hooksPath 指向仓库外（husky 绕法）也要补"
+( setup; mk_repo b external
+  bash "$SYNC" --apply "$ROOT" >/dev/null 2>&1
+  assert "外置目录里补上了" "$([[ -f "$ROOT/ext/b/pre-merge-commit" ]] && echo true || echo false)"
+  assert "⛔ 没在仓库里乱建 .githooks" "$([[ ! -d "$ROOT/b/.githooks" ]] && echo true || echo false)"
+  teardown )
+
+echo "S4: ⭐ hooksPath 设了但钩子文件不存在 → 报出来（git 会静默跳过，配置看着却是对的）"
+( setup; mk_repo c missing
+  out=$(bash "$SYNC" "$ROOT" 2>&1)
+  assert "点明门禁其实没在跑" "$([[ "$out" == *"未生效"* || "$out" == *"not in effect"* ]] && echo true || echo false)"
+  teardown )
+
+echo "S5: ⛔ 不是 agent-gates 的钩子 → 一律不碰"
+( setup; mk_repo d foreign
+  before=$(shasum -a 256 < "$ROOT/d/.githooks/pre-commit")
+  out=$(bash "$SYNC" --apply "$ROOT" 2>&1)
+  after=$(shasum -a 256 < "$ROOT/d/.githooks/pre-commit")
+  assert "原钩子未被改写" "$([[ "$before" == "$after" ]] && echo true || echo false)"
+  assert "⛔ 未擅自补 pre-merge-commit" "$([[ ! -f "$ROOT/d/.githooks/pre-merge-commit" ]] && echo true || echo false)"
+  assert "输出说明跳过原因" "$([[ "$out" == *"$ROOT/d"* || "$out" == *"skip"* || "$out" == *"跳过"* ]] && echo true || echo false)"
+  teardown )
+
+echo "S6: 没装门禁的仓库 → 不动、不报"
+( setup; mk_repo e nogate
+  bash "$SYNC" --apply "$ROOT" >/dev/null 2>&1
+  assert "未创建任何钩子" "$([[ ! -d "$ROOT/e/.githooks" ]] && echo true || echo false)"
+  teardown )
+
+echo "S7: 幂等 —— 已有 pre-merge-commit 时重复运行不报为待补"
+( setup; mk_repo a githooks
+  bash "$SYNC" --apply "$ROOT" >/dev/null 2>&1
+  out=$(bash "$SYNC" "$ROOT" 2>&1)
+  # 只看逐仓那行。汇总行本身含「待补 0」，宽匹配会把它算成命中。
+  assert "第二次不再列为待补" "$([[ "$out" != *"[dry-run] 待补"* ]] && echo true || echo false)"
+  assert "汇总显示已齐" "$([[ "$out" == *"已齐 1"* ]] && echo true || echo false)"
+  teardown )
+
+echo "S8: 多仓库混合布局，一次跑完并给汇总"
+( setup; mk_repo a githooks; mk_repo b external; mk_repo c missing; mk_repo d foreign; mk_repo e nogate
+  out=$(bash "$SYNC" --apply "$ROOT" 2>&1)
+  assert "a 补上" "$([[ -f "$ROOT/a/.githooks/pre-merge-commit" ]] && echo true || echo false)"
+  assert "b 补上" "$([[ -f "$ROOT/ext/b/pre-merge-commit" ]] && echo true || echo false)"
+  assert "d 未被碰" "$([[ ! -f "$ROOT/d/.githooks/pre-merge-commit" ]] && echo true || echo false)"
+  assert "有汇总行" "$([[ "$out" == *added* || "$out" == *补上* ]] && echo true || echo false)"
+  teardown )
+
+echo
+read -r P F < "$RESULTS_FILE"
+echo "=== PASS=$P FAIL=$F ==="
+rm -f "$RESULTS_FILE"
+# 零断言不算通过：一个 fixture 早退就会让整套静默变成 PASS=0 FAIL=0，
+# 而按「FAIL=0 即绿」的判据它会被当成通过 —— 这次就是这样发生的。
+[[ "$F" -eq 0 && "$P" -gt 0 ]]

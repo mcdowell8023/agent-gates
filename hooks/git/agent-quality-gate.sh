@@ -1007,7 +1007,11 @@ except Exception:
                     _v6_derived=$(reqmatrix_reconcile_verdict "$VERIFY_FILE" 2>/dev/null || true)
                     if [[ -n "$_v6_derived" && "$_v6_derived" != "$VERIFY_VERDICT" ]]; then
                       if [[ "$(_reqmatrix_rank "$_v6_derived")" -gt "$(_reqmatrix_rank "$VERIFY_VERDICT")" ]]; then
-                        echo "⚠️  CHECK 6: 申报 $VERIFY_VERDICT，按矩阵推导为 $_v6_derived — 采用推导结果"
+                        # ${VAR} 是必须的：不加花括号时 bash 会把变量名一直吃到紧随其后的
+                        # 中文标点的第一个字节，得到一个 unbound 名字，即使变量本身已赋值也会
+                        # `unbound variable` 退出 127。这条消息因此从未成功打印过 —— 而
+                        # 测试只断言了 rc≠0，门禁死掉同样满足，于是空过掩盖了它。
+                        echo "⚠️  CHECK 6: 申报 ${VERIFY_VERDICT}，按矩阵推导为 ${_v6_derived} — 采用推导结果"
                         VERIFY_VERDICT="$_v6_derived"
                       fi
                     fi

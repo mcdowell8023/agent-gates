@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# agent-gates-hooks-sync — make sure every gated project has the hooks the gate needs.
+#
+# WHY THIS EXISTS (cross-review, 2026-09-01): git runs `pre-merge-commit` for a merge
+# commit, not `pre-commit`, and agent-gates only ever installed `pre-commit`. So a clean
+# merge into a project's test/master branch ran no gate at all — which is exactly the moment
+# `merge-only` mode defers review TO. The fix first landed only in agent-gates' own repo,
+# and "fixed in the tool's own repo" is not fixed: the hole stays open everywhere the tool
+# is actually used.
+#
+# It also answers a standing question: **is the gate really in effect here?** A
+# `core.hooksPath` pointing at a missing hook file is silently skipped by git while
+# `git config` reads perfectly correct. Two deployed repos were found in that state.
+#
+# ⛔ Never overwrites a hook it did not author. A `pre-commit` that is not a recognizable
+# agent-gates shim is left alone and reported — someone else's hook is not ours to complete.
+#
+# DEFAULT DRY-RUN. Pass --apply to write.
+#
+# Usage: agent-gates-hooks-sync [--apply] <root-dir> [<root-dir> ...]
+# Env:   AGENT_GATES_SHIM_SRC   shim source (default ~/.agent-gates/hooks/git/gate-shim.sh)
+# Source: https://github.com/mcdowell8023/agent-gates
+set -uo pipefail
+
+APPLY=0
+ROOTS=()
+for a in "$@"; do
+  case "$a" in
+    --apply) APPLY=1 ;;
+    -h|--help) sed -n '3,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) echo "agent-gates-hooks-sync: unknown option '$a'" >&2; exit 64 ;;
+    *) ROOTS+=("$a") ;;
+  esac
+done
+
+SHIM_SRC="${AGENT_GATES_SHIM_SRC:-$HOME/.agent-gates/hooks/git/gate-shim.sh}"
+SHIM_MARKER="agent-gates per-project gate shim"
+# Hooks the gate needs. pre-commit is what projects already have; pre-merge-commit is the
+# one that was missing everywhere.
+NEEDED=(pre-merge-commit)
+
+if [[ ${#ROOTS[@]} -eq 0 ]]; then
+  echo "agent-gates-hooks-sync: no root dir given." >&2
+  echo "usage: agent-gates-hooks-sync [--apply] <root-dir> [<root-dir> ...]" >&2
+  exit 64
+fi
+[[ -f "$SHIM_SRC" ]] || {
+  echo "agent-gates-hooks-sync: shim source not found at $SHIM_SRC — install/upgrade agent-gates first" >&2
+  exit 69; }
+
+added=0; ok=0; broken=0; foreign=0; scanned=0
+
+# Every git repo under the roots. -prune so a repo's own submodules/worktrees are not
+# walked twice, and node_modules is skipped — on a machine with ~165 repos the difference
+# is minutes.
+while IFS= read -r gitdir; do
+  repo=$(dirname "$gitdir")
+  hp=$(git -C "$repo" config core.hooksPath 2>/dev/null || true)
+  [[ -z "$hp" ]] && continue          # no gate configured here; not our business
+  scanned=$((scanned + 1))
+  # Resolve hooksPath: absolute stays, relative is repo-relative
+  case "$hp" in
+    /*) hookdir="$hp" ;;
+    *)  hookdir="$repo/$hp" ;;
+  esac
+  pc="$hookdir/pre-commit"
+
+  if [[ ! -f "$pc" ]]; then
+    # git silently skips a hooksPath whose hook is absent — the gate looks configured and
+    # is not running. Report; do NOT guess and create one, because we cannot tell whether
+    # this repo was meant to have a gate or had its hook deliberately removed.
+    echo "⚠️  门禁未生效: $repo (core.hooksPath=$hp 指向的 pre-commit 不存在)"
+    broken=$((broken + 1))
+    continue
+  fi
+  if ! grep -q "$SHIM_MARKER" "$pc" 2>/dev/null; then
+    if ! grep -qE 'Agent Quality Gate|GATE_VERSION|mcdowell8023/agent-gates' "$pc" 2>/dev/null; then
+      echo "跳过 (pre-commit 不是 agent-gates 的钩子，未触碰): $repo"
+      foreign=$((foreign + 1))
+      continue
+    fi
+  fi
+
+  for h in "${NEEDED[@]}"; do
+    target="$hookdir/$h"
+    if [[ -f "$target" ]]; then ok=$((ok + 1)); continue; fi
+    if [[ "$APPLY" -eq 1 ]]; then
+      if cp "$SHIM_SRC" "$target" && chmod +x "$target"; then
+        echo "补上 $h: $repo"
+        added=$((added + 1))
+      else
+        echo "FAILED $h: $repo" >&2
+      fi
+    else
+      echo "[dry-run] 待补 $h: $repo"
+      added=$((added + 1))
+    fi
+  done
+done < <(for root in "${ROOTS[@]}"; do
+           [[ -d "$root" ]] || { echo "skip (not a directory): $root" >&2; continue; }
+           find "$root" -maxdepth 4 \( -name node_modules -o -name .venv \) -prune -o \
+                -name .git -print 2>/dev/null
+         done)
+
+echo "---"
+if [[ "$APPLY" -eq 1 ]]; then
+  echo "agent-gates-hooks-sync: 扫描 ${scanned} 个已配门禁的仓库，补上 ${added}，已齐 ${ok}，未生效 ${broken}，跳过(非本工具) ${foreign}"
+else
+  echo "agent-gates-hooks-sync: 扫描 ${scanned} 个已配门禁的仓库，待补 ${added}，已齐 ${ok}，未生效 ${broken}，跳过(非本工具) ${foreign}"
+  [[ "$added" -gt 0 ]] && echo "  加 --apply 实际写入"
+fi
+# Non-zero when something needs attention, so a hook or CI step can gate on it.
+[[ "$added" -gt 0 || "$broken" -gt 0 ]] && exit 1
+exit 0
