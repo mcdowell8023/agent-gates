@@ -479,7 +479,14 @@ check_cross_review_capability() {
   esc_codex_path=$(printf '%s' "$codex_path" | sed 's/["\]/\\&/g')
   esc_codex_version=$(printf '%s' "$codex_version" | sed 's/["\]/\\&/g')
 
-  cat > "$tmp_file" <<RCEOF
+  # MERGE, never overwrite. This used to be a fixed heredoc + `mv`, and
+  # `implementer_family` / `pi_models` / `channels` appear nowhere in this file — so every
+  # doctor run silently dropped them. The damaging one is `channels.opencode.enabled=false`:
+  # it was set deliberately to stop agents wedging on the opencode review channel, and
+  # wiping it RE-ENABLES that channel. A maintenance command that quietly undoes a
+  # deliberate safety setting is worse than one that fails loudly.
+  local doctor_json
+  doctor_json=$(cat <<RCEOF
 {
   "detected_at": "${detected_at}",
   "detected_by": "doctor",
@@ -497,8 +504,23 @@ check_cross_review_capability() {
   "ultimate_fallback": "agent-tool"${review_models_json}
 }
 RCEOF
-  mv "$tmp_file" "$out_file"
-  cp "$out_file" "$INSTALL_DIR/review-capability.json"
+)
+  rm -f "$tmp_file" 2>/dev/null || true
+  local persist_lib="$INSTALL_DIR/lib/hetero/persist.sh"
+  [[ -f "$persist_lib" ]] || persist_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/hetero/persist.sh"
+  if [[ -f "$persist_lib" ]]; then
+    # shellcheck disable=SC1090
+    source "$persist_lib"
+    if ! hetero_merge_check_json "$out_file" "$doctor_json"; then
+      warn "could not update $out_file — 已有内容保持不动（见上面的报错）"
+    fi
+    # review-capability.json gets the same treatment: CHECK 3 reads `level` from it, and it
+    # may carry keys doctor does not know about either.
+    hetero_merge_check_json "$INSTALL_DIR/review-capability.json" "$doctor_json" \
+      || warn "could not update review-capability.json"
+  else
+    warn "lib/hetero/persist.sh 缺失 —— 跳过 hetero-check.json 更新，绝不用全量覆盖兜底"
+  fi
 
   # -- report --
   if [[ "$level" == "L3" ]]; then
