@@ -2,6 +2,43 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.9.1 — status 不再自己判 opencode serve，改问 oc-reaper
+
+### 起因：我自己的两个工具互相矛盾
+
+`agent-gates-status` 报 `1 serve(s), 1 over 1h with 0 clients — oc-reaper --apply`，
+按它的建议跑 `oc-reaper`，得到 `0 reapable, 1 kept` —— 什么也没做。
+
+因为 status 把回收判据**重新实现了一遍**（「超 1 小时 && 没有 `opencode run` 客户端」），
+而 oc-reaper 会保留共享端口上的 serve（生命周期归 `oc-review`，这个豁免存在的原因正是
+reaper 曾误杀过一个正在用的共享 serve）。**建议与工具实际行为不符，比不给建议更糟**：
+照着做得到一个无操作，然后就不再信这一行了。
+
+改为向 oc-reaper 询问并转述它的结论。同一条教训：一个判断有两份实现，最终一定分叉，
+而分叉表现为「自信的错误输出」。
+
+### Fixed — 三条（交叉审查抓到）
+
+**把任何 `kept` 都说成「共享 serve」是错的。** oc-reaper 有 **7 个 keep 分支**
+（共享端口、未到 MIN_AGE、按端口匹配到 run 客户端、按 attach 匹配到、以及另外三个），
+只有 1 个是共享 serve。第一版硬编码那句解释，对其余 6 种都是用户可见输出里的错误断言。
+改为**逐字引用 reaper 自己的 `[keep]` 行**，不做改写。
+
+**判不出来时 fail-open。** reaper 不可用或输出无法解析时，只改了文案没置 `ATTENTION=1` ——
+有 serve 在跑、拿不到结论，命令却 exit 0，而这个文件的头部把 0 定义为 healthy。
+
+**测试没隔离 `$HOME`。** status 还会检查 `~/.claude/skills` 等四处的完整度，
+宿主机缺任何一个 skill 都会让 rc 断言因为与 opencode 无关的原因失败。改用临时 HOME。
+
+### 测试
+
+新增 `tests/run_status_opencode.sh` 19 条，`pgrep` 与 `oc-reaper` 都 fake 掉，
+不依赖本机是否真有 serve —— 这一点很要紧：正是「读的是真实 pgrep」让我一度在一个
+明显输出两行 opencode 的坏文件上读到 `PASS=8 FAIL=0`。
+
+⚠️ 顺带一个 BSD/GNU 差异：`seq 1 0` 在 macOS 自带 seq 上**倒序输出 `1 0` 两行**，
+GNU 版输出空。照 GNU 语义写 fake，`fake_serves 0` 反而造出 2 个假 pid。
+
 ## v2.9.0 — 验收改成查需求遗漏，而不是第二次代码审查
 
 ### 问题

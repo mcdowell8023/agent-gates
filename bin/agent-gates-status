@@ -137,25 +137,48 @@ fi
 [[ "$_ST_MATRIX" == "false" || "$_ST_MATRIX" == "0" || "$_ST_MATRIX" == "no" ]] && ATTENTION=1
 
 # --- opencode serves --------------------------------------------------------
-# A serve with no `opencode run` client is a leak. Paseo-managed ones hold a permanent
-# connection to the daemon, so "something is connected" is not evidence of use.
+# ASK oc-reaper rather than deciding here.
+#
+# This row used to reimplement the criteria ("age > 1h && no `opencode run` client") and
+# print `— oc-reaper --apply`. But oc-reaper KEEPS a serve on the shared port, because its
+# lifecycle belongs to oc-review — an exemption that exists precisely because the reaper
+# once killed a shared serve that was in use. So status said "needs attention", the user ran
+# the suggested command, and it reported `0 reapable, 1 kept` and did nothing.
+#
+# Advice that does not match what the tool will do is worse than none: the reader runs it,
+# gets a no-op, and stops trusting the row. Two implementations of one judgement always
+# drift, and the drift shows up as confident wrong output.
 SERVES=$(pgrep -f "opencode serve" 2>/dev/null | wc -l | tr -d ' ')
-CLIENTS=$(pgrep -f "opencode run" 2>/dev/null | wc -l | tr -d ' ')
 if [[ "${SERVES:-0}" -eq 0 ]]; then
   row "opencode" "${G}no serves${N}"
 else
-  OLD=0
-  while read -r p; do
-    [[ -z "$p" ]] && continue
-    e=$(ps -o etime= -p "$p" 2>/dev/null | tr -d ' ')
-    # etime shows d-hh:mm:ss or hh:mm:ss once past an hour
-    [[ "$e" == *-* || "$e" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]] && OLD=$((OLD+1))
-  done < <(pgrep -f "opencode serve" 2>/dev/null)
-  if [[ "$OLD" -gt 0 && "${CLIENTS:-0}" -eq 0 ]]; then
-    row "opencode" "${Y}${SERVES} serve(s), ${OLD} over 1h with 0 clients${N} — oc-reaper --apply"
-    ATTENTION=1
+  _OCR="${AGENT_GATES_OC_REAPER:-$INSTALL_DIR/bin/oc-reaper}"
+  if [[ -x "$_OCR" ]]; then
+    _OCR_OUT=$("$_OCR" 2>/dev/null || true)
+    _OCR_N=$(printf '%s' "$_OCR_OUT" | sed -n 's/.*oc-reaper: \([0-9]*\) reapable.*/\1/p' | head -1)
+    _OCR_K=$(printf '%s' "$_OCR_OUT" | sed -n 's/.*reapable, \([0-9]*\) kept.*/\1/p' | head -1)
+    if [[ -z "${_OCR_N:-}" ]]; then
+      # Could not read the reaper's answer — say so, and count it as needing attention.
+      # Reporting the count alone was fail-open: serves exist, no verdict was obtained, and
+      # the command still exited 0, which this file's own header defines as "healthy".
+      row "opencode" "${Y}${SERVES} serve(s) · oc-reaper 输出无法解析，给不出结论${N}"
+      ATTENTION=1
+    elif [[ "$_OCR_N" -gt 0 ]]; then
+      row "opencode" "${Y}${SERVES} serve(s), ${_OCR_N} 可回收${N} — oc-reaper --apply"
+      ATTENTION=1
+    else
+      # ⛔ Do NOT explain WHY they were kept. oc-reaper has seven distinct keep branches
+      # (shared port, younger than MIN_AGE, a run client by port, a run client by attach,
+      # and three more) and only ONE of them is the shared serve. Hardcoding "shared serve,
+      # managed by oc-review" was a false claim in user-facing output for six of the seven.
+      # Quote the reaper's own first [keep] line instead of paraphrasing it.
+      _OCR_WHY=$(printf '%s' "$_OCR_OUT" | sed -n 's/^\[keep\][[:space:]]*//p' | head -1)
+      row "opencode" "${G}${SERVES} serve(s), 0 可回收${N}（reaper 保留 ${_OCR_K:-?} 个${_OCR_WHY:+：${_OCR_WHY}}）"
+    fi
   else
-    row "opencode" "${G}${SERVES} serve(s), ${CLIENTS} client(s)${N}"
+    # Same fail-open reasoning: serves are running and nothing can judge them.
+    row "opencode" "${Y}${SERVES} serve(s) · oc-reaper 不可用，给不出结论${N}"
+    ATTENTION=1
   fi
 fi
 
