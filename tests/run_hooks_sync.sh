@@ -178,6 +178,16 @@ echo "S14: ⭐ base pre-commit 失去执行位 → 普通 commit 根本不受检
   assert "--apply 后修回可执行" "$([[ -x "$ROOT/a/.githooks/pre-commit" ]] && echo true || echo false)"
   teardown )
 
+echo "S15: ⛔ foreign 且不可执行的 pre-commit —— 绝不能被悄悄改活"
+# 执行位修复必须排在归属判定之后。排在前面等于把别人故意停掉的钩子重新启用，
+# 而脚本头部写着「不是 agent-gates 的钩子一律不碰」—— 自相矛盾。
+( setup; mk_repo d foreign
+  chmod 644 "$ROOT/d/.githooks/pre-commit"
+  out=$(bash "$SYNC" --apply "$ROOT" 2>&1)
+  assert "⛔ 未被 chmod 成可执行" "$([[ ! -x "$ROOT/d/.githooks/pre-commit" ]] && echo true || echo false)"
+  assert "报告说明未触碰" "$([[ "$out" == *未触碰* || "$out" == *跳过* ]] && echo true || echo false)"
+  teardown )
+
 echo
 read -r P F < "$RESULTS_FILE"
 echo "=== PASS=$P FAIL=$F ==="

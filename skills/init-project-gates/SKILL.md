@@ -121,8 +121,11 @@ pre-merge-commit:
 # AGENT_QUALITY_GATE
 .githooks/agent-quality-gate.sh
 
-# 并新建 .husky/pre-merge-commit（同样内容）：
-printf '# AGENT_QUALITY_GATE\n.githooks/agent-quality-gate.sh\n' > .husky/pre-merge-commit
+# 并新建 .husky/pre-merge-commit —— 必须是一个能真正执行的 husky hook。
+# 只写那两行裸文本会得到一个没有 shebang 的文件，husky 项目的 merge 口仍然是空的。
+cp .husky/pre-commit .husky/pre-merge-commit   # 有 pre-commit 时直接照抄它的壳
+# 若没有可抄的，自己补 shebang：
+#   printf '#!/usr/bin/env sh\n# AGENT_QUALITY_GATE\n.githooks/agent-quality-gate.sh\n' > .husky/pre-merge-commit
 chmod +x .husky/pre-merge-commit
 ```
 

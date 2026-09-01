@@ -78,19 +78,6 @@ while IFS= read -r gitdir; do
   esac
   pc="$hookdir/pre-commit"
 
-  if [[ -f "$pc" && ! -x "$pc" ]]; then
-    # The base hook matters more than the one being added: git silently skips a
-    # non-executable hook, so ordinary commits are ungated while `git config` and the file
-    # listing both look right. Adding pre-merge-commit next to it and reporting "已齐"
-    # would leave the bigger "存在 ≠ 生效" hole untouched.
-    if [[ "$APPLY" -eq 1 ]]; then
-      if chmod +x "$pc"; then echo "fix-mode pre-commit: $repo"; added=$((added + 1))
-      else echo "FAILED fix-mode pre-commit: $repo" >&2; failed=$((failed + 1)); fi
-    else
-      echo "⚠️  pre-commit 存在但不可执行 → 普通 commit 未生效: $repo"
-      added=$((added + 1))
-    fi
-  fi
   if [[ ! -f "$pc" ]]; then
     # git silently skips a hooksPath whose hook is absent — the gate looks configured and
     # is not running. Report; do NOT guess and create one, because we cannot tell whether
@@ -104,6 +91,19 @@ while IFS= read -r gitdir; do
       echo "跳过 (pre-commit 不是 agent-gates 的钩子，未触碰): $repo"
       foreign=$((foreign + 1))
       continue
+    fi
+  fi
+
+  # Only NOW, after ownership is established, may the base hook's mode be touched.
+  # Doing it earlier re-enabled a foreign hook that someone had deliberately disabled —
+  # directly contradicting this file's own "never touch a hook we did not author".
+  if [[ ! -x "$pc" ]]; then
+    if [[ "$APPLY" -eq 1 ]]; then
+      if chmod +x "$pc"; then echo "fix-mode pre-commit: $repo"; added=$((added + 1))
+      else echo "FAILED fix-mode pre-commit: $repo" >&2; failed=$((failed + 1)); fi
+    else
+      echo "⚠️  pre-commit 存在但不可执行 → 普通 commit 未生效: $repo"
+      added=$((added + 1))
     fi
   fi
 

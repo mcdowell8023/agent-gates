@@ -42,7 +42,7 @@ for f in "$SCRIPT_DIR"/run.sh "$SCRIPT_DIR"/run_*.sh; do
   base=$(basename "$f")
   [[ -n "$FILTER" && "$base" != *"$FILTER"* ]] && continue
   files=$((files + 1))
-  out=$(bash "$f" 2>&1)
+  out=$(bash "$f" 2>&1); file_rc=$?
   last=$(printf '%s\n' "$out" | tail -1)
   # Four report shapes exist in this repo. Enumerate them: an unparsed line is treated as a
   # failure below, so a missing shape shows up loudly rather than as a silent skip.
@@ -78,6 +78,12 @@ for f in "$SCRIPT_DIR"/run.sh "$SCRIPT_DIR"/run_*.sh; do
     # Zero assertions is not success — see the header.
     printf "  ${R}%-40s 零断言（fixture 早退？）${N}\n" "$base"
     empty=$((empty + 1)); FAILED_LIST="$FAILED_LIST $base(0-assertions)"
+  elif [[ "$file_rc" -ne 0 ]]; then
+    # The exit code is authority, not the last printed line. A file can print
+    # `=== PASS=n FAIL=0 ===` and then `exit 1`; trusting the text alone made that green —
+    # the same "looks reported, nothing checked" shape this runner exists to close.
+    printf "  ${R}%-40s 尾行像通过但退出码 %s${N}\n" "$base" "$file_rc"
+    red=$((red + 1)); FAILED_LIST="$FAILED_LIST $base(rc=$file_rc)"
   else
     printf "  ${G}%-40s PASS=%s${N}\n" "$base" "$p"
     green=$((green + 1))
