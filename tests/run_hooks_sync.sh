@@ -144,13 +144,38 @@ echo "S11: ⭐ 写入失败必须计入并让退出码非 0（不能假成功）
   assert "汇总里体现失败" "$([[ "$out" == *FAILED* || "$out" == *失败* ]] && echo true || echo false)"
   teardown )
 
-echo "S12: husky/lefthook 项目（门禁不在 hooksPath 的 pre-commit 里）→ 报出来而非静默跳过"
+echo "S12: husky 项目（门禁不在 hooksPath 的 pre-commit 里）→ 报出来而非静默跳过"
 ( setup
   d="$ROOT/h"; mkdir -p "$d/.husky" && git -C "$d" init -q
   printf 'npx lint-staged\n' > "$d/.husky/pre-commit"
   git -C "$d" config core.hooksPath .husky
   out=$(bash "$SYNC" "$ROOT" 2>&1)
   assert "点出该仓库需要人工处理" "$([[ "$out" == *"$d"* ]] && echo true || echo false)"
+  teardown )
+
+echo "S13: ⭐ lefthook 项目（不设 core.hooksPath）→ 不能静默漏掉"
+# 之前 S12 标题写着 husky/lefthook，实际只造了 husky fixture —— 所以「lefthook 整类被漏掉」
+# 这个洞没有任何用例能抓到。init-project-gates 明确支持在 lefthook.yml 里挂门禁。
+( setup
+  d="$ROOT/lh"; mkdir -p "$d/.githooks" && git -C "$d" init -q
+  cp "$SHIM" "$d/.githooks/agent-quality-gate.sh"; chmod +x "$d/.githooks/agent-quality-gate.sh"
+  printf 'pre-commit:\n  commands:\n    gate:\n      run: .githooks/agent-quality-gate.sh\n' > "$d/lefthook.yml"
+  out=$(bash "$SYNC" "$ROOT" 2>&1)
+  assert "点出 lefthook 仓库需要人工处理" "$([[ "$out" == *"$d"* ]] && echo true || echo false)"
+  # 不用 `grep -c … | grep -q '^0$'`：grep -c 无匹配时输出 0 但退出码是 1，
+  # pipefail 会让整条管道取那个非零，断言被判假 —— 错在断言写法，不在代码。
+  assert "⛔ 未擅自改 lefthook.yml（团队文件）" "$(grep -q 'pre-merge-commit' "$d/lefthook.yml" && echo false || echo true)"
+  teardown )
+
+echo "S14: ⭐ base pre-commit 失去执行位 → 普通 commit 根本不受检，必须报"
+# 只补 pre-merge-commit 而不看 base hook 的执行位，等于把同一个「存在 ≠ 生效」
+# 留在了更要紧的那个钩子上。
+( setup; mk_repo a githooks
+  chmod 644 "$ROOT/a/.githooks/pre-commit"
+  out=$(bash "$SYNC" "$ROOT" 2>&1)
+  assert "点出 pre-commit 不可执行" "$([[ "$out" == *"pre-commit"* && ( "$out" == *不可执行* || "$out" == *未生效* ) ]] && echo true || echo false)"
+  bash "$SYNC" --apply "$ROOT" >/dev/null 2>&1
+  assert "--apply 后修回可执行" "$([[ -x "$ROOT/a/.githooks/pre-commit" ]] && echo true || echo false)"
   teardown )
 
 echo

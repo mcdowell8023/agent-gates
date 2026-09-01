@@ -56,7 +56,20 @@ added=0; ok=0; broken=0; foreign=0; scanned=0; failed=0
 while IFS= read -r gitdir; do
   repo=$(dirname "$gitdir")
   hp=$(git -C "$repo" config core.hooksPath 2>/dev/null || true)
-  [[ -z "$hp" ]] && continue          # no gate configured here; not our business
+  if [[ -z "$hp" ]]; then
+    # lefthook installs the gate by referencing it from lefthook.yml and does NOT set
+    # core.hooksPath — so requiring hooksPath skipped that entire install mode silently,
+    # without even reporting it. init-project-gates documents lefthook as supported.
+    # lefthook.yml is a tracked team file; report it, never rewrite it.
+    for _lh in "$repo/lefthook.yml" "$repo/lefthook.yaml" "$repo/.lefthook.yml"; do
+      if [[ -f "$_lh" ]] && grep -q 'agent-quality-gate' "$_lh" 2>/dev/null; then
+        echo "⚠️  lefthook 安装模式，需人工加 pre-merge-commit（不改团队文件 $(basename "$_lh")）: $repo"
+        broken=$((broken + 1))
+        break
+      fi
+    done
+    continue
+  fi
   scanned=$((scanned + 1))
   # Resolve hooksPath: absolute stays, relative is repo-relative
   case "$hp" in
@@ -65,6 +78,19 @@ while IFS= read -r gitdir; do
   esac
   pc="$hookdir/pre-commit"
 
+  if [[ -f "$pc" && ! -x "$pc" ]]; then
+    # The base hook matters more than the one being added: git silently skips a
+    # non-executable hook, so ordinary commits are ungated while `git config` and the file
+    # listing both look right. Adding pre-merge-commit next to it and reporting "已齐"
+    # would leave the bigger "存在 ≠ 生效" hole untouched.
+    if [[ "$APPLY" -eq 1 ]]; then
+      if chmod +x "$pc"; then echo "fix-mode pre-commit: $repo"; added=$((added + 1))
+      else echo "FAILED fix-mode pre-commit: $repo" >&2; failed=$((failed + 1)); fi
+    else
+      echo "⚠️  pre-commit 存在但不可执行 → 普通 commit 未生效: $repo"
+      added=$((added + 1))
+    fi
+  fi
   if [[ ! -f "$pc" ]]; then
     # git silently skips a hooksPath whose hook is absent — the gate looks configured and
     # is not running. Report; do NOT guess and create one, because we cannot tell whether
