@@ -188,6 +188,22 @@ echo "S15: ⛔ foreign 且不可执行的 pre-commit —— 绝不能被悄悄�
   assert "报告说明未触碰" "$([[ "$out" == *未触碰* || "$out" == *跳过* ]] && echo true || echo false)"
   teardown )
 
+echo "S16: ⭐ 按文档装好的 husky 项目必须被认成自己人，而不是 foreign"
+# init-project-gates 教用户往 .husky/pre-commit 写 `# AGENT_QUALITY_GATE` +
+# `.githooks/agent-quality-gate.sh`。这两行原先都不命中归属识别，于是装对了的 husky 项目
+# 被当成 foreign 跳过，pre-merge-commit 永远补不上。此前的 fixture 造的是「纯 husky、
+# 根本没挂门禁」，不是文档支持的形态，所以这个洞没有用例能抓到。
+( setup
+  d="$ROOT/hk"; mkdir -p "$d/.husky" "$d/.githooks" && git -C "$d" init -q
+  printf 'npx lint-staged\n# AGENT_QUALITY_GATE\n.githooks/agent-quality-gate.sh\n' > "$d/.husky/pre-commit"
+  chmod +x "$d/.husky/pre-commit"
+  cp "$SHIM" "$d/.githooks/agent-quality-gate.sh"; chmod +x "$d/.githooks/agent-quality-gate.sh"
+  git -C "$d" config core.hooksPath .husky
+  bash "$SYNC" --apply "$ROOT" >/dev/null 2>&1
+  assert "补上了 .husky/pre-merge-commit" "$([[ -f "$d/.husky/pre-merge-commit" ]] && echo true || echo false)"
+  assert "⛔ 未改写原 .husky/pre-commit" "$(grep -q 'lint-staged' "$d/.husky/pre-commit" && echo true || echo false)"
+  teardown )
+
 echo
 read -r P F < "$RESULTS_FILE"
 echo "=== PASS=$P FAIL=$F ==="

@@ -34,7 +34,10 @@ assert() {
 # there is no controlled harness that makes a bash parse error harmless.
 targets() {
   cd "$ROOT" || return 1
-  find bin lib hooks tests -type f 2>/dev/null
+  # .githooks/ is included: it holds the hooks git actually invokes in THIS repo
+  # (pre-commit, pre-merge-commit). Leaving it out meant the one place a breakage would be
+  # executed for real was the one place unscanned.
+  find bin lib hooks tests .githooks -type f 2>/dev/null
   ls doctor.sh install.sh uninstall.sh 2>/dev/null
 }
 

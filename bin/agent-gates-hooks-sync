@@ -35,6 +35,10 @@ done
 
 SHIM_SRC="${AGENT_GATES_SHIM_SRC:-$HOME/.agent-gates/hooks/git/gate-shim.sh}"
 SHIM_MARKER="agent-gates per-project gate shim"
+# Ownership recognition must cover the DOCUMENTED husky form too: init-project-gates tells
+# users to put `# AGENT_QUALITY_GATE` + `.githooks/agent-quality-gate.sh` into
+# .husky/pre-commit. Neither string matched the original patterns, so a correctly-installed
+# husky project was classified `foreign` and skipped — its merge hook never added.
 # Hooks the gate needs. pre-commit is what projects already have; pre-merge-commit is the
 # one that was missing everywhere.
 NEEDED=(pre-merge-commit)
@@ -87,7 +91,7 @@ while IFS= read -r gitdir; do
     continue
   fi
   if ! grep -q "$SHIM_MARKER" "$pc" 2>/dev/null; then
-    if ! grep -qE 'Agent Quality Gate|GATE_VERSION|mcdowell8023/agent-gates' "$pc" 2>/dev/null; then
+    if ! grep -qE 'Agent Quality Gate|GATE_VERSION|mcdowell8023/agent-gates|AGENT_QUALITY_GATE|agent-quality-gate\.sh' "$pc" 2>/dev/null; then
       echo "跳过 (pre-commit 不是 agent-gates 的钩子，未触碰): $repo"
       foreign=$((foreign + 1))
       continue
@@ -113,7 +117,7 @@ while IFS= read -r gitdir; do
     if [[ ! -f "$target" ]]; then
       action="add"
     elif ! grep -q "$SHIM_MARKER" "$target" 2>/dev/null; then
-      if grep -qE 'Agent Quality Gate|GATE_VERSION|mcdowell8023/agent-gates' "$target" 2>/dev/null; then
+      if grep -qE 'Agent Quality Gate|GATE_VERSION|mcdowell8023/agent-gates|AGENT_QUALITY_GATE|agent-quality-gate\.sh' "$target" 2>/dev/null; then
         action="replace"       # an old frozen copy of ours — safe to refresh
       else
         # ⛔ Existence is not compliance. A hand-written `exit 0` here reports "complete"
