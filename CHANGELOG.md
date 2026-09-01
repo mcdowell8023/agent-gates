@@ -4,6 +4,50 @@ All notable changes to agent-gates will be documented in this file.
 
 ## v2.9.1 — status 不再自己判 opencode serve；补上 merge 的钩子点
 
+### Fixed — 一个已推送的活 bug，以及屏蔽它的测试口径
+
+`hooks/git/agent-quality-gate.sh` 里 `申报 $VERIFY_VERDICT，按矩阵推导为 …` ——
+不加花括号时 bash 会把变量名一直吃到中文逗号的第一个字节，得到 unbound 名字，
+**即使变量已赋值也会 exit 127**。所以 E4 那条判定差异消息从未成功打印过。
+
+它能上线是因为 locale：UTF-8 下必炸，`LC_ALL=C` 下正常。而本轮给测试统一加了
+`LC_ALL=C` 前缀（为绕开一个无关的 `sed: illegal byte sequence`），恰好把这一整类屏蔽掉了；
+对应的测试也只断言了 `rc≠0` —— 门禁死掉同样满足，空过掩盖了它。
+
+不只修这一处。新增 `tests/run_shell_lint.sh` 做**类级别**静态检查（禁止 `$NAME` 紧跟非 ASCII
+字节），并带自检用例。三次自己踩到、三次被它抓出来：
+
+1. 第一版 lint 用 `grep -P`，而 macOS 自带 BSD grep 不支持 → 命中静默变 0、lint 沦为装饰
+2. 第一版把 `tests/` 排除在扫描外，理由是「测试跑在受控 harness 下」——
+   几分钟后同一个 bug 就从 `tests/run-all.sh` 溜进来了，**豁免的理由本身就是藏住它的东西**
+3. 扫描范围扩到 tests/ 后立刻抓到 `tests/run_status_modes.sh` 里一处真实的 `$m，`，
+   它在 UTF-8 locale 下把子 shell 直接弄死、4 条断言一条不跑 ——
+   我此前把这个「时有时无」归因于本机是否有 serve，**归错了**
+
+### Added — `bin/agent-gates-hooks-sync`：把 merge 钩子补到已部署项目
+
+「在工具自己的仓库里修好了」不等于修好了。默认 dry-run；支持 hooksPath 指向仓库外的
+husky 绕法；⛔ 不是 agent-gates 的钩子一律不碰。
+
+⚠️ 它还回答了一个悬着的问题——**门禁到底有没有在跑**：`core.hooksPath` 指向的钩子文件
+不存在时 git 会静默跳过，而 `git config` 看着完全正常。两个已部署仓库正处于这个状态。
+
+三条来自审查的收紧：**「文件存在」不算已齐**（放一个 `exit 0` 的假钩子、或留一个不可执行
+文件，都会被报成「已齐」而 merge 依然不受检 —— 同一个「存在 ≠ 生效」的替换）；
+**写入失败必须计数**（`cp`/`chmod` 失败此前只打 stderr、退出码仍是 0）；
+**husky/lefthook 项目要报出来**而非静默跳过。
+
+### Added — `tests/run-all.sh`：此前 40+ 个测试文件没有任何 runner
+
+`tests/run.sh` 只跑 memory-reminder 的 fixture。测试内容不空，**测试接入是空的**。
+
+两个刻意的决定：`PASS=0 FAIL=0` 算失败（fixture 早退会让整套静默跑零断言，按「FAIL=0 即绿」
+会被当通过 —— 这次真发生了，一处 `local` 声明顺序导致 unbound variable）；
+**不强加 `LC_ALL`**，那正是屏蔽上面那个 bug 的东西。
+`-k` 匹配不到任何文件时也判红（否则空跑会打印「全部通过」）。
+
+当前 49 个文件全部通过。
+
 ### 🔴 Fixed — 「合并进 strict 分支要严格」此前根本没有钩子点
 
 v2.7.0 加了「merge 进 strict 分支不再跳过」，`merge-only` 档整个设计就是把审查推迟到那一刻。

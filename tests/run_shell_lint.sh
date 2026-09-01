@@ -26,12 +26,15 @@ assert() {
   else echo "  ✗ $name"; echo "$p $((f+1))" > "$RESULTS_FILE"; fi
 }
 
-# Files we ship and that agents execute. Tests are excluded on purpose: they run under a
-# controlled harness, and holding them to the same bar would add noise without protecting
-# anyone.
+# Everything executable in the repo, tests INCLUDED.
+#
+# The first version excluded tests/ with the reasoning "they run under a controlled harness".
+# Within minutes that exemption let the identical bug through in tests/run-all.sh — the
+# exemption's own justification was what hid it. Test scripts are run by agents and CI too;
+# there is no controlled harness that makes a bash parse error harmless.
 targets() {
   cd "$ROOT" || return 1
-  find bin lib hooks -type f 2>/dev/null
+  find bin lib hooks tests -type f 2>/dev/null
   ls doctor.sh install.sh uninstall.sh 2>/dev/null
 }
 
@@ -63,22 +66,41 @@ $BAD}" "$([[ -z "${BAD//[[:space:]]/}" ]] && echo true || echo false)"
 
 echo "L2: 自检——这条 lint 真的能抓到（在临时副本上注入）"
 TMPD=$(mktemp -d)
-printf '#!/usr/bin/env bash\nV=x\necho "申报 $V，推导"\n' > "$TMPD/bad.sh"
+# 坏模式一律拼出来，不写成字面量：写成字面量会让本文件被自己的 lint 命中，
+# 而给自己开豁免正是上一次漏掉同类 bug 的原因。
+CJK_COMMA=$(printf '\xef\xbc\x8c')
+{ printf '#!/usr/bin/env bash\nV=x\n'; printf 'echo "a $V%s b"\n' "$CJK_COMMA"; } > "$TMPD/bad.sh"
 n=$(scan_bad "$TMPD/bad.sh" | wc -l | tr -d ' ')
 assert "注入的坏写法被命中 (实际 $n)" "$([[ "$n" -ge 1 ]] && echo true || echo false)"
-printf '#!/usr/bin/env bash\nV=x\necho "申报 ${V}，推导"\n' > "$TMPD/good.sh"
+{ printf '#!/usr/bin/env bash\nV=x\n'; printf 'echo "a ${V}%s b"\n' "$CJK_COMMA"; } > "$TMPD/good.sh"
 n=$(scan_bad "$TMPD/good.sh" | wc -l | tr -d ' ')
 assert "加花括号后不命中 (实际 $n)" "$([[ "$n" -eq 0 ]] && echo true || echo false)"
-printf '#!/usr/bin/env bash\n# 注释里写 $V，也不该命中\n' > "$TMPD/cmt.sh"
+# 用拼接而不是字面量写这个 fixture：直接写出坏模式会让本文件被自己的 lint 命中，
+# 而那是一段字符串、不是可执行代码 —— 一个纯粹的假失败。
+CJK_COMMA=$(printf '\xef\xbc\x8c')
+{ printf '#!/usr/bin/env bash\n'; printf '# comment with $V%s tail\n' "$CJK_COMMA"; } > "$TMPD/cmt.sh"
 n=$(scan_bad "$TMPD/cmt.sh" | wc -l | tr -d ' ')
 assert "注释里的同样写法不命中 (实际 $n)" "$([[ "$n" -eq 0 ]] && echo true || echo false)"
 rm -rf "$TMPD"
 
 echo "L3: ⭐ 实测确认这确实是 locale 依赖的（不是理论）"
-u=$(LC_ALL=en_US.UTF-8 bash -c 'set -uo pipefail; V=x; echo "a $V，b"' 2>&1; echo "rc=$?")
-c=$(LC_ALL=C bash -c 'set -uo pipefail; V=x; echo "a $V，b"' 2>&1; echo "rc=$?")
+: "${CJK_COMMA:=$(printf '\xef\xbc\x8c')}"
+# 挑一个本机真的有的 UTF-8 locale。写死 en_US.UTF-8 在很多 Linux/CI 上不存在，
+# L3 会因为环境缺 locale 而失败 —— 那是假失败，报的不是代码问题。
+UTF8_LOC=""
+for L in C.UTF-8 en_US.UTF-8 en_US.utf8 C.utf8; do
+  if LC_ALL="$L" bash -c 'true' 2>/dev/null && [[ "$(LC_ALL="$L" locale charmap 2>/dev/null)" == *UTF*8* ]]; then UTF8_LOC="$L"; break; fi
+done
+if [[ -z "$UTF8_LOC" ]]; then
+  assert "跳过（本机没有可用的 UTF-8 locale，无法测该分支）" "true"
+  u="rc=127"   # 使下面的断言语义保持一致
+else
+_BAD_SNIP='set -uo pipefail; V=x; echo "a $V'"$CJK_COMMA"'b"'
+u=$(LC_ALL="$UTF8_LOC" bash -c "$_BAD_SNIP" 2>&1; echo "rc=$?")
+c=$(LC_ALL=C bash -c "$_BAD_SNIP" 2>&1; echo "rc=$?")
 assert "UTF-8 locale 下失败" "$([[ "$u" == *"rc=127"* || "$u" == *unbound* ]] && echo true || echo false)"
 assert "⚠️ LC_ALL=C 下反而通过 —— 这就是它能上线的原因" "$([[ "$c" == *"rc=0"* ]] && echo true || echo false)"
+fi
 
 echo "L4: 所有 shell 脚本语法正确"
 SYNTAX_BAD=""

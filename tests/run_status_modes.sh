@@ -107,7 +107,10 @@ echo "M8: ⭐ status 与门禁对同一份配置判定一致（防解析逻辑�
     sout=$(run_status)
     for m in relaxed merge-only; do
       if [[ "$gout" == *"$m"* ]]; then
-        assert "配置 $cfg: 门禁提到 $m，status 也提到" "$([[ "$sout" == *"$m"* ]] && echo true || echo false)"
+        # ${m} 不是风格问题：不加花括号时 UTF-8 locale 下 bash 把变量名吃到中文逗号的
+        # 第一个字节 → unbound variable，整个子 shell 当场死掉，M8 的断言一条都不跑。
+        # 我此前把这个「时有时无」归因于本机是否有 serve，是归错了。
+        assert "配置 $cfg: 门禁提到 ${m}，status 也提到" "$([[ "$sout" == *"$m"* ]] && echo true || echo false)"
       fi
     done
     git reset -q; rm -f migration/002.sql

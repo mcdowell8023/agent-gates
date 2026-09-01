@@ -48,7 +48,7 @@ fi
   echo "agent-gates-hooks-sync: shim source not found at $SHIM_SRC — install/upgrade agent-gates first" >&2
   exit 69; }
 
-added=0; ok=0; broken=0; foreign=0; scanned=0
+added=0; ok=0; broken=0; foreign=0; scanned=0; failed=0
 
 # Every git repo under the roots. -prune so a repo's own submodules/worktrees are not
 # walked twice, and node_modules is skipped — on a machine with ~165 repos the difference
@@ -83,16 +83,43 @@ while IFS= read -r gitdir; do
 
   for h in "${NEEDED[@]}"; do
     target="$hookdir/$h"
-    if [[ -f "$target" ]]; then ok=$((ok + 1)); continue; fi
+    action=""      # "" = nothing to do · add · fix-mode · replace
+    if [[ ! -f "$target" ]]; then
+      action="add"
+    elif ! grep -q "$SHIM_MARKER" "$target" 2>/dev/null; then
+      if grep -qE 'Agent Quality Gate|GATE_VERSION|mcdowell8023/agent-gates' "$target" 2>/dev/null; then
+        action="replace"       # an old frozen copy of ours — safe to refresh
+      else
+        # ⛔ Existence is not compliance. A hand-written `exit 0` here reports "complete"
+        # while the merge stays ungated — the same substitution (存在 ≠ 生效) this tool
+        # exists to expose. Report it; never overwrite someone else's hook.
+        echo "⚠️  $h 存在但不是 agent-gates 的钩子，未触碰（merge 仍不受检）: $repo"
+        foreign=$((foreign + 1))
+        continue
+      fi
+    elif [[ ! -x "$target" ]]; then
+      # git silently skips a non-executable hook, so this is "present and doing nothing".
+      action="fix-mode"
+    fi
+    [[ -z "$action" ]] && { ok=$((ok + 1)); continue; }
+
     if [[ "$APPLY" -eq 1 ]]; then
-      if cp "$SHIM_SRC" "$target" && chmod +x "$target"; then
-        echo "补上 $h: $repo"
+      _wrote=0
+      case "$action" in
+        fix-mode) chmod +x "$target" && _wrote=1 ;;
+        *)        cp "$SHIM_SRC" "$target" && chmod +x "$target" && _wrote=1 ;;
+      esac
+      if [[ "$_wrote" -eq 1 ]]; then
+        echo "${action} $h: $repo"
         added=$((added + 1))
       else
-        echo "FAILED $h: $repo" >&2
+        # Must be counted: printing to stderr and moving on let a read-only hook dir
+        # produce a clean exit 0 — a write failure reported as success.
+        echo "FAILED ${action} $h: $repo" >&2
+        failed=$((failed + 1))
       fi
     else
-      echo "[dry-run] 待补 $h: $repo"
+      echo "[dry-run] 待补(${action}) $h: $repo"
       added=$((added + 1))
     fi
   done
@@ -104,11 +131,11 @@ done < <(for root in "${ROOTS[@]}"; do
 
 echo "---"
 if [[ "$APPLY" -eq 1 ]]; then
-  echo "agent-gates-hooks-sync: 扫描 ${scanned} 个已配门禁的仓库，补上 ${added}，已齐 ${ok}，未生效 ${broken}，跳过(非本工具) ${foreign}"
+  echo "agent-gates-hooks-sync: 扫描 ${scanned} 个已配门禁的仓库，处理 ${added}，已齐 ${ok}，未生效 ${broken}，写入失败 ${failed}，跳过(非本工具) ${foreign}"
 else
   echo "agent-gates-hooks-sync: 扫描 ${scanned} 个已配门禁的仓库，待补 ${added}，已齐 ${ok}，未生效 ${broken}，跳过(非本工具) ${foreign}"
   [[ "$added" -gt 0 ]] && echo "  加 --apply 实际写入"
 fi
 # Non-zero when something needs attention, so a hook or CI step can gate on it.
-[[ "$added" -gt 0 || "$broken" -gt 0 ]] && exit 1
+[[ "$added" -gt 0 || "$broken" -gt 0 || "$failed" -gt 0 || "$foreign" -gt 0 ]] && exit 1
 exit 0

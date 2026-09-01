@@ -34,7 +34,10 @@ G='\033[0;32m'; R='\033[0;31m'; Y='\033[1;33m'; N='\033[0m'
 files=0; green=0; red=0; empty=0
 FAILED_LIST=""
 
-for f in "$SCRIPT_DIR"/run_*.sh; do
+# tests/run.sh is included explicitly: the glob `run_*.sh` excludes it (no underscore), so
+# the one pre-existing suite was permanently outside the aggregator that claims to run
+# "every test file".
+for f in "$SCRIPT_DIR"/run.sh "$SCRIPT_DIR"/run_*.sh; do
   [[ -f "$f" ]] || continue
   base=$(basename "$f")
   [[ -n "$FILTER" && "$base" != *"$FILTER"* ]] && continue
@@ -82,6 +85,12 @@ for f in "$SCRIPT_DIR"/run_*.sh; do
 done
 
 echo "---"
+if [[ "$files" -eq 0 ]]; then
+  # An empty run must not print "all passed". With `-k` matching nothing this exited 0 and
+  # read as green — the aggregator itself being vacuous.
+  printf "${R}run-all: 没有匹配到任何测试文件${FILTER:+ (-k ${FILTER})}${N}\n"
+  exit 1
+fi
 if [[ "$red" -eq 0 && "$empty" -eq 0 ]]; then
   printf "${G}run-all: %d 个文件全部通过${N}\n" "$files"
   exit 0

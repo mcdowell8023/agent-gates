@@ -116,7 +116,41 @@ echo "S8: 多仓库混合布局，一次跑完并给汇总"
   assert "a 补上" "$([[ -f "$ROOT/a/.githooks/pre-merge-commit" ]] && echo true || echo false)"
   assert "b 补上" "$([[ -f "$ROOT/ext/b/pre-merge-commit" ]] && echo true || echo false)"
   assert "d 未被碰" "$([[ ! -f "$ROOT/d/.githooks/pre-merge-commit" ]] && echo true || echo false)"
-  assert "有汇总行" "$([[ "$out" == *added* || "$out" == *补上* ]] && echo true || echo false)"
+  assert "有汇总行" "$([[ "$out" == *"agent-gates-hooks-sync: 扫描"* ]] && echo true || echo false)"
+  teardown )
+
+echo "S9: ⭐ 已存在的 pre-merge-commit 必须验内容，不能只看存在"
+# 「文件存在」当成「已齐」是同一个替换：放一个 exit 0 的假钩子，或留一个不可执行文件，
+# sync 就报「已齐」而 merge 依然不受检。这是最便宜的绕过口。
+( setup; mk_repo a githooks
+  printf '#!/bin/sh\nexit 0\n' > "$ROOT/a/.githooks/pre-merge-commit"; chmod +x "$ROOT/a/.githooks/pre-merge-commit"
+  out=$(bash "$SYNC" "$ROOT" 2>&1)
+  assert "假钩子被点出来 (输出含警告)" "$([[ "$out" == *"pre-merge-commit"* && ( "$out" == *不是* || "$out" == *替换* || "$out" == *待补* ) ]] && echo true || echo false)"
+  teardown )
+
+echo "S10: ⭐ 不可执行的 pre-merge-commit 也不算已齐（git 会跳过它）"
+( setup; mk_repo a githooks
+  cp "$SHIM" "$ROOT/a/.githooks/pre-merge-commit"; chmod 644 "$ROOT/a/.githooks/pre-merge-commit"
+  out=$(bash "$SYNC" --apply "$ROOT" 2>&1)
+  assert "修成可执行" "$([[ -x "$ROOT/a/.githooks/pre-merge-commit" ]] && echo true || echo false)"
+  teardown )
+
+echo "S11: ⭐ 写入失败必须计入并让退出码非 0（不能假成功）"
+( setup; mk_repo a githooks
+  chmod 500 "$ROOT/a/.githooks"    # 只读目录：cp 必失败
+  out=$(bash "$SYNC" --apply "$ROOT" 2>&1); rc=$?
+  chmod 700 "$ROOT/a/.githooks"
+  assert "退出码非 0 (rc=$rc)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+  assert "汇总里体现失败" "$([[ "$out" == *FAILED* || "$out" == *失败* ]] && echo true || echo false)"
+  teardown )
+
+echo "S12: husky/lefthook 项目（门禁不在 hooksPath 的 pre-commit 里）→ 报出来而非静默跳过"
+( setup
+  d="$ROOT/h"; mkdir -p "$d/.husky" && git -C "$d" init -q
+  printf 'npx lint-staged\n' > "$d/.husky/pre-commit"
+  git -C "$d" config core.hooksPath .husky
+  out=$(bash "$SYNC" "$ROOT" 2>&1)
+  assert "点出该仓库需要人工处理" "$([[ "$out" == *"$d"* ]] && echo true || echo false)"
   teardown )
 
 echo
