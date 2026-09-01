@@ -1,0 +1,4 @@
+{
+  "mode": "merge-only",
+  "_note": "小分支迭代时不要求逐次审查；合并进 main（strict 分支）时强制 review + verify。改成 strict 可逐次要求，改成 off 可关闭——status 会把当前档位打出来。"
+}
