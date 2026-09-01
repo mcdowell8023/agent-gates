@@ -2,6 +2,60 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.8.0 — merge-only 级别 + review/verify 各自分级
+
+### Added — `merge-only`：小分支上完全不审
+
+`relaxed` 仍要求每次 commit 审一次，迭代时那也是负担。`merge-only` 把审查/验收
+**整体推迟**到工作进入集成分支的那一刻。
+
+| mode | 小分支上的 commit | 合并进 strict 分支 |
+|---|---|---|
+| `strict` | review + verify 都强制 verdict | 同左 |
+| `relaxed` | 各审一次，不看结论 | 强制（strict_branches 覆盖）|
+| `merge-only` | **完全不审** | 强制 |
+| `off` | 不检查 | 不检查 |
+
+⚠️ **`merge-only` 只放宽 review/verify**。Gate 1（对应测试文件必须存在）与 CHECK 3
+（plan）照常执行——那两条是**写代码时**的纪律，与审查时机无关。有断言钉住这一点。
+
+### Added — review 与 verify 各自设级别
+
+审查（读代码）与验收（确认真的跑起来）是两件事，严厉度不必一致：
+
+```json
+{
+  "mode": "merge-only",
+  "review": { "mode": "relaxed" },
+  "verify": { "mode": "merge-only" },
+  "strict_branches": ["test", "master", "main", "release/*"]
+}
+```
+
+未指定的分项继承总 `mode`（向后兼容）。env 同样分三个：`AGENT_GATES_MODE` /
+`AGENT_GATES_REVIEW_MODE` / `AGENT_GATES_VERIFY_MODE`。
+strict_branches 覆盖时**三个一起**变 strict。
+
+### Changed — 配置读取改用 python3
+
+`review.mode` / `verify.mode` 是嵌套路径，而用正则扫嵌套 JSON 正是「从错误的对象里
+取到值」的经典来源。改为按点分路径精确取值。
+
+### ⚠️ 一个仍未解决的设计问题（记录在此，等决策）
+
+核实发现：**CHECK 6「验收」目前实质是第二次代码审查**——
+- 触发条件与 CHECK 5 几乎相同（`LOGIC_FILES>1 && DIFF_LINES>50` / `MAX_SINGLE_FILE_LINES>150`）
+- 产物三条来源（harvest / import / 手写）全都是「让模型看代码」
+- `grep -rilE 'playwright|puppeteer|browser|e2e|selenium' bin/ lib/ hooks/` **一处真实机制都没有**
+
+也就是说同一份改动被两个几乎一样的检查各审一遍，这正是「反复审了 5 轮」的结构性来源。
+真实端到端在 commit 时做不到（端到端要先部署、部署要先 commit、commit 要先 verify），
+当初就是用「再审一遍代码」顶了这个位置。
+
+两条路待定：**verify 改为只接受真实运行证据**（测试报告 / E2E 结果 / 部署后验证，
+天然只在合并进集成分支时要求），或**承认 verify 是第二道审查**、只做分级。
+本版把分级能力做好，对两条路都是前置。
+
 ## v2.7.0 — 门禁分级：迭代时宽松，进集成分支时严格
 
 **起因**（2026-09-01）：审查成了瓶颈而非开发本身——一个改动被反复审了 5 轮。

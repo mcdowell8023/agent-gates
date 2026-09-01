@@ -34,29 +34,63 @@ _GATE_CFG_PROJECT=".agent/gates.json"
 _GATE_CFG_USER="${AGENT_GATES_DIR:-$HOME/.agent-gates}/gates.json"
 GATE_MODE_SOURCE=""
 
-_gate_cfg_mode() {
+# Read a dotted path out of a config file. python3 rather than sed because review.mode /
+# verify.mode are nested, and a regex over nested JSON is how you get a value from the wrong
+# object.
+_gate_cfg_get() {
   [[ -f "$1" ]] || return 1
-  local m
-  m=$(sed -n 's/.*"mode"[[:space:]]*:[[:space:]]*"\([a-zA-Z]*\)".*/\1/p' "$1" 2>/dev/null | head -1 | tr '[:upper:]' '[:lower:]')
-  case "$m" in strict|relaxed|off) printf '%s' "$m"; return 0 ;; esac
+  local v
+  v=$(python3 -c '
+import json,sys
+try:
+    cur = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+for k in sys.argv[2].split("."):
+    if not isinstance(cur, dict): sys.exit(0)
+    cur = cur.get(k)
+    if cur is None: sys.exit(0)
+print(cur)
+' "$1" "$2" 2>/dev/null)
+  [[ -n "$v" ]] || return 1
+  printf '%s' "$v"
+}
+
+_gate_norm_mode() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    strict|relaxed|merge-only|off) printf '%s' "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"; return 0 ;;
+  esac
   return 1
 }
 
-GATE_MODE=""
-if [[ -n "${AGENT_GATES_MODE:-}" ]]; then
-  case "$(printf '%s' "$AGENT_GATES_MODE" | tr '[:upper:]' '[:lower:]')" in
-    strict|relaxed|off) GATE_MODE="$(printf '%s' "$AGENT_GATES_MODE" | tr '[:upper:]' '[:lower:]')"
-                        GATE_MODE_SOURCE="env AGENT_GATES_MODE" ;;
-    *) echo "⚠️  AGENT_GATES_MODE='${AGENT_GATES_MODE}' is not one of strict|relaxed|off — ignored" >&2 ;;
-  esac
-fi
-if [[ -z "$GATE_MODE" ]] && GATE_MODE=$(_gate_cfg_mode "$_GATE_CFG_PROJECT"); then
-  GATE_MODE_SOURCE="$_GATE_CFG_PROJECT"
-fi
-if [[ -z "$GATE_MODE" ]] && GATE_MODE=$(_gate_cfg_mode "$_GATE_CFG_USER"); then
-  GATE_MODE_SOURCE="$_GATE_CFG_USER"
-fi
-if [[ -z "$GATE_MODE" ]]; then GATE_MODE="strict"; GATE_MODE_SOURCE="default"; fi
+# env > project config > user config > fallback. Used for the overall mode and for the
+# per-check overrides, so all three resolve the same way.
+_gate_resolve_mode() {   # <env-var-name> <cfg.path> <fallback> -> "<mode>|<source>"
+  local envvar="$1" path="$2" fb="$3" raw m
+  raw="$(eval "printf '%s' \"\${${envvar}:-}\"")"
+  if [[ -n "$raw" ]]; then
+    if m=$(_gate_norm_mode "$raw"); then printf '%s|env %s' "$m" "$envvar"; return 0; fi
+    echo "⚠️  ${envvar}='${raw}' is not one of strict|relaxed|merge-only|off — ignored" >&2
+  fi
+  local f
+  for f in "$_GATE_CFG_PROJECT" "$_GATE_CFG_USER"; do
+    if raw=$(_gate_cfg_get "$f" "$path") && m=$(_gate_norm_mode "$raw"); then
+      printf '%s|%s' "$m" "$f"; return 0
+    fi
+  done
+  printf '%s|%s' "$fb" "inherited"
+}
+
+_gm=$(_gate_resolve_mode AGENT_GATES_MODE mode strict)
+GATE_MODE="${_gm%%|*}"; GATE_MODE_SOURCE="${_gm##*|}"
+[[ "$GATE_MODE_SOURCE" == "inherited" ]] && GATE_MODE_SOURCE="default"
+
+# Review (reading the code) and verify (checking it actually runs) are different jobs, so
+# they need not share a severity. Unspecified inherits the overall mode.
+_grm=$(_gate_resolve_mode AGENT_GATES_REVIEW_MODE review.mode "$GATE_MODE")
+GATE_REVIEW_MODE="${_grm%%|*}"; GATE_REVIEW_SOURCE="${_grm##*|}"
+_gvm=$(_gate_resolve_mode AGENT_GATES_VERIFY_MODE verify.mode "$GATE_MODE")
+GATE_VERIFY_MODE="${_gvm%%|*}"; GATE_VERIFY_SOURCE="${_gvm##*|}"
 
 # strict_branches: project config wins over user config; fall back to the usual integration
 # branch names. Patterns are globs, so release/* works.
@@ -98,9 +132,10 @@ _gate_branch_is_strict() {
 _GATE_ON_STRICT_BRANCH=0
 if _gate_branch_is_strict "$_GATE_BRANCH"; then
   _GATE_ON_STRICT_BRANCH=1
-  if [[ "$GATE_MODE" != "strict" ]]; then
-    echo "ℹ️  branch '${_GATE_BRANCH}' is a strict branch — mode forced to strict (config said '${GATE_MODE}')"
+  if [[ "$GATE_MODE" != "strict" || "$GATE_REVIEW_MODE" != "strict" || "$GATE_VERIFY_MODE" != "strict" ]]; then
+    echo "ℹ️  branch '${_GATE_BRANCH}' is a strict branch — mode forced to strict (config said review=${GATE_REVIEW_MODE}, verify=${GATE_VERIFY_MODE})"
     GATE_MODE="strict"; GATE_MODE_SOURCE="strict_branches override"
+    GATE_REVIEW_MODE="strict"; GATE_VERIFY_MODE="strict"
   fi
 fi
 
@@ -124,15 +159,20 @@ fi
 
 # Say which mode is in effect whenever it is not the default. A gate that silently changed
 # severity would be worse than one that is strict: nobody could tell why a commit passed.
-if [[ "$GATE_MODE" != "strict" ]]; then
-  echo "ℹ️  Agent Quality Gate mode: ${GATE_MODE} (from ${GATE_MODE_SOURCE})"
+if [[ "$GATE_MODE" != "strict" || "$GATE_REVIEW_MODE" != "strict" || "$GATE_VERIFY_MODE" != "strict" ]]; then
+  echo "ℹ️  Agent Quality Gate mode: ${GATE_MODE} (from ${GATE_MODE_SOURCE}) — review=${GATE_REVIEW_MODE}, verify=${GATE_VERIFY_MODE}"
 fi
 
 RELAXED_WAIVES=0
 # In relaxed mode, "already reviewed but the conclusion is not clean" is waived; "never
 # reviewed at all" still blocks. Callers use it as:  relaxed_waive "..." || fail "..."
-relaxed_waive() {
-  [[ "$GATE_MODE" == "relaxed" ]] || return 1
+relaxed_waive() {   # relaxed_waive <message> [review|verify]
+  local _which="${2:-}"
+  case "$_which" in
+    review) [[ "$GATE_REVIEW_MODE" == "relaxed" ]] || return 1 ;;
+    verify) [[ "$GATE_VERIFY_MODE" == "relaxed" ]] || return 1 ;;
+    *)      [[ "$GATE_MODE" == "relaxed" ]] || return 1 ;;
+  esac
   echo "⚠️  GATE (relaxed): $1"
   echo "     Waived because anchored review evidence exists for this change; relaxed mode"
   echo "     does not enforce the verdict. ⛔ This is a relaxed pass, NOT an approval —"
@@ -320,6 +360,14 @@ NEEDS_REVIEW=0
 [[ "$LOGIC_FILES" -gt 1 && "$DIFF_LINES" -gt 50 ]] && NEEDS_REVIEW=1
 [[ "$MAX_SINGLE_FILE_LINES" -gt 150 ]] && NEEDS_REVIEW=1
 
+# merge-only defers review entirely to the moment work enters an integration branch.
+# ⚠️ It relaxes review only — Gate 1 (a test file must exist) and CHECK 3 (a plan) are
+# discipline at the time code is written, unrelated to when it gets reviewed.
+if [[ "$NEEDS_REVIEW" -eq 1 && "$GATE_REVIEW_MODE" == "merge-only" ]]; then
+  echo "ℹ️  CHECK 5 skipped: review mode is merge-only — deferred until this work merges into a strict branch (${_GATE_BRANCH:-?} is not one)"
+  NEEDS_REVIEW=0
+fi
+
 if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
   if [[ -d .agent && ! -d .agent/reviews ]]; then
     fail "Project has .agent/ but missing .agent/reviews/ directory"
@@ -403,7 +451,7 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
 
     REVIEW_FILE="$PASS_REVIEW_FILE"
     if [[ -n "$NEGATIVE_REVIEW_FILE" ]]; then
-      if relaxed_waive "review verdict is ISSUES/FAIL ($NEGATIVE_REVIEW_FILE)"; then
+      if relaxed_waive "review verdict is ISSUES/FAIL ($NEGATIVE_REVIEW_FILE)" review; then
         :
       else
       fail "Applicable review verdict is ISSUES/FAIL — resolve before committing"
@@ -520,6 +568,11 @@ if [[ "${SKIP_VERIFY:-0}" != "1" ]]; then
       IS_HIGH_RISK=1
       NEEDS_VERIFY=1
     fi
+  fi
+
+  if [[ "$NEEDS_VERIFY" -eq 1 && "$GATE_VERIFY_MODE" == "merge-only" ]]; then
+    echo "ℹ️  CHECK 6 skipped: verify mode is merge-only — deferred until this work merges into a strict branch (${_GATE_BRANCH:-?} is not one)"
+    NEEDS_VERIFY=0
   fi
 
   if [[ "$NEEDS_VERIFY" -eq 1 ]]; then
@@ -676,7 +729,7 @@ except Exception:
               fi
               ;;
             FAIL)
-              if relaxed_waive "verifier verdict is FAIL ($VERIFY_FILE)"; then
+              if relaxed_waive "verifier verdict is FAIL ($VERIFY_FILE)" verify; then
                 :
               else
                 fail "Verifier found real defects — fix before commit"
@@ -684,7 +737,7 @@ except Exception:
               fi
               ;;
             QUESTIONS|INCOMPLETE)
-              if relaxed_waive "verifier verdict is ${VERIFY_VERDICT} ($VERIFY_FILE)"; then
+              if relaxed_waive "verifier verdict is ${VERIFY_VERDICT} ($VERIFY_FILE)" verify; then
                 :
               else
               ACK_FILE=".agent/verify/${VERIFY_RUN_ID}.ack"

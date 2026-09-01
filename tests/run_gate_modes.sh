@@ -150,6 +150,70 @@ echo "G10: ⭐ merge 到 strict 分支 → 不再无条件放行"
     "$([[ "$out" == *"merge into strict branch"* ]] && echo true || echo false)"
   teardown )
 
+# ---- merge-only：小分支上完全不审，只在进集成分支时严格 ----
+#
+# 需求（2026-09-01）：relaxed 仍要求每次 commit 审一次，迭代时那也是负担。
+# merge-only 把审查/验收整体推迟到「工作进入集成分支」那一刻。
+# ⚠️ 它只放宽 review/verify，**不放宽** Gate 1（测试文件必须存在）与 CHECK 3（plan）——
+# 那两条是写代码时的纪律，跟审查时机无关。
+
+echo "M1: ⭐ merge-only + 小分支 + 零产物 → 放行（审查整体推迟）"
+( setup; write_user_cfg '{"mode":"merge-only"}'
+  out=$(run_gate); rc=$?
+  assert "exit 0 (实际 $rc)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+  assert "输出标明 merge-only" "$([[ "$out" == *merge-only* ]] && echo true || echo false)"
+  assert "说明审查被推迟到合并时" "$([[ "$out" == *deferred* || "$out" == *推迟* || "$out" == *merge* ]] && echo true || echo false)"
+  teardown )
+
+echo "M2: ⛔ merge-only 不放宽测试文件要求（那是写代码时的纪律）"
+( setup; write_user_cfg '{"mode":"merge-only"}'
+  # 加一个没有对应测试的源文件——Gate 1 该拦住，与审查时机无关
+  mkdir -p src && printf 'export const f = () => 1;\n' > src/thing.ts
+  for i in $(seq 1 20); do echo "// pad $i" >> src/thing.ts; done
+  git add src/thing.ts
+  out=$(run_gate); rc=$?
+  assert "缺测试文件仍被拦 (rc=$rc)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+  assert "报的是测试文件而非审查" "$([[ "$out" == *"No test for"* ]] && echo true || echo false)"
+  teardown )
+
+echo "M3: merge-only + strict 分支 → 强制 strict（边界上要全面审查）"
+( setup; write_user_cfg '{"mode":"merge-only","strict_branches":["test","master"]}'
+  git checkout -q -b test 2>/dev/null || git symbolic-ref HEAD refs/heads/test
+  out=$(run_gate); rc=$?
+  assert "在 test 分支上零产物被拦 (rc=$rc)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+  assert "说明被强制为 strict" "$([[ "$out" == *"forced to strict"* ]] && echo true || echo false)"
+  teardown )
+
+echo "M4: merge-only + merge 进 strict 分支 → 门禁生效"
+( setup; write_user_cfg '{"mode":"merge-only","strict_branches":["test","master"]}'
+  git checkout -q -b test 2>/dev/null || git symbolic-ref HEAD refs/heads/test
+  git rev-parse HEAD > .git/MERGE_HEAD
+  out=$(run_gate); rc=$?
+  assert "合并进 test 时被拦 (rc=$rc)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+  teardown )
+
+# ---- review / verify 独立分级 ----
+#
+# 审查（看代码）与验收（跑起来）是两件事，严厉度不必一致。
+echo "S1: ⭐ review 与 verify 可以各自设级别"
+( setup; write_user_cfg '{"mode":"strict","review":{"mode":"merge-only"},"verify":{"mode":"strict"}}'
+  out=$(run_gate); rc=$?
+  assert "verify 仍严格 → 零产物被拦 (rc=$rc)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+  assert "被拦的是 verify 而非 review" "$([[ "$out" == *erif* ]] && echo true || echo false)"
+  teardown )
+
+echo "S2: verify 单独放到 merge-only，review 保持 strict"
+( setup; write_user_cfg '{"mode":"strict","verify":{"mode":"merge-only"}}'
+  out=$(run_gate)
+  assert "输出不再要求 verify 产物" "$([[ "$out" != *"No verifier evidence"* ]] && echo true || echo false)"
+  teardown )
+
+echo "S3: 未指定分项时继承总 mode（向后兼容）"
+( setup; write_user_cfg '{"mode":"merge-only"}'
+  out=$(run_gate); rc=$?
+  assert "总 mode 生效于两项 (rc=$rc)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+  teardown )
+
 echo
 read -r P F < "$RESULTS_FILE"
 echo "=== PASS=$P FAIL=$F ==="
