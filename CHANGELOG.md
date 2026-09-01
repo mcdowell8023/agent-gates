@@ -2,7 +2,32 @@
 
 All notable changes to agent-gates will be documented in this file.
 
-## v2.9.1 — status 不再自己判 opencode serve，改问 oc-reaper
+## v2.9.1 — status 不再自己判 opencode serve；补上 merge 的钩子点
+
+### 🔴 Fixed — 「合并进 strict 分支要严格」此前根本没有钩子点
+
+v2.7.0 加了「merge 进 strict 分支不再跳过」，`merge-only` 档整个设计就是把审查推迟到那一刻。
+但 **git 对 merge commit 走的是 `pre-merge-commit`，不是 `pre-commit`**，而 agent-gates
+从来只装 `pre-commit`。实测（scratch 仓同时挂两个钩子）：merge 触发 `pre-merge-commit`，
+`pre-commit` 一次都没跑。
+
+后果：
+- 干净的非 ff merge **完全不受检**
+- ff merge 连 commit 都不产生，**没有任何钩子点**
+- 只有「冲突后手工 `git commit`」那条路径能走到门禁（那条确实跑 pre-commit 且 MERGE_HEAD 存在）
+
+也就是说 `merge-only` 把审查推迟到了一个不存在的检查点。
+
+修法：`gate-shim.sh` 本来就只做 `exec` 转发、不含任何 pre-commit 专属逻辑，
+所以同一份直接作为 `pre-merge-commit` 装上即可，无需第二个实现。
+`tests/run_gate_merge_hook.sh` 10 条，其中一条**刻意删掉钩子来证明空洞真实存在**
+（merge 通过且门禁零输出）。
+
+⚠️ **仍未关闭：fast-forward merge。** 它不产生 commit，git 没有对应的 pre 钩子。
+可选项是改用 `--no-ff` 合并进集成分支，或增加 `pre-push` 门禁（那会改变「何时要求审查」，
+是个设计决定，本次未做）。列为跟进项。
+
+### Fixed — status 不再自己判 opencode serve，改问 oc-reaper
 
 ### 起因：我自己的两个工具互相矛盾
 

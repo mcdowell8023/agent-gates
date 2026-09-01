@@ -117,6 +117,23 @@ agent-gates-verify-harvest <verify-run-id>
 记进产物供核对。⛔ **不要手写那个 `.md`** —— 手写 `.md` 就是手写 verdict。
 evidence 没有结论行时它会拒绝并让你去 prompt 里加要求，那是对的，别绕过。
 
+#### 🔴 v2.9.1：merge 需要单独的钩子点
+
+`merge-only` 档把审查推迟到「合并进 strict 分支」那一刻 —— 而 **git 对 merge commit 走的是
+`pre-merge-commit`，不是 `pre-commit`**。只装 `pre-commit` 的仓库，干净的 merge 完全不受检。
+
+所以每个项目要装**两个**钩子，内容是同一份 `gate-shim.sh`：
+
+```bash
+cp ~/.agent-gates/hooks/git/gate-shim.sh .githooks/pre-commit
+cp ~/.agent-gates/hooks/git/gate-shim.sh .githooks/pre-merge-commit
+chmod +x .githooks/pre-commit .githooks/pre-merge-commit
+git config core.hooksPath .githooks
+```
+
+⚠️ **fast-forward merge 仍然没有钩子点** —— 它不产生 commit。合并进集成分支时用
+`--no-ff`，否则那次合并不经过任何门禁。
+
 #### ⭐ v2.9.0：验收 = 查需求遗漏，要逐条作答
 
 CHECK 6 的目标不是再审一遍代码，是回答「**需求有没有被漏做**」。两种真实形态：
