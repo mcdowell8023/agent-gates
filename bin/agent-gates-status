@@ -205,15 +205,40 @@ fi
 # --- projects (opt-in: ~80s for ~165 repos) ---------------------------------
 # A project on the v1.9.0 shim follows the global authority automatically; a frozen copy
 # silently stays on whatever version it was initialised with.
-if [[ "$FULL" -eq 1 && -x "$INSTALL_DIR/bin/agent-gates-migrate" ]]; then
-  MIG="$("$INSTALL_DIR/bin/agent-gates-migrate" "${ROOTS[@]}" 2>/dev/null | tail -1)"
-  TO_MIG="$(printf '%s' "$MIG" | sed -n 's/.*: \([0-9]*\) to migrate.*/\1/p')"
-  SHIMMED="$(printf '%s' "$MIG" | sed -n 's/.*, \([0-9]*\) already shim.*/\1/p')"
-  if [[ "${TO_MIG:-0}" -eq 0 ]]; then
-    row "projects" "${G}${SHIMMED:-0} on shim, all current${N}"
-  else
+# Guarded on --full only, NOT on migrate being present: the hooks-sync findings are
+# independent of it, and gating them behind another tool's existence is how a report goes
+# quiet about the thing it should be loudest about.
+if [[ "$FULL" -eq 1 ]]; then
+  TO_MIG=""; SHIMMED=""
+  if [[ -x "$INSTALL_DIR/bin/agent-gates-migrate" ]]; then
+    MIG="$("$INSTALL_DIR/bin/agent-gates-migrate" "${ROOTS[@]}" 2>/dev/null | tail -1)"
+    TO_MIG="$(printf '%s' "$MIG" | sed -n 's/.*: \([0-9]*\) to migrate.*/\1/p')"
+    SHIMMED="$(printf '%s' "$MIG" | sed -n 's/.*, \([0-9]*\) already shim.*/\1/p')"
+  fi
+  # migrate only judges shim-vs-frozen. It cannot see a MISSING pre-merge-commit, and a
+  # global upgrade cannot create that file in each repo — so "on shim, all current" was a
+  # false green that hid exactly the hole v2.9.1 fixes: those repos still run no gate on a
+  # clean merge into a strict branch. Ask hooks-sync too, and never claim "all current"
+  # while it has findings.
+  HS_N=""
+  if [[ -x "$INSTALL_DIR/bin/agent-gates-hooks-sync" ]]; then
+    HS_OUT="$("$INSTALL_DIR/bin/agent-gates-hooks-sync" "${ROOTS[@]}" 2>/dev/null || true)"
+    HS_N="$(printf '%s' "$HS_OUT" | sed -n 's/.*待补 \([0-9]*\).*/\1/p' | head -1)"
+    HS_BROKEN="$(printf '%s' "$HS_OUT" | sed -n 's/.*未生效 \([0-9]*\).*/\1/p' | head -1)"
+  fi
+  if [[ "${TO_MIG:-0}" -gt 0 ]]; then
     row "projects" "${Y}${TO_MIG} frozen${N} — agent-gates-migrate --apply ${ROOTS[*]}"
     ATTENTION=1
+  elif [[ "${HS_N:-0}" -gt 0 || "${HS_BROKEN:-0}" -gt 0 ]]; then
+    row "projects" "${Y}${SHIMMED:-0} on shim · ${HS_N:-0} 缺 pre-merge-commit, ${HS_BROKEN:-0} 未生效${N} — agent-gates-hooks-sync --apply ${ROOTS[*]}"
+    ATTENTION=1
+  elif [[ -z "${HS_N:-}" ]]; then
+    # "Not checked" must not roll up into "All current." — same rule as the opencode row:
+    # scanning N repos and skipping one dimension is not a clean bill of health.
+    row "projects" "${Y}${SHIMMED:-0} on shim · 未检查 pre-merge-commit（hooks-sync 不可用，升级 agent-gates 可修）${N}"
+    ATTENTION=1
+  else
+    row "projects" "${G}${SHIMMED:-0} on shim, all current${N}"
   fi
 elif [[ "$QUIET" -eq 0 ]]; then
   row "projects" "not scanned (--full, ~80s)"

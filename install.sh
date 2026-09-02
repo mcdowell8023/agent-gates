@@ -958,6 +958,13 @@ main() {
   echo "    agent-quality-gate.sh into .githooks/ — the per-project copy"
   echo "    is NOT auto-upgraded."
   echo ""
+  echo "  🔴 v2.9.1 — back-fill the merge hook into existing projects:"
+  echo "       agent-gates-hooks-sync <root>            # dry-run first"
+  echo "       agent-gates-hooks-sync --apply <root>"
+  echo "    git runs pre-merge-commit for a merge commit, not pre-commit. A global"
+  echo "    upgrade cannot create that NEW file in each repo, so until you run this,"
+  echo "    existing projects run no gate at all on a clean merge into test/master."
+  echo ""
 }
 
 main "$@"

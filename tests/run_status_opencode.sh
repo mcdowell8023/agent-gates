@@ -167,6 +167,36 @@ echo "O5: ⭐ opencode 行只能有一条（重复块曾同时输出新旧两行
   assert "恰好 1 行 (实际 $n)" "$([[ "$n" == "1" ]] && echo true || echo false)"
   teardown )
 
+echo "O8: ⭐ --full 缺 pre-merge-commit 时不能报「all current」"
+# migrate 只判 shim/frozen，看不见 pre-merge-commit。老项目只有 pre-commit 时
+# --full 仍报 all current，而同一仓库 merge --no-ff 进 strict 分支完全不受检 ——
+# 一个直接把本版要修的洞重新藏起来的假绿。
+( setup
+  PROJ=$(mktemp -d); mkdir -p "$PROJ/p1/.githooks"
+  git -C "$PROJ/p1" init -q 2>/dev/null
+  printf '#!/usr/bin/env bash\n# agent-gates per-project gate shim\nexec "$HOME/.agent-gates/hooks/git/agent-quality-gate.sh" "$@"\n' > "$PROJ/p1/.githooks/pre-commit"
+  chmod +x "$PROJ/p1/.githooks/pre-commit"
+  git -C "$PROJ/p1" config core.hooksPath .githooks
+  # 让 hooks-sync 可被 status 找到
+  mkdir -p "$AGENT_GATES_DIR/bin" "$AGENT_GATES_DIR/hooks/git"
+  cp "$SCRIPT_DIR/../bin/agent-gates-hooks-sync" "$AGENT_GATES_DIR/bin/"
+  cp "$SCRIPT_DIR/../hooks/git/gate-shim.sh" "$AGENT_GATES_DIR/hooks/git/"
+  out=$(bash "$STATUS" --no-network --full "$PROJ" 2>&1)
+  assert "点出缺 pre-merge-commit 或提示 hooks-sync" "$([[ "$out" == *hooks-sync* || "$out" == *pre-merge-commit* ]] && echo true || echo false)"
+  assert "⛔ 不得报 all current" "$([[ "$out" != *"all current"* ]] && echo true || echo false)"
+  rm -rf "$PROJ"; teardown )
+
+echo "O9: --full 但 hooks-sync 不可用 → 说「未检查」且不得汇总成 All current"
+( setup
+  PROJ=$(mktemp -d); mkdir -p "$PROJ/p1/.githooks"; git -C "$PROJ/p1" init -q 2>/dev/null
+  printf '#!/usr/bin/env bash\n# agent-gates per-project gate shim\nexit 0\n' > "$PROJ/p1/.githooks/pre-commit"
+  chmod +x "$PROJ/p1/.githooks/pre-commit"; git -C "$PROJ/p1" config core.hooksPath .githooks
+  # 刻意不放 hooks-sync
+  out=$(bash "$STATUS" --no-network --full "$PROJ" 2>&1); rc=$?
+  assert "说明未检查" "$([[ "$out" == *未检查* ]] && echo true || echo false)"
+  assert "⛔ 不汇总成 All current (rc=$rc)" "$([[ "$out" != *"All current"* && $rc -ne 0 ]] && echo true || echo false)"
+  rm -rf "$PROJ"; teardown )
+
 echo
 read -r P F < "$RESULTS_FILE"
 echo "=== PASS=$P FAIL=$F ==="

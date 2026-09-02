@@ -146,6 +146,83 @@ agent 在 session 内开发时，agent-gates 自动：
 
 ## 新特性
 
+### v2.9.1 — merge 门禁此前没有可运行的钩子点
+
+`merge-only` 档把审查推迟到「合并进集成分支」那一刻。而 git 对 merge commit 走的是
+**`pre-merge-commit`**，不是 `pre-commit`，agent-gates 从来只装 `pre-commit` ——
+所以干净的 merge 完全不受检，那个推迟指向的是一个**不存在的检查点**。
+（scratch 仓同时挂两个钩子实测确认。）
+
+项目现在需要**两个**钩子（内容同为 `gate-shim.sh`）。`agent-gates-hooks-sync` 批量补到
+已部署仓库，并会报出「`core.hooksPath` 指向的钩子文件不存在」这种状态 ——
+git 会静默跳过它，而 `git config` 看着完全正常。
+
+⚠️ **fast-forward merge 仍然没有钩子点**（它不产生 commit）。合并进集成分支请用 `--no-ff`。
+
+同一版还有两件：`agent-gates-status` 不再自己复制回收判据，改为向 `oc-reaper` 询问并转述
+（此前两者已经互相矛盾 —— status 建议跑 oc-reaper，跑了却是 0 reapable）；
+以及 `$VAR` 紧跟中文字符（UTF-8 locale 下 exit 127，即使变量已赋值）现在由
+`tests/run_shell_lint.sh` 作为**类别**拦住，而不是一处一处地修。
+
+### v2.9.0 — 验收是「查有没有漏做」，不是第二次代码审查
+
+CHECK 6 此前退化成了第二次代码审查：触发条件一样、产物形态一样（都是「让模型读代码」）。
+但真正要命的失败是**漏做** —— 后端接口有了而前端一行没写，或者需求 5 条只做了 4 条 ——
+而漏做**在 diff 里不留痕迹**。CHECK 5 读 diff，看到的每一行都是对的。实现者自己写的测试
+同样失明：它没做的部分自然没写测试。**测试全绿和需求少一半可以同时成立。**
+
+一切从**代码**派生的清单（diff / 测试 / 覆盖率）对漏做结构性无效，只有从**需求**派生的
+才行 —— 而需求清单本来就在盘上（`.agent/plans/`、`features/*.feature`），CHECK 6 从不读它。
+
+验收产物现在带逐条矩阵：
+
+```
+REQ_SOURCE: .agent/plans/2026-09-01-export.md
+REQ_BLOCK_SHA256: 3f2a…
+REQ_ITEMS: 2
+REQ_ITEM: 1 | COVERED | api:src/export.ts:18, ui:~src/List.vue:88 | 按钮既有，本次补接口
+REQ_ITEM: 2 | MISSING | - | 无导出路由，前端也没有导出入口
+```
+
+门禁强制的是**形式**，不是实质：条目数由需求源数出来（模型只填每条的处置、无权决定有几条）；
+条目块被哈希钉住，事后改不了；不带 `~` 的引用必须落在本次改动内；判定由条目推导而非采信
+模型那行；证据按层面标注，「只做后端」藏不住。
+
+**目标不是「无法绕过」，是「无法静默绕过」。** 每个逃逸口（`NA` / `DEFERRED` /
+`PREEXISTING` / 全 `~` 证据）都计数并打印。「这条证据是否真完成了这条需求」是语义判断，
+shell 做不到，那留给异构验收模型。
+
+触发条件：`verify.require_matrix` 为 `auto`（默认）**且**仓库里真有带验收章节的需求文档 ——
+所以写一个 `## 验收标准` 章节就是启用它的动作。`agent-gates-verify-harvest --emit-prompt`
+生成逐条提问；模型没答满每一条时 harvest **拒绝**产出产物。
+
+`agent-gates-plan-review` 补上 CHECK 3 的同类缺口：它此前提示你运行
+`agent-gates-review --plan`，而那个 flag 在任何地方都不存在，于是手写三行标记注释成了
+唯一出路 —— 而门禁只检查它们在不在。
+
+### v2.8.0 — 新增 `merge-only`，review / verify 各自分级
+
+`relaxed` 仍要求每次 commit 审一次，迭代时那是实打实的成本。`merge-only` 把审查和验收
+**整体推迟**到工作进入 strict 分支那一刻。`review.mode` 与 `verify.mode` 可以不同。
+
+### v2.7.0 — 分级：迭代时宽松，进集成分支时严格
+
+一个改动被反复审了 5 轮，审查而不是开发成了卡点。门禁此前把特性分支上的每次 commit
+和合并进 `test`/`master` 同等对待。
+
+| mode | 特性分支上的 commit | 合并进 strict 分支 |
+|---|---|---|
+| `strict`（默认） | 强制结论 | 强制 |
+| `relaxed` | 必须有产物，但不看结论 | 强制 strict |
+| `merge-only` | 跳过 CHECK 5/6 | 强制 strict |
+| `off` | 什么都不检查 —— **且会大声说出来** | 强制 strict |
+
+配置在 `.agent/gates.json`（项目级）或 `~/.agent-gates/gates.json`（用户级），
+env `AGENT_GATES_MODE` 优先于两者。`strict_branches` 默认 `test` / `master` / `main`，
+支持 glob。合并进 strict 分支不再被跳过。
+
+⚠️ `relaxed` 不等于 `off`：「审一次、不看结果」仍然要求审查真的发生过、且锚定当前 diff。
+
 ### v2.6.0 — 补上 dispatch 与 CHECK 6 之间的断链
 
 `hetero_dispatch` 只写 `evidence.json` + `dispatch.json`，而 CHECK 6 读
@@ -324,6 +401,14 @@ per-project 门禁现在是**瘦 shim**,委派全局权威 gate,所以 `install.
 | `agent-gates-config-migrate` | 迁移 v1 `review-capability.json` → v2 `hetero-check.json`（v2.0.0） |
 | `agent-gates-migrate [--apply] <root>...` | 批量把老门禁迁到 v1.9.0 shim |
 | `agent-gates-version [<root>...]` | 查看全局门禁版本;列各项目 shim/stale 状态 |
+| ⬆️ **每次升级后** | `agent-gates-hooks-sync --apply <root>` —— 薄 shim 只让**已存在的文件**跟随全局版本，而 `pre-merge-commit` 是**新文件**，全局升级无法让它在每个仓库长出来（v2.9.1） |
+| `agent-gates-status [--full]` | 一条命令看全貌：版本、skills、门禁档位、serve、仓库同步 |
+| `agent-gates-hooks-sync [--apply] <root>...` | 给已部署项目补 `pre-merge-commit`；报出「配了门禁但实际没在跑」的仓库（v2.9.1） |
+| `agent-gates-plan-review <plan.md> --result <审查.md> --model <p/m>` | 把已完成的计划审查记成 CHECK 3 标记；锚点由工具算，⛔ 绝不代填判定（v2.9.0） |
+| `agent-gates-verify-harvest <run-id> [--req-source <f>] [--emit-prompt]` | 把 dispatch 产出收割成 CHECK 6 产物；生成逐条提问；模型漏答则拒绝（v2.6.0/v2.9.0） |
+| `agent-gates-verify-import <body.md> --imported-model <p/m>` | 导入在别处完成的验收；锚点在此计算，绝不接受外部传入（v2.5.0） |
+| `agent-gates-plan-decision skip --reason "<理由>" --topic <名>` | 为 CHECK 3 记录一个显式的「不需要计划」决定 |
+| `tests/run-all.sh [-k <pat>]` | 跑全部测试文件；`PASS=0` 与空跑都判红，退出码优先于尾行文本（v2.9.1） |
 
 ### 约定：`.agent/` 目录
 
@@ -333,7 +418,8 @@ per-project 门禁现在是**瘦 shim**,委派全局权威 gate,所以 `install.
 ├── GATES.md         # 质量门控清单（git 跟踪）
 ├── reviews/         # 交叉审查证据文件（git 跟踪，CHECK 5）
 ├── verify/          # Verifier 证据 + dispatch artifacts + .ack（v2.0.0，CHECK 6）
-├── plans/           # 实现计划（git 跟踪）
+├── plans/           # 实现计划 + PLAN_REVIEW 标记（git 跟踪，CHECK 3）
+├── gates.json       # 项目级档位：strict / relaxed / merge-only / off（v2.7.0）
 └── memory/          # 会话记忆（.gitignored）
 ```
 
@@ -361,11 +447,29 @@ pre-commit hook 只对 agent session（`AGENT_MODE=1`）生效。人类开发者
 
 **CHECK 2 — BDD Scenarios**（仅 Path A）：新增源码文件要求至少存在一个 `features/*.feature` 文件。
 
+**CHECK 3 — 计划 / 设计决定**：非 trivial 改动需要 `.agent/plans/` 里一份带 `PLAN_REVIEW`
+标记的计划，或者一份工具生成的 `.skip.md`。标记由 `agent-gates-plan-review` 写入，而且是
+**真被读取**的：锚点必须仍然对得上计划条目文本、记录的结论必须是 PASS、在有更好条件的机器上
+同族（`L0`）的计划审查会被拒。旧标记（无锚点）通过但会告警。
+
 **Gate 1 — Test Correspondence**：每个新源码文件必须有对应的测试文件。
 
 **Gate 2 — Cross-Review Evidence**：当 commit 超过阈值（`LOGIC_FILES > 1 AND DIFF > 50` 或 `SINGLE_FILE > 150 行`），要求 `.agent/reviews/` 内存在 `VERDICT: PASS` 的审查文件。
 
 **CHECK 6 — Verifier Evidence**（v2.0.0）：与 Gate 2 阈值相同，加高风险路径检测。要求 `.agent/verify/*.md` 含 `VERIFY_VERDICT`。PASS → 放行；FAIL → 阻断（先修复）；QUESTIONS/INCOMPLETE → 需要 `.ack` 文件中的 `USER_ACK: PROCEED`（人工确认，绑定 diff-hash）。高风险路径 + EVIDENCE_ONLY 能力 → 强制 INCOMPLETE（必须走 FULL 黑盒通道）。`SKIP_VERIFY=1` 紧急逃生。
+
+**CHECK 6 — 需求矩阵**（v2.9.0）：当仓库里存在带验收章节的需求文档时，验收产物必须
+**逐条**回答每个需求项。门禁自己数条目数、重算条目块哈希、检查每条 `COVERED` 的引用是否
+落在本次改动内（`~` 前缀表示既有代码）、由条目推导判定，并打印所有逃逸口的使用计数。
+详见上文 v2.9.0。
+
+**钩子要装两个**（v2.9.1）：git 对 merge commit 走 `pre-merge-commit`、其他走 `pre-commit`。
+把同一份 `gate-shim.sh` 装成两个，否则合并进集成分支时完全不受检。
+`agent-gates-hooks-sync` 给已有项目补。ff merge 没有钩子点 —— 用 `--no-ff`。
+
+**档位**（v2.7.0/v2.8.0）：`strict` / `relaxed` / `merge-only` / `off`，可按项目、
+也可 review 与 verify 分别配置。详见上文 v2.7.0。`agent-gates-status` 会打印当前生效档位 ——
+否则一个被关掉的门禁在有人发现「从来没审过」之前是完全不可见的。
 
 ### Memory 持久化提醒
 

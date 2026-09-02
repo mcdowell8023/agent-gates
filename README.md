@@ -146,6 +146,96 @@ While the agent works inside a session, agent-gates automatically:
 
 ## What's New
 
+### v2.9.1 — the merge gate had no hook to run in
+
+`merge-only` mode defers review to "when this merges into an integration branch". Git runs
+**`pre-merge-commit`** for a merge commit, not `pre-commit`, and agent-gates only ever
+installed `pre-commit` — so a clean merge ran no gate at all, and the deferral pointed at a
+checkpoint that did not exist. Verified with a scratch repo carrying both hooks.
+
+Projects now need **two** hooks (same `gate-shim.sh` in both). `agent-gates-hooks-sync`
+back-fills them across already-deployed repos, and reports the state where
+`core.hooksPath` points at a hook file that does not exist — git skips that silently while
+`git config` reads perfectly correct.
+
+⚠️ **Fast-forward merges still have no hook point** (they create no commit). Use `--no-ff`
+when merging into an integration branch.
+
+Also in this release: `agent-gates-status` no longer reimplements the reap criteria — it
+asks `oc-reaper` and quotes its answer, because the two had drifted into contradicting each
+other; and a `$VAR` immediately followed by a CJK character (which exits 127 under a UTF-8
+locale, even when the variable is set) is now caught by `tests/run_shell_lint.sh` as a class
+rather than one instance at a time.
+
+### v2.9.0 — verification means "did anything get missed", not a second code review
+
+CHECK 6 had degenerated into a second code review: same trigger, same artifact shape
+("let a model read the code"). But the failures that matter are **omissions** — the backend
+endpoint exists and the frontend was never written, or 4 of 5 requirements shipped — and an
+omission leaves no trace in the diff. CHECK 5 reads the diff and sees only correct code. The
+implementer's own tests are just as blind: it did not build the thing, so it did not write
+the test. **"All green" and "half the requirement missing" coexist happily.**
+
+Every checklist derived from CODE (diff, tests, coverage) is structurally blind to omission.
+Only one derived from the REQUIREMENT can catch it — and the requirement list was already on
+disk (`.agent/plans/`, `features/*.feature`); CHECK 6 simply never read it.
+
+Verify artifacts now carry a per-requirement matrix:
+
+```
+REQ_SOURCE: .agent/plans/2026-09-01-export.md
+REQ_BLOCK_SHA256: 3f2a…
+REQ_ITEMS: 2
+REQ_ITEM: 1 | COVERED | api:src/export.ts:18, ui:~src/List.vue:88 | button existed, API added here
+REQ_ITEM: 2 | MISSING | - | no export route, no export entry point in the UI
+```
+
+The gate enforces **form**, never substance: the item count comes from the requirement source
+(the model fills a disposition per item but cannot decide how many items exist); the item
+block is hashed so items cannot be edited afterwards; a citation without `~` must land inside
+this change; the verdict is derived from the items rather than read from the model's own line;
+evidence is surface-tagged so "backend only" cannot hide.
+
+**The goal is not "impossible to bypass" — it is "impossible to bypass silently."** Every
+escape hatch (`NA` / `DEFERRED` / `PREEXISTING` / all-`~` evidence) is counted and printed.
+"Does this evidence actually complete this requirement" is a semantic judgment shell cannot
+make; that stays with the heterogeneous verifier.
+
+Enforced when `verify.require_matrix` is `auto` (the default) **and** a requirement doc with
+an acceptance section exists — so writing a `## 验收标准` / `## Acceptance` section is what
+opts a repo in. `agent-gates-verify-harvest --emit-prompt` generates the per-item questions;
+harvest **refuses** to produce an artifact if the model did not answer every item.
+
+`agent-gates-plan-review` closes the matching gap on CHECK 3: it used to tell you to run
+`agent-gates-review --plan`, a flag that existed nowhere, so hand-writing three marker
+comments was the only way to satisfy it — and the gate only checked they were present.
+
+### v2.8.0 — `merge-only`, and review/verify graded separately
+
+`relaxed` still wants a review per commit, which is a real cost while iterating.
+`merge-only` defers review and verification entirely until the work enters a strict branch.
+`review.mode` and `verify.mode` can differ.
+
+### v2.7.0 — grading: permissive while iterating, strict at the boundary
+
+One change went through five review rounds and review, not development, became the
+bottleneck. The gate had treated every commit on a feature branch with the same severity as
+a merge into `test`/`master`.
+
+| mode | on a feature branch | merging into a strict branch |
+|---|---|---|
+| `strict` (default) | verdicts enforced | enforced |
+| `relaxed` | evidence must exist; verdict not enforced | forced strict |
+| `merge-only` | CHECK 5/6 skipped | forced strict |
+| `off` | nothing checked — **and it says so loudly** | forced strict |
+
+Configured in `.agent/gates.json` (project) or `~/.agent-gates/gates.json` (user); env
+`AGENT_GATES_MODE` wins over both. `strict_branches` defaults to `test`, `master`, `main` and
+accepts globs. A merge into a strict branch is no longer skipped.
+
+⚠️ `relaxed` is not `off`: "reviewed once, outcome not enforced" still requires a review to
+have happened and to be anchored to this diff.
+
 ### v2.6.0 — the missing link between dispatch and CHECK 6
 
 `hetero_dispatch` wrote only `evidence.json` + `dispatch.json`, while CHECK 6 reads
@@ -368,7 +458,15 @@ The per-project gate is now a **thin shim** that delegates to the global authori
 | `agent-gates-verify-strip` | Pipe filter: strip USER_ACK markers from verifier output (v2.0.0) |
 | `agent-gates-config-migrate` | Migrate v1 `review-capability.json` → v2 `hetero-check.json` (v2.0.0) |
 | `agent-gates-migrate [--apply] <root>...` | bulk-migrate old per-project gates to the v1.9.0 shim |
+| ⬆️ **after any upgrade** | `agent-gates-hooks-sync --apply <root>` — the shim makes existing files follow the global version, but `pre-merge-commit` is a NEW file a global upgrade cannot create per repo (v2.9.1) |
 | `agent-gates-version [<root>...]` | show the global gate version; list per-project shim/stale status |
+| `agent-gates-status [--full]` | one command, the whole picture: version, skills, gate mode, serves, repo sync |
+| `agent-gates-hooks-sync [--apply] <root>...` | back-fill `pre-merge-commit` into deployed projects; report gates that are configured but not actually running (v2.9.1) |
+| `agent-gates-plan-review <plan.md> --result <review.md> --model <p/m>` | record a completed plan review as CHECK 3 markers; anchor computed, verdict never invented (v2.9.0) |
+| `agent-gates-verify-harvest <run-id> [--req-source <f>] [--emit-prompt]` | turn dispatch output into the CHECK 6 artifact; emit per-requirement questions; refuse on unanswered items (v2.6.0/v2.9.0) |
+| `agent-gates-verify-import <body.md> --imported-model <p/m>` | land an externally-completed verification; anchors computed here, never passed in (v2.5.0) |
+| `agent-gates-plan-decision skip --reason "<r>" --topic <t>` | record an explicit "no plan needed" decision for CHECK 3 |
+| `tests/run-all.sh [-k <pat>]` | run every test file; `PASS=0` and an empty run both count as failure, exit code beats the last printed line (v2.9.1) |
 
 ### Convention: `.agent/` Directory
 
@@ -378,7 +476,8 @@ The per-project gate is now a **thin shim** that delegates to the global authori
 ├── GATES.md         # Quality gates checklist (git tracked)
 ├── reviews/         # Cross-review evidence files (git tracked, CHECK 5)
 ├── verify/          # Verifier evidence + dispatch artifacts + .ack (v2.0.0, CHECK 6)
-├── plans/           # Implementation plans (git tracked)
+├── plans/           # Implementation plans + PLAN_REVIEW markers (git tracked, CHECK 3)
+├── gates.json       # Per-project mode: strict / relaxed / merge-only / off (v2.7.0)
 └── memory/          # Session memory (.gitignored)
 ```
 
@@ -406,11 +505,34 @@ The pre-commit hook ONLY fires for agent sessions (`AGENT_MODE=1`). Human develo
 
 **CHECK 2 — BDD Scenarios** (Path A only): New source files require at least one `features/*.feature` file.
 
+**CHECK 3 — Plan / design decision**: A non-trivial change needs either a plan in
+`.agent/plans/` carrying `PLAN_REVIEW` markers, or a tool-generated `.skip.md`. The markers
+are written by `agent-gates-plan-review` and are read, not just counted: the anchor must still
+match the plan's item text, the recorded verdict must be PASS, and a same-family (`L0`) plan
+review is refused on a machine that can do better. Legacy markers without an anchor pass with
+a warning.
+
 **Gate 1 — Test Correspondence**: Every new source file must have a corresponding test file.
 
 **Gate 2 — Cross-Review Evidence**: When commits exceed threshold (`LOGIC_FILES > 1 AND DIFF > 50` OR `SINGLE_FILE > 150 lines`), requires a review file in `.agent/reviews/` with `VERDICT: PASS`.
 
 **CHECK 6 — Verifier Evidence** (v2.0.0): Same threshold as Gate 2, plus high-risk path detection. Requires `.agent/verify/*.md` with `VERIFY_VERDICT`. PASS → proceed; FAIL → block (fix first); QUESTIONS/INCOMPLETE → requires `USER_ACK: PROCEED` in `.ack` file (human confirmation, diff-hash bound). High-risk + EVIDENCE_ONLY capability → forced INCOMPLETE (must use FULL black-box channel). `SKIP_VERIFY=1` bypass for emergencies.
+
+**CHECK 6 — Requirement matrix** (v2.9.0): when a requirement source with an acceptance
+section exists, the verify artifact must answer **every** requirement item. The gate counts
+the items itself, recomputes the item-block hash, checks that each `COVERED` citation lands
+inside this change (a `~` prefix marks pre-existing code), derives the verdict from the items,
+and prints the count of every escape hatch used. See v2.9.0 above.
+
+**Hooks — two of them** (v2.9.1): git runs `pre-merge-commit` for a merge commit and
+`pre-commit` for everything else. Install the same `gate-shim.sh` as both, or a clean merge
+into your integration branch runs no gate at all. `agent-gates-hooks-sync` back-fills
+existing projects. Fast-forward merges have no hook point — use `--no-ff`.
+
+**Modes** (v2.7.0/v2.8.0): `strict` / `relaxed` / `merge-only` / `off`, configurable per
+project and per side (review vs verify). See v2.7.0 above. `agent-gates-status` prints the
+effective mode, because a disabled gate is otherwise invisible until someone notices nothing
+was ever reviewed.
 
 ### Memory Persistence Reminder
 

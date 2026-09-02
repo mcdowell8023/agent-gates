@@ -56,5 +56,17 @@ cd <agent-gates checkout> && ./install.sh --local     # 装当前 checkout（含
 所以在本地分支上跑它会「显示新版本、装旧代码」，还照样打印一串 `✓ Installed:`。
 要装本地改动必须用 `--local`。
 
-项目侧不用管：v1.9.0 起每个项目的 `.githooks/agent-quality-gate.sh` 是薄 shim，
-自动跟随全局版本，**不需要逐个 re-init**。
+项目侧**大部分**不用管：v1.9.0 起每个项目的 `.githooks/agent-quality-gate.sh` 是薄 shim，
+自动跟随全局版本，不需要逐个 re-init。
+
+🔴 **但升级后必须补一次 `pre-merge-commit`（v2.9.1）。** 薄 shim 只让**已存在的文件**跟随
+全局版本；`pre-merge-commit` 是一个**新文件**，全局升级不可能让它在每个仓库里长出来。
+不补的话，存量项目 `git merge` 进 `test`/`master` 时门禁完全不跑：
+
+```bash
+~/.agent-gates/bin/agent-gates-hooks-sync ~/wb/projects        # 默认 dry-run，先看清单
+~/.agent-gates/bin/agent-gates-hooks-sync --apply ~/wb/projects
+```
+
+它同时会报出「配了 `core.hooksPath` 但那个钩子文件不存在」的仓库 ——
+git 会静默跳过，而 `git config` 看着完全正常。`agent-gates-status --full` 也会带上这一项。
