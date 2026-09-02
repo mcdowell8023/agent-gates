@@ -204,6 +204,24 @@ echo "S16: ⭐ 按文档装好的 husky 项目必须被认成自己人，而不�
   assert "⛔ 未改写原 .husky/pre-commit" "$(grep -q 'lint-staged' "$d/.husky/pre-commit" && echo true || echo false)"
   teardown )
 
+echo "S17: ⭐ 已部署但 core.hooksPath 丢了 → 整仓不受检，必须报出来"
+# 触发极便宜：git config --unset core.hooksPath，或 fresh clone 没本地 init。
+# 而 migrate 仍按 .githooks/agent-quality-gate.sh 记 already shim，
+# 于是 status --full 会落到 all current —— 普通 commit 和 merge 都不跑门禁却报绿。
+( setup; mk_repo a githooks
+  git -C "$ROOT/a" config --unset core.hooksPath
+  out=$(bash "$SYNC" "$ROOT" 2>&1); rc=$?
+  assert "报出该仓库" "$([[ "$out" == *"$ROOT/a"* ]] && echo true || echo false)"
+  assert "说明已部署但未启用" "$([[ "$out" == *未启用* || "$out" == *未生效* ]] && echo true || echo false)"
+  assert "退出码非 0 (rc=$rc)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+  teardown )
+
+echo "S18: 完全没部署痕迹的仓库仍然不报（避免噪音）"
+( setup; mk_repo e nogate
+  out=$(bash "$SYNC" "$ROOT" 2>&1)
+  assert "不提这个仓库" "$([[ "$out" != *"$ROOT/e"* ]] && echo true || echo false)"
+  teardown )
+
 echo
 read -r P F < "$RESULTS_FILE"
 echo "=== PASS=$P FAIL=$F ==="

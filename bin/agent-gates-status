@@ -244,7 +244,17 @@ if [[ "$FULL" -eq 1 ]]; then
     row "projects" "${Y}${SHIMMED:-0} on shim · 未检查 pre-merge-commit（hooks-sync 不可用或无输出）${N}"
     ATTENTION=1
   elif [[ "$HS_RC" -ne 0 ]]; then
-    row "projects" "${Y}${SHIMMED:-0} on shim · ${HS_SUMMARY}${N} — agent-gates-hooks-sync --apply ${ROOTS[*]}"
+    # Only suggest --apply when hooks-sync actually has something it will WRITE. It refuses
+    # to touch foreign hooks, lefthook team files, and repos whose gate is merely switched
+    # off — for those, running --apply exits 1 again and changes nothing. Appending the
+    # command unconditionally is the same defect as the opencode row: a status line handing
+    # out an action that does not match the tool's real behaviour.
+    HS_TODO="$(printf '%s' "$HS_SUMMARY" | sed -n 's/.*待补 \([0-9]*\).*/\1/p' | head -1)"
+    if [[ "${HS_TODO:-0}" -gt 0 ]]; then
+      row "projects" "${Y}${SHIMMED:-0} on shim · ${HS_SUMMARY}${N} — agent-gates-hooks-sync --apply ${ROOTS[*]}"
+    else
+      row "projects" "${Y}${SHIMMED:-0} on shim · ${HS_SUMMARY}${N}（需人工处理，详见 agent-gates-hooks-sync 输出）"
+    fi
     ATTENTION=1
   else
     row "projects" "${G}${SHIMMED:-0} on shim, all current · ${HS_SUMMARY}${N}"

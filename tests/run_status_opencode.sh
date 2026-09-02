@@ -238,6 +238,36 @@ echo "O11: 只是 base hook 丢执行位时，不得误报成「缺 pre-merge-co
   assert "projects 行仍标为需处理" "$([[ "$row" != *"all current"* ]] && echo true || echo false)"
   rm -rf "$PROJ"; teardown )
 
+echo "O12: ⭐ 只有 foreign 时不得推荐 --apply（hooks-sync 明说只报不改）"
+# 这是同一形状在本会话里第三次出现：状态命令给出一个不对应真实处置路径的统一动作。
+# 用户照着跑 --apply 仍然退出 1 —— 和刚给 opencode 行修掉的是一回事。
+( setup
+  PROJ=$(mktemp -d); mkdir -p "$PROJ/p1/.githooks"; git -C "$PROJ/p1" init -q 2>/dev/null
+  printf '#!/usr/bin/env bash\n# agent-gates per-project gate shim\nexit 0\n' > "$PROJ/p1/.githooks/pre-commit"
+  printf '#!/bin/sh\nexit 0\n' > "$PROJ/p1/.githooks/pre-merge-commit"
+  chmod +x "$PROJ/p1/.githooks/"*; git -C "$PROJ/p1" config core.hooksPath .githooks
+  mkdir -p "$AGENT_GATES_DIR/bin" "$AGENT_GATES_DIR/hooks/git"
+  cp "$SCRIPT_DIR/../bin/agent-gates-hooks-sync" "$AGENT_GATES_DIR/bin/"
+  cp "$SCRIPT_DIR/../hooks/git/gate-shim.sh" "$AGENT_GATES_DIR/hooks/git/"
+  out=$(bash "$STATUS" --no-network --full "$PROJ" 2>&1)
+  row=$(proj_row "$out")
+  assert "⛔ 不推荐 --apply (行: ${row:-<空>})" "$([[ "$row" != *"--apply"* ]] && echo true || echo false)"
+  assert "仍逐字带上 hooks-sync 的汇总" "$([[ "$row" == *跳过* ]] && echo true || echo false)"
+  rm -rf "$PROJ"; teardown )
+
+echo "O13: 确有可自动补的项时才推荐 --apply"
+( setup
+  PROJ=$(mktemp -d); mkdir -p "$PROJ/p1/.githooks"; git -C "$PROJ/p1" init -q 2>/dev/null
+  printf '#!/usr/bin/env bash\n# agent-gates per-project gate shim\nexit 0\n' > "$PROJ/p1/.githooks/pre-commit"
+  chmod +x "$PROJ/p1/.githooks/pre-commit"; git -C "$PROJ/p1" config core.hooksPath .githooks
+  mkdir -p "$AGENT_GATES_DIR/bin" "$AGENT_GATES_DIR/hooks/git"
+  cp "$SCRIPT_DIR/../bin/agent-gates-hooks-sync" "$AGENT_GATES_DIR/bin/"
+  cp "$SCRIPT_DIR/../hooks/git/gate-shim.sh" "$AGENT_GATES_DIR/hooks/git/"
+  out=$(bash "$STATUS" --no-network --full "$PROJ" 2>&1)
+  row=$(proj_row "$out")
+  assert "推荐 --apply (行: ${row:-<空>})" "$([[ "$row" == *"--apply"* ]] && echo true || echo false)"
+  rm -rf "$PROJ"; teardown )
+
 echo
 read -r P F < "$RESULTS_FILE"
 echo "=== PASS=$P FAIL=$F ==="
