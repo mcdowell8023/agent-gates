@@ -33,7 +33,10 @@ for a in "$@"; do
   esac
 done
 
-SHIM_SRC="${AGENT_GATES_SHIM_SRC:-$HOME/.agent-gates/hooks/git/gate-shim.sh}"
+# 认 AGENT_GATES_DIR，和仓库里其他命令一致。此前硬写 $HOME/.agent-gates 会让
+# 隔离了 HOME 的调用（测试、非默认安装位置）拿不到 shim 而退出 69 ——
+# 表现成「工具不可用」，掩盖了真实结论。
+SHIM_SRC="${AGENT_GATES_SHIM_SRC:-${AGENT_GATES_DIR:-$HOME/.agent-gates}/hooks/git/gate-shim.sh}"
 SHIM_MARKER="agent-gates per-project gate shim"
 # Ownership recognition must cover the DOCUMENTED husky form too: init-project-gates tells
 # users to put `# AGENT_QUALITY_GATE` + `.githooks/agent-quality-gate.sh` into

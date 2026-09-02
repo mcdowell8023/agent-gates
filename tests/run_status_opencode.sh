@@ -92,6 +92,9 @@ fake_reaper_garbage() {
 run_status() { bash "$STATUS" --no-network 2>&1; }
 # 只取标签就是 opencode 的那一行 —— `skills` 行里也含 "opencode"，宽匹配会把它捞进来。
 oc_row() { printf '%s\n' "$1" | grep -E '^[[:space:]]+opencode[[:space:]]' || true; }
+# 断言必须落在具体那一行。O10/O11 第一版断言的是整篇输出里没有 "All current"，
+# 而本机真有 serve 时 opencode 行就会让整体变成 needs attention —— 两条都空过了。
+proj_row() { printf '%s\n' "$1" | grep -E '^[[:space:]]+projects[[:space:]]' || true; }
 
 echo "=== agent-gates-status opencode row ==="
 echo
@@ -183,7 +186,7 @@ echo "O8: ⭐ --full 缺 pre-merge-commit 时不能报「all current」"
   cp "$SCRIPT_DIR/../hooks/git/gate-shim.sh" "$AGENT_GATES_DIR/hooks/git/"
   out=$(bash "$STATUS" --no-network --full "$PROJ" 2>&1)
   assert "点出缺 pre-merge-commit 或提示 hooks-sync" "$([[ "$out" == *hooks-sync* || "$out" == *pre-merge-commit* ]] && echo true || echo false)"
-  assert "⛔ 不得报 all current" "$([[ "$out" != *"all current"* ]] && echo true || echo false)"
+  assert "⛔ projects 行不得报 all current" "$([[ "$(proj_row "$out")" != *"all current"* ]] && echo true || echo false)"
   rm -rf "$PROJ"; teardown )
 
 echo "O9: --full 但 hooks-sync 不可用 → 说「未检查」且不得汇总成 All current"
@@ -194,7 +197,45 @@ echo "O9: --full 但 hooks-sync 不可用 → 说「未检查」且不得汇总�
   # 刻意不放 hooks-sync
   out=$(bash "$STATUS" --no-network --full "$PROJ" 2>&1); rc=$?
   assert "说明未检查" "$([[ "$out" == *未检查* ]] && echo true || echo false)"
-  assert "⛔ 不汇总成 All current (rc=$rc)" "$([[ "$out" != *"All current"* && $rc -ne 0 ]] && echo true || echo false)"
+  assert "⛔ projects 行不说 all current" "$([[ "$(proj_row "$out")" != *"all current"* ]] && echo true || echo false)"
+  rm -rf "$PROJ"; teardown )
+
+echo "O10: ⭐ hooks-sync 只报 foreign 时，--full 不得报 all current"
+# 我把 hooks-sync 的结果压扁成「待补/未生效」两个字段，忽略了「跳过(非本工具)」——
+# 而 hooks-sync 自己把它当成需要 attention（会计数、会非零退出、还会说「merge 仍不受检」）。
+# 结果：hooksPath 里放一个非 agent-gates 的 pre-merge-commit，status 报绿，
+# 正好把 v2.9.1 想暴露的 merge 空洞藏回去。
+( setup
+  PROJ=$(mktemp -d); mkdir -p "$PROJ/p1/.githooks"; git -C "$PROJ/p1" init -q 2>/dev/null
+  printf '#!/usr/bin/env bash\n# agent-gates per-project gate shim\nexit 0\n' > "$PROJ/p1/.githooks/pre-commit"
+  printf '#!/bin/sh\nexit 0\n' > "$PROJ/p1/.githooks/pre-merge-commit"   # foreign
+  chmod +x "$PROJ/p1/.githooks/"*
+  git -C "$PROJ/p1" config core.hooksPath .githooks
+  mkdir -p "$AGENT_GATES_DIR/bin" "$AGENT_GATES_DIR/hooks/git"
+  cp "$SCRIPT_DIR/../bin/agent-gates-hooks-sync" "$AGENT_GATES_DIR/bin/"
+  cp "$SCRIPT_DIR/../hooks/git/gate-shim.sh" "$AGENT_GATES_DIR/hooks/git/"
+  out=$(bash "$STATUS" --no-network --full "$PROJ" 2>&1)
+  row=$(proj_row "$out")
+  assert "⛔ projects 行不得说 all current (行: ${row:-<空>})" "$([[ "$row" != *"all current"* ]] && echo true || echo false)"
+  assert "projects 行体现 foreign/未触碰" "$([[ "$row" == *跳过* || "$row" == *foreign* || "$row" == *hooks-sync* ]] && echo true || echo false)"
+  rm -rf "$PROJ"; teardown )
+
+echo "O11: 只是 base hook 丢执行位时，不得误报成「缺 pre-merge-commit」"
+# HS_N 读的是总「待补」，它同时含 fix-mode 项；把它硬贴成「缺 pre-merge-commit」
+# 会在 base hook 丢执行位时给出错误诊断。
+( setup
+  PROJ=$(mktemp -d); mkdir -p "$PROJ/p1/.githooks"; git -C "$PROJ/p1" init -q 2>/dev/null
+  printf '#!/usr/bin/env bash\n# agent-gates per-project gate shim\nexit 0\n' > "$PROJ/p1/.githooks/pre-commit"
+  cp "$SCRIPT_DIR/../hooks/git/gate-shim.sh" "$PROJ/p1/.githooks/pre-merge-commit"
+  chmod 644 "$PROJ/p1/.githooks/pre-commit"; chmod +x "$PROJ/p1/.githooks/pre-merge-commit"
+  git -C "$PROJ/p1" config core.hooksPath .githooks
+  mkdir -p "$AGENT_GATES_DIR/bin" "$AGENT_GATES_DIR/hooks/git"
+  cp "$SCRIPT_DIR/../bin/agent-gates-hooks-sync" "$AGENT_GATES_DIR/bin/"
+  cp "$SCRIPT_DIR/../hooks/git/gate-shim.sh" "$AGENT_GATES_DIR/hooks/git/"
+  out=$(bash "$STATUS" --no-network --full "$PROJ" 2>&1)
+  row=$(proj_row "$out")
+  assert "⛔ 不谎称缺 pre-merge-commit (行: ${row:-<空>})" "$([[ "$row" != *"缺 pre-merge-commit"* ]] && echo true || echo false)"
+  assert "projects 行仍标为需处理" "$([[ "$row" != *"all current"* ]] && echo true || echo false)"
   rm -rf "$PROJ"; teardown )
 
 echo
