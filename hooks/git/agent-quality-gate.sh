@@ -214,6 +214,28 @@ if [[ -d openspec/changes ]] \
   IS_PATH_A=1
 fi
 
+# Gate 1 兜底：<name>.<suffix>.spec.<ext> / <name>.<suffix>.test.<ext> 也算这个源文件的测试。
+# 真实项目里大量测试叫 foo.public.spec.ts / foo.e2e.spec.ts / foo.db.spec.ts —— 测试确实
+# 存在，只是文件名带了语义后缀；只认精确同名会把它们全报成「没有测试」，是误报。
+#
+# ⛔ 放宽的边界：候选去掉 .spec.<ext> / .test.<ext> 后若存在【同名源文件】且不是当前文件，
+#    说明该 spec 归那个文件所有（a.b.spec.ts 是 a.b.ts 的测试），⛔ 不能拿来给自己没有
+#    测试的 a.ts 放行。tests/run_gate_spec_suffix.sh T4 锁住这条。
+_gate_has_suffixed_test() {
+  local f="$1" ext base cand owner had_nullglob=0 rc=1
+  ext="${f##*.}"; base="${f%.*}"
+  case "$ext" in ts|tsx|js|jsx) ;; *) return 1 ;; esac
+  shopt -q nullglob && had_nullglob=1
+  shopt -s nullglob
+  for cand in "$base".*.spec."$ext" "$base".*.test."$ext"; do
+    owner="${cand%.spec.$ext}"; owner="${owner%.test.$ext}"
+    [[ -f "${owner}.${ext}" && "${owner}.${ext}" != "$f" ]] && continue
+    rc=0; break
+  done
+  [[ "$had_nullglob" -eq 1 ]] || shopt -u nullglob
+  return "$rc"
+}
+
 # === Gate 1: Test file correspondence ===
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
@@ -230,8 +252,8 @@ while IFS= read -r f; do
     *) continue ;;
   esac
 
-  if [[ ! -f "$t1" ]] && [[ -z "$t2" || ! -f "$t2" ]]; then
-    fail "No test for: $f → expected: $t1"
+  if [[ ! -f "$t1" ]] && [[ -z "$t2" || ! -f "$t2" ]] && ! _gate_has_suffixed_test "$f"; then
+    fail "No test for: $f → expected: $t1 (or ${t2:-—}, or <name>.<suffix>.spec.${f##*.})"
   fi
 done < <(git diff --cached --name-only --diff-filter=ACMR \
   | grep -E '\.(ts|tsx|js|jsx|py|java|kt|go)$' \
