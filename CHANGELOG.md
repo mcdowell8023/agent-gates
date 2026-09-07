@@ -2,6 +2,51 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.9.1 — Gate 1 接受 `<name>.<suffix>.spec.<ext>`
+
+### 问题
+
+Gate 1 只认 `<name>.spec.<ext>` 与 `<name>.test.<ext>`。真实项目里大量测试叫
+`intake.service.public.spec.ts` / `x.e2e.spec.ts` / `x.db.spec.ts` —— 测试确实存在，
+只是文件名带了个语义后缀。Gate 1 把这些一律报成 `No test for`，是**误报**：
+它拦住的不是「没写测试」，而是「测试没按它想的方式命名」。
+
+### 改动
+
+`_gate_has_suffixed_test()`：`<name>.*.spec.<ext>` / `<name>.*.test.<ext>` 也算数。
+
+放宽必须带**归属判断**，否则 `a.b.spec.ts`（明明是 `a.b.ts` 的测试）会给
+自己没有测试的 `a.ts` 放行。归属判断走 `_gate_path_exists_anywhere()`：
+候选 spec 去掉 `.spec.<ext>` 后的路径，只要在**工作区 ∪ 索引 ∪ HEAD** 任一处存在
+且不是当前文件，该 spec 就归它所有，不能拿来给当前文件放行。
+
+### 🔴 两个洞是上线前异构审查抓出来的，不是我自己想到的
+
+| 洞 | 谁抓到 | 构造 |
+|---|---|---|
+| 归属判断只查工作区 | gpt-5.5 | 同一次提交 `git rm a.b.ts` + 新增没测试的 `a.ts` ⇒ `a.b.spec.ts` 被改归 `a.ts`，门禁 `PASSED` |
+| glob 不排除非普通文件 | gpt-5.6-sol（验收） | 建一个叫 `x.fake.spec.ts` 的**目录** ⇒ 没测试的 `x.ts` 通过。精确同名那条用 `[[ -f ]]` 本来排除了目录，glob 这条漏了 |
+
+判据（已入 memory）：**放宽任何检查之前先问 —— 这个判据依赖的前提，
+能不能在同一次提交里被一起改掉？** 「owner 源文件存在」这个前提，恰恰可以。
+
+### ⚠️ 已知且未修（两条都不是本次引入 —— 拿原版门禁实测对照过）
+
+| 形态 | 构造 | 原版门禁的表现 |
+|---|---|---|
+| 把源文件**改名成** spec | `git mv a.b.ts a.stolen.spec.ts` + 新增没测试的 `a.ts` | `git mv a.b.ts a.spec.ts` **同样 PASSED** |
+| **未跟踪**的空 decoy 也算数 | `touch src/x.fake.spec.ts`（不 `git add`）+ staged 没测试的 `src/x.ts` | `touch src/x.spec.ts` **同样 PASSED** |
+
+根因相同：Gate 1 判的是「有没有一个叫得上名的文件」，判不了「它是不是真的测试那段代码」，
+也没要求它进了本次提交。这是这类检查的固有边界。本次只把**放宽引入的**回退补回来
+（目录伪装、归属判断只查工作区），⛔ 没有顺手收紧原有语义 —— 那超出「接受后缀 spec」这个授权范围。
+
+### 回归
+
+`tests/run_gate_spec_suffix.sh` T1–T8：接受三类后缀 · 真没测试仍拦 · 归属保护
+（兄弟 spec / 删 owner / 改名 owner / owner 只在索引）· 目录伪装 · 精确同名不变。
+9 pass / 0 fail；全量 45 个测试脚本 45 PASS / 0 FAIL。
+
 ## v2.9.0 — 验收改成查需求遗漏，而不是第二次代码审查
 
 ### 问题

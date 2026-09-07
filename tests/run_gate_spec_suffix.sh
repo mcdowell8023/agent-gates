@@ -143,6 +143,21 @@ t7_owner_in_index_only_still_blocks() {
     teardown_mock_repo )
 }
 
+# T8 🔴 非普通文件伪装（放宽引入的第二个洞，gpt-5.6-sol 验收抓到）：
+#    原来的精确同名判断用 `[[ -f ... ]]`，天然排除目录；glob 不排除。
+#    建一个叫 src/thing.fake.spec.ts 的【目录】，没有测试的 src/thing.ts 就被放行。
+t8_directory_disguised_as_spec_rejected() {
+  echo "T8: 名字像 spec 的【目录】不算测试"
+  ( setup_mock_repo
+    mkdir -p src
+    echo "export const f = () => 1" > src/thing.ts; pad src/thing.ts
+    mkdir -p src/thing.fake.spec.ts          # ⛔ 目录，不是文件
+    git add src/thing.ts
+    out=$(gate_out)
+    assert "目录不得冒充测试" "$([[ "$out" == *"No test for"* && "$out" == *"src/thing.ts"* ]] && echo true || echo false)"
+    teardown_mock_repo )
+}
+
 t1_suffixed_spec_accepted
 t2_other_suffixes_accepted
 t3_missing_test_still_blocked
@@ -150,6 +165,7 @@ t4_sibling_spec_does_not_cover_shorter_name
 t5_exact_spec_still_accepted
 t6_deleting_owner_must_not_reattribute_spec
 t7_owner_in_index_only_still_blocks
+t8_directory_disguised_as_spec_rejected
 
 echo ""
 read -r PASS_COUNT FAIL_COUNT < "$RESULTS_FILE"

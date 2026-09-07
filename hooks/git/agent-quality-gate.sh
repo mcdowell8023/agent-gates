@@ -239,6 +239,10 @@ _gate_has_suffixed_test() {
   shopt -q nullglob && had_nullglob=1
   shopt -s nullglob
   for cand in "$base".*.spec."$ext" "$base".*.test."$ext"; do
+    # 🔴 glob 会匹配到目录/符号链接等非普通文件；精确同名那条判断用的是 `[[ -f ]]`，
+    #    天生就排除了它们。少了这一行，一个叫 x.fake.spec.ts 的【目录】就能让
+    #    真的没有测试的 x.ts 通过（见 T8）。
+    [[ -f "$cand" ]] || continue
     owner="${cand%.spec.$ext}"; owner="${owner%.test.$ext}"
     [[ "${owner}.${ext}" != "$f" ]] && _gate_path_exists_anywhere "${owner}.${ext}" && continue
     rc=0; break
@@ -264,7 +268,7 @@ while IFS= read -r f; do
   esac
 
   if [[ ! -f "$t1" ]] && [[ -z "$t2" || ! -f "$t2" ]] && ! _gate_has_suffixed_test "$f"; then
-    fail "No test for: $f → expected: $t1 (or ${t2:-—}, or <name>.<suffix>.spec.${f##*.})"
+    fail "No test for: $f → expected: $t1 (or ${t2:-—}, or <name>.<suffix>.spec.${f##*.} / .test.${f##*.})"
   fi
 done < <(git diff --cached --name-only --diff-filter=ACMR \
   | grep -E '\.(ts|tsx|js|jsx|py|java|kt|go)$' \
