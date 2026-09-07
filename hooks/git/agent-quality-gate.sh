@@ -232,6 +232,19 @@ _gate_path_exists_anywhere() {
   return 1
 }
 
+# 归属判断：候选 spec 去掉 .spec/.test 后的前缀，是否对应到【另一个】源文件。
+# 🔴 owner 的扩展名不一定和当前文件相同 —— a.b.tsx 的测试完全可以叫 a.b.spec.ts。
+#    只按当前文件的扩展名拼一次（`${owner}.${ext}`）就拼不中它，于是 a.b.spec.ts
+#    被改归给真的没有测试的 a.ts（见 T9）。⇒ 四个扩展名都要试。
+_gate_owner_exists_elsewhere() {
+  local owner="$1" self="$2" e
+  for e in ts tsx js jsx; do
+    [[ "${owner}.${e}" == "$self" ]] && continue
+    _gate_path_exists_anywhere "${owner}.${e}" && return 0
+  done
+  return 1
+}
+
 _gate_has_suffixed_test() {
   local f="$1" ext base cand owner had_nullglob=0 rc=1
   ext="${f##*.}"; base="${f%.*}"
@@ -244,7 +257,10 @@ _gate_has_suffixed_test() {
     #    真的没有测试的 x.ts 通过（见 T8）。
     [[ -f "$cand" ]] || continue
     owner="${cand%.spec.$ext}"; owner="${owner%.test.$ext}"
-    [[ "${owner}.${ext}" != "$f" ]] && _gate_path_exists_anywhere "${owner}.${ext}" && continue
+    # shell glob 的 * 能匹配空串 ⇒ `thing..spec.ts` 也会落进候选，owner 是 `thing.`。
+    # 按 <name>.<suffix>.spec.<ext> 的语义那不是合法形式，不拿它放行（见 T11）。
+    [[ "$owner" == "$base." ]] && continue
+    _gate_owner_exists_elsewhere "$owner" "$f" && continue
     rc=0; break
   done
   [[ "$had_nullglob" -eq 1 ]] || shopt -u nullglob

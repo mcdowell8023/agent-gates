@@ -22,10 +22,16 @@ Gate 1 只认 `<name>.spec.<ext>` 与 `<name>.test.<ext>`。真实项目里大�
 
 ### 🔴 两个洞是上线前异构审查抓出来的，不是我自己想到的
 
-| 洞 | 谁抓到 | 构造 |
-|---|---|---|
-| 归属判断只查工作区 | gpt-5.5 | 同一次提交 `git rm a.b.ts` + 新增没测试的 `a.ts` ⇒ `a.b.spec.ts` 被改归 `a.ts`，门禁 `PASSED` |
-| glob 不排除非普通文件 | gpt-5.6-sol（验收） | 建一个叫 `x.fake.spec.ts` 的**目录** ⇒ 没测试的 `x.ts` 通过。精确同名那条用 `[[ -f ]]` 本来排除了目录，glob 这条漏了 |
+| # | 洞 | 谁抓到 | 构造 |
+|---|---|---|---|
+| 1 | 归属判断只查工作区 | gpt-5.5 (`pi -p`) | 同一次提交 `git rm a.b.ts` + 新增没测试的 `a.ts` ⇒ `a.b.spec.ts` 被改归 `a.ts`，门禁 `PASSED` |
+| 2 | glob 不排除非普通文件 | gpt-5.6-sol（验收） | 建一个叫 `x.fake.spec.ts` 的**目录** ⇒ 没测试的 `x.ts` 通过。精确同名那条用 `[[ -f ]]` 本来排除了目录，glob 这条漏了 |
+| 3 | owner 只按**当前文件的扩展名**拼一次 | gpt-5.5（Paseo 子会话） | `a.b.tsx` + `a.b.spec.ts` ⇒ 拼出的 `a.b.ts` 不存在 ⇒ `a.b.spec.ts` 被改归没测试的 `a.ts`。⇒ `_gate_owner_exists_elsewhere()` 四个扩展名都试 |
+| 4 | glob 的 `*` 匹配空串 | gpt-5.6-sol（验收） | `thing..spec.ts` 也落进候选。按 `<suffix>` 语义不合法，不拿它放行 |
+
+**四个洞全是异构审查抓的，没有一个是我自己想到的。** 前两个报 FAIL 后修了一轮，
+第二轮换 Paseo 子会话（`pi/github-copilot/gpt-5.5` + `gpt-5.6-sol`）又抓出后两个。
+⭐ 价值在**换族 + 换轮**，不在多跑几遍同一个。
 
 判据（已入 memory）：**放宽任何检查之前先问 —— 这个判据依赖的前提，
 能不能在同一次提交里被一起改掉？** 「owner 源文件存在」这个前提，恰恰可以。
@@ -43,9 +49,20 @@ Gate 1 只认 `<name>.spec.<ext>` 与 `<name>.test.<ext>`。真实项目里大�
 
 ### 回归
 
-`tests/run_gate_spec_suffix.sh` T1–T8：接受三类后缀 · 真没测试仍拦 · 归属保护
-（兄弟 spec / 删 owner / 改名 owner / owner 只在索引）· 目录伪装 · 精确同名不变。
-9 pass / 0 fail；全量 45 个测试脚本 45 PASS / 0 FAIL。
+`tests/run_gate_spec_suffix.sh` **T1–T13**：
+
+| | 锁什么 |
+|---|---|
+| T1/T2 | `.public.spec` / `.e2e.spec` / `.db.spec` 被接受（本次要修的误报） |
+| T3 | 真的没有任何测试 —— 仍然拦住 |
+| T4/T6/T7/T9 | 归属保护：兄弟 spec · 删 owner · owner 只在索引 · **owner 跨扩展名** |
+| T8 | 目录伪装成 spec |
+| T11 | 空后缀 `thing..spec.ts` |
+| T13 | 近似名（`.spec.ts.bak`、顺序错） |
+| T5/T12 | 精确 `.spec` / `.test` 同名 —— 原行为不变 |
+| T10 | `{ts,tsx,js,jsx}` × `{spec,test}` 八种组合矩阵 |
+
+14 pass / 0 fail；全量 45 个测试脚本 45 PASS / 0 FAIL。
 
 ## v2.9.0 — 验收改成查需求遗漏，而不是第二次代码审查
 

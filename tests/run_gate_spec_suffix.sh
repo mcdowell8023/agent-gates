@@ -158,6 +158,82 @@ t8_directory_disguised_as_spec_rejected() {
     teardown_mock_repo )
 }
 
+# T9 🔴 跨扩展名 owner（异构审查 gpt-5.5 抓到，是本次放宽引入的真回退）：
+#    owner 是 a.b.tsx，spec 是 a.b.spec.ts。owner 路径原来只按【当前文件的扩展名】
+#    拼（a.b.ts），拼不中真实的 a.b.tsx ⇒ a.b.spec.ts 被改归给没有测试的 a.ts。
+t9_cross_extension_owner_still_blocks() {
+  echo "T9: owner 是 .tsx 而 spec 是 .ts —— 仍不得改归"
+  ( setup_mock_repo
+    mkdir -p src
+    echo "export const B = () => null" > src/a.b.tsx
+    echo "describe('B', () => {})" > src/a.b.spec.ts       # a.b.tsx 的测试，扩展名不同
+    git add src/a.b.tsx src/a.b.spec.ts; git commit -q -m "tsx owner with ts spec"
+    echo "export const a = () => 1" > src/a.ts; pad src/a.ts
+    git add src/a.ts
+    out=$(gate_out)
+    assert "a.ts 仍被拦（跨扩展名 owner 也算数）" "$([[ "$out" == *"No test for"* && "$out" == *"src/a.ts"* ]] && echo true || echo false)"
+    teardown_mock_repo )
+}
+
+# T10 扩展名 × spec/test 矩阵：8 种组合都该被接受（验收指出 T1-T8 只覆盖了 .spec.ts）
+t10_extension_and_kind_matrix() {
+  echo "T10: {ts,tsx,js,jsx} × {spec,test} 八种组合都被接受"
+  ( setup_mock_repo
+    mkdir -p src
+    for ext in ts tsx js jsx; do
+      for kind in spec test; do
+        n="m_${ext}_${kind}"
+        echo "export const x = () => 1" > "src/${n}.${ext}"; pad "src/${n}.${ext}"
+        echo "describe('x', () => {})" > "src/${n}.custom.${kind}.${ext}"
+      done
+    done
+    git add src/
+    out=$(gate_out)
+    assert "八种组合无一被报 No test for" "$([[ "$out" != *"No test for"* ]] && echo true || echo false)"
+    teardown_mock_repo )
+}
+
+# T11 空后缀：shell glob 的 * 能匹配空串，`thing..spec.ts` 会落进候选。
+#    按 <suffix> 的语义它不是合法形式，不该拿来放行（验收指出的多放宽）。
+t11_empty_suffix_rejected() {
+  echo "T11: thing..spec.ts（空后缀）不算 thing.ts 的测试"
+  ( setup_mock_repo
+    mkdir -p src
+    echo "export const f = () => 1" > src/thing.ts; pad src/thing.ts
+    echo "describe('?', () => {})" > src/thing..spec.ts     # 双点 = 空后缀
+    git add src/
+    out=$(gate_out)
+    assert "空后缀不得放行" "$([[ "$out" == *"No test for"* && "$out" == *"src/thing.ts"* ]] && echo true || echo false)"
+    teardown_mock_repo )
+}
+
+# T12 回归：精确 <name>.test.<ext> 也不变（T5 只锁了 .spec）
+t12_exact_test_still_accepted() {
+  echo "T12: <name>.test.ts 精确同名 —— 原行为不变"
+  ( setup_mock_repo
+    mkdir -p src
+    echo "export const b = () => 1" > src/a.b.ts; pad src/a.b.ts
+    echo "describe('a.b', () => {})" > src/a.b.test.ts
+    git add src/
+    out=$(gate_out)
+    assert "精确 .test 同名被接受" "$([[ "$out" != *"No test for"* ]] && echo true || echo false)"
+    teardown_mock_repo )
+}
+
+# T13 近似但不合规的名字不得放行：错误终止扩展名（.spec.ts.bak）
+t13_near_miss_names_rejected() {
+  echo "T13: thing.x.spec.ts.bak 这类近似名不算测试"
+  ( setup_mock_repo
+    mkdir -p src
+    echo "export const f = () => 1" > src/thing.ts; pad src/thing.ts
+    echo "describe('?', () => {})" > src/thing.x.spec.ts.bak
+    echo "describe('?', () => {})" > src/thing.spec.x.ts      # 顺序错
+    git add src/thing.ts
+    out=$(gate_out)
+    assert "近似名不得放行" "$([[ "$out" == *"No test for"* && "$out" == *"src/thing.ts"* ]] && echo true || echo false)"
+    teardown_mock_repo )
+}
+
 t1_suffixed_spec_accepted
 t2_other_suffixes_accepted
 t3_missing_test_still_blocked
@@ -166,6 +242,11 @@ t5_exact_spec_still_accepted
 t6_deleting_owner_must_not_reattribute_spec
 t7_owner_in_index_only_still_blocks
 t8_directory_disguised_as_spec_rejected
+t9_cross_extension_owner_still_blocks
+t10_extension_and_kind_matrix
+t11_empty_suffix_rejected
+t12_exact_test_still_accepted
+t13_near_miss_names_rejected
 
 echo ""
 read -r PASS_COUNT FAIL_COUNT < "$RESULTS_FILE"
