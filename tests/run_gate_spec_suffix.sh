@@ -110,11 +110,46 @@ t5_exact_spec_still_accepted() {
     teardown_mock_repo )
 }
 
+# T6 🔴 绕过复现（本次放宽自己开的洞）：同一次提交里把 owner 源文件删掉，
+#    a.b.spec.ts 就被重新归给 a.ts。判据只查工作区时必然放行。
+t6_deleting_owner_must_not_reattribute_spec() {
+  echo "T6: 同一 diff 删掉 a.b.ts，a.b.spec.ts 不得改归 a.ts"
+  ( setup_mock_repo
+    mkdir -p src
+    echo "export const b = () => 1" > src/a.b.ts
+    echo "describe('a.b', () => {})" > src/a.b.spec.ts
+    git add src/a.b.ts src/a.b.spec.ts; git commit -q -m "a.b with its own spec"
+    git rm -q src/a.b.ts                                       # ⛔ 同一次提交里删掉 owner
+    echo "export const a = () => 1" > src/a.ts; pad src/a.ts    # a.ts 自己没有测试
+    git add src/a.ts
+    out=$(gate_out)
+    assert "a.ts 仍被拦（删 owner 不得洗白）" "$([[ "$out" == *"No test for"* && "$out" == *"src/a.ts"* ]] && echo true || echo false)"
+    teardown_mock_repo )
+}
+
+# T7 owner 只存在于索引（已 git add，工作区被删）—— 同样不得改归
+t7_owner_in_index_only_still_blocks() {
+  echo "T7: owner 只在索引里（工作区已删）→ 仍不得改归"
+  ( setup_mock_repo
+    mkdir -p src
+    echo "export const b = () => 1" > src/a.b.ts
+    echo "describe('a.b', () => {})" > src/a.b.spec.ts
+    git add src/a.b.ts src/a.b.spec.ts
+    rm -f src/a.b.ts                                           # 只从工作区删，索引里还在
+    echo "export const a = () => 1" > src/a.ts; pad src/a.ts
+    git add src/a.ts
+    out=$(gate_out)
+    assert "a.ts 仍被拦（索引里的 owner 也算数）" "$([[ "$out" == *"No test for"* && "$out" == *"src/a.ts"* ]] && echo true || echo false)"
+    teardown_mock_repo )
+}
+
 t1_suffixed_spec_accepted
 t2_other_suffixes_accepted
 t3_missing_test_still_blocked
 t4_sibling_spec_does_not_cover_shorter_name
 t5_exact_spec_still_accepted
+t6_deleting_owner_must_not_reattribute_spec
+t7_owner_in_index_only_still_blocks
 
 echo ""
 read -r PASS_COUNT FAIL_COUNT < "$RESULTS_FILE"

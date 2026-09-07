@@ -221,6 +221,17 @@ fi
 # ⛔ 放宽的边界：候选去掉 .spec.<ext> / .test.<ext> 后若存在【同名源文件】且不是当前文件，
 #    说明该 spec 归那个文件所有（a.b.spec.ts 是 a.b.ts 的测试），⛔ 不能拿来给自己没有
 #    测试的 a.ts 放行。tests/run_gate_spec_suffix.sh T4 锁住这条。
+# 归属判断专用：路径是否在【工作区 / 索引 / HEAD】任一处存在。
+# 🔴 只查工作区是不够的 —— 同一次提交可以把 owner 源文件一起删掉，
+#    让本属于它的 spec 被重新归给一个真的没测试的文件（见 tests/run_gate_spec_suffix.sh T6/T7）。
+_gate_path_exists_anywhere() {
+  local p="$1"
+  [[ -f "$p" ]] && return 0
+  git ls-files --cached --error-unmatch -- "$p" >/dev/null 2>&1 && return 0
+  git cat-file -e "HEAD:$p" >/dev/null 2>&1 && return 0
+  return 1
+}
+
 _gate_has_suffixed_test() {
   local f="$1" ext base cand owner had_nullglob=0 rc=1
   ext="${f##*.}"; base="${f%.*}"
@@ -229,7 +240,7 @@ _gate_has_suffixed_test() {
   shopt -s nullglob
   for cand in "$base".*.spec."$ext" "$base".*.test."$ext"; do
     owner="${cand%.spec.$ext}"; owner="${owner%.test.$ext}"
-    [[ -f "${owner}.${ext}" && "${owner}.${ext}" != "$f" ]] && continue
+    [[ "${owner}.${ext}" != "$f" ]] && _gate_path_exists_anywhere "${owner}.${ext}" && continue
     rc=0; break
   done
   [[ "$had_nullglob" -eq 1 ]] || shopt -u nullglob
