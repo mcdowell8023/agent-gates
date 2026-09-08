@@ -97,18 +97,35 @@ Create `.githooks/agent-quality-gate.sh` with the content from the [Hook Script]
 > 于是它被推迟到了一个不存在的检查点。（2026-09-01 实测确认，v2.9.1 修）
 >
 > ⚠️ **fast-forward merge 仍然没有钩子点**（它不产生 commit）。合并进集成分支请用 `--no-ff`。
+> ⚠️ `git merge --no-verify` 同样整条跳过（实测）—— 不是本版新引入的，但既然 `merge-only`
+> 把审查推迟到 merge 那一刻，这个绕过就该和 ff 限制一样被知道。
 >
-> 已初始化的老项目用 `agent-gates-hooks-sync <root>` 批量补（默认 dry-run，`--apply` 才写）。
+> 已初始化的老项目要**手动补**这个文件（薄 shim 只让已存在的文件跟随全局版本，
+> `pre-merge-commit` 是新文件，全局升级长不出来）：
+>
+> ```bash
+> cp ~/.agent-gates/hooks/git/gate-shim.sh <repo>/.githooks/pre-merge-commit
+> chmod +x <repo>/.githooks/pre-merge-commit
+> ```
+>
+> （批量工具随后一版提供；⛔ 本版还没有，别照一个不存在的命令去执行。）
 
 Then integrate based on existing setup:
 
 **If `lefthook.yml` exists:**
+⚠️ 下面是**要合并进去的条目**，不是可以整段粘贴的顶层块 —— 已有 `lefthook.yml` 的项目
+直接粘会造出重复的顶层 `pre-commit:` key，轻则覆盖原有 commands，重则行为不可预期。
+把 `agent-quality-gate` 这一条加进**已存在**的 `pre-commit.commands` 下；
+`pre-merge-commit:` 这个顶层 key 若尚不存在才新建。
+
 ```yaml
-# Append to lefthook.yml — 两个钩子都要挂：
+# 加进已有的 pre-commit.commands（不要新建第二个 pre-commit: 顶层 key）
 pre-commit:
   commands:
-    agent-quality-gate:
+    agent-quality-gate:              # ← 只加这一条
       run: .githooks/agent-quality-gate.sh
+
+# pre-merge-commit 通常还不存在，此时才整块新建
 pre-merge-commit:
   commands:
     agent-quality-gate:
@@ -121,11 +138,11 @@ pre-merge-commit:
 # AGENT_QUALITY_GATE
 .githooks/agent-quality-gate.sh
 
-# 并新建 .husky/pre-merge-commit —— 必须是一个能真正执行的 husky hook。
-# 只写那两行裸文本会得到一个没有 shebang 的文件，husky 项目的 merge 口仍然是空的。
-cp .husky/pre-commit .husky/pre-merge-commit   # 有 pre-commit 时直接照抄它的壳
-# 若没有可抄的，自己补 shebang：
-#   printf '#!/usr/bin/env sh\n# AGENT_QUALITY_GATE\n.githooks/agent-quality-gate.sh\n' > .husky/pre-merge-commit
+# 并新建 .husky/pre-merge-commit。
+# ⛔ 不要 `cp .husky/pre-commit .husky/pre-merge-commit` —— 那会把原 pre-commit 里的
+# lint-staged / npm test / 自定义校验全部复制到 merge 钩子上，制造一堆与门禁无关的假失败。
+# 只放门禁本身，并带上 shebang（缺 shebang 的裸文本不是一个能执行的 husky hook）：
+printf '#!/usr/bin/env sh\n# AGENT_QUALITY_GATE\n.githooks/agent-quality-gate.sh\n' > .husky/pre-merge-commit
 chmod +x .husky/pre-merge-commit
 ```
 
@@ -137,7 +154,7 @@ git config core.hooksPath .githooks
 ```
 
 ⚠️ 钩子必须**可执行**。git 会静默跳过一个不可执行的钩子 —— `git config` 和文件列表
-都看着正常，而实际什么都没在跑。`agent-gates-hooks-sync` 会把这种状态报出来。
+都看着正常，而实际什么都没在跑。装完用 `ls -l <hookdir>` 确认执行位。
 
 ### Step 4: Inject CLAUDE.md Instructions
 

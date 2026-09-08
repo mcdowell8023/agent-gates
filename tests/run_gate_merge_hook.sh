@@ -17,6 +17,10 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SHIM="$SCRIPT_DIR/../hooks/git/gate-shim.sh"
+# ⭐ 测试必须用**本次新增的那个文件**，不是它的来源。原来 fixture 复制的是
+# hooks/git/gate-shim.sh —— 于是 .githooks/pre-merge-commit 写坏、写旧、权限不对，
+# 这套测试照样绿。这次改动最直接新增的那个文件，反而没被覆盖到。
+REAL_HOOK="$SCRIPT_DIR/../.githooks/pre-merge-commit"
 GATE="$SCRIPT_DIR/../hooks/git/agent-quality-gate.sh"
 RESULTS_FILE=$(mktemp); echo "0 0" > "$RESULTS_FILE"
 
@@ -32,7 +36,7 @@ setup() {
   git init -q -b master; git config user.email t@t.com; git config user.name T
   mkdir -p .githooks src .agent/plans .agent/reviews .agent/verify
   cp "$SHIM" .githooks/pre-commit
-  cp "$SHIM" .githooks/pre-merge-commit
+  cp "$REAL_HOOK" .githooks/pre-merge-commit
   chmod +x .githooks/*
   git config core.hooksPath .githooks
   export AGENT_GATES_GATE="$GATE" AGENT_MODE=1
@@ -87,9 +91,18 @@ echo "M2: ⛔ 没有 pre-merge-commit 钩子时，同一个 merge 完全不受�
   assert "门禁一个字都没输出" "$([[ "$out" != *"Quality Gate"* ]] && echo true || echo false)"
   teardown )
 
-echo "M3: gate-shim 可同时用作 pre-commit 与 pre-merge-commit（同一份，无需第二个实现）"
-assert "shim 不含 pre-commit 专属逻辑" "$(grep -qiE 'pre-commit|hook_name|\\$0' "$SHIM" && echo false || echo true)"
-assert "shim 只做 exec 转发" "$(grep -q 'exec "\$AUTH"' "$SHIM" && echo true || echo false)"
+echo "M3: 仓库里那个 pre-merge-commit 就是 shim 本身，且不含 pre-commit 专属逻辑"
+# 原断言写的是 grep -qiE 'pre-commit|hook_name|\$0'，而它**匹配不到字面量 $0**
+# （实测 printf '$0\n' | grep -qiE '…\$0' 返回 1）—— 声称在防 hook-name 分支逻辑，
+# 实际是空心的。改用固定字符串逐个查，并加一条自检证明这种查法确实生效。
+assert "⭐ .githooks/pre-merge-commit 与 gate-shim.sh 内容一致" \
+  "$([[ -f "$REAL_HOOK" ]] && cmp -s "$REAL_HOOK" "$SHIM" && echo true || echo false)"
+assert "⭐ 该文件可执行" "$([[ -x "$REAL_HOOK" ]] && echo true || echo false)"
+for pat in 'pre-commit' 'hook_name' '$0'; do
+  assert "不含 pre-commit 专属逻辑: $pat" "$(grep -qF -- "$pat" "$REAL_HOOK" && echo false || echo true)"
+done
+assert "自检：固定串查法确实生效" "$(grep -qF -- 'AUTH' "$REAL_HOOK" && echo true || echo false)"
+assert "只做 exec 转发" "$(grep -qF 'exec "$AUTH"' "$REAL_HOOK" && echo true || echo false)"
 
 echo
 read -r P F < "$RESULTS_FILE"
