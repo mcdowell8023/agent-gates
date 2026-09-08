@@ -2,6 +2,23 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.9.1 — merge 门禁此前没有可运行的钩子点
+
+`merge-only` 档把审查推迟到「合并进集成分支」那一刻。而 git 对 merge commit 走的是
+**`pre-merge-commit`**，不是 `pre-commit`，agent-gates 从来只装 `pre-commit` ——
+所以干净的非 ff merge 完全不受检，那个推迟指向的是一个**不存在的检查点**。
+（scratch 仓同时挂两个钩子实测确认：merge 只触发前者。）
+
+`gate-shim.sh` 本来就只做 `exec` 转发、不含任何 pre-commit 专属逻辑，同一份直接作为
+`pre-merge-commit` 装上即可，无需第二个实现。项目现在需要**两个**钩子，
+`init-project-gates` 的三种安装模式（lefthook / husky / bare git）已同步。
+
+`tests/run_gate_merge_hook.sh` 10 条，其中一条**刻意删掉钩子来证明空洞真实存在**
+（merge 通过且门禁零输出）—— 没有这条，这个修复看起来只是「多装一个文件」。
+
+⚠️ **fast-forward merge 仍然没有钩子点**（它不产生 commit）。合并进集成分支请用 `--no-ff`，
+或在仓库里配 `git config merge.ff false`（⛔ 显式 `--ff-only` 仍能压过它，实测）。
+
 ## v2.9.0 — 验收改成查需求遗漏，而不是第二次代码审查
 
 ### 问题

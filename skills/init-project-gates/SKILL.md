@@ -9,7 +9,8 @@ description: "One-command project initialization for agent-assisted development.
 
 One-command setup for agent-assisted development in any project:
 
-1. **Quality Gate Hook** — pre-commit hook enforcing test file correspondence + cross-review evidence (agent-only)
+1. **Quality Gate Hooks** — `pre-commit` **和** `pre-merge-commit`，两者都必须装
+   （merge commit 走的是后者；只装前者会让干净的 merge 完全不受检）
 2. **AGENTS.md Hierarchy** — AI-readable documentation for codebase understanding (via deepinit)
 3. **PROGRESS.md** — cross-session progress tracking for multi-day work (work log / standup / handoff)
 
@@ -90,13 +91,45 @@ If validation fails for a project:
 
 Create `.githooks/agent-quality-gate.sh` with the content from the [Hook Script](#hook-script) section below.
 
+> 🔴 **必须装两个钩子，不是一个。** git 对 merge commit 走的是 **`pre-merge-commit`**，
+> 不是 `pre-commit`。只挂 `pre-commit` 的项目，**干净的 merge 完全不受门禁检查** ——
+> 而 `merge-only` 档整个设计就是把审查推迟到「合并进 test/master」那一刻，
+> 于是它被推迟到了一个不存在的检查点。（2026-09-01 实测确认，v2.9.1 修）
+>
+> ⚠️ **fast-forward merge 仍然没有钩子点**（它不产生 commit）。合并进集成分支请用 `--no-ff`。
+> ⚠️ `git merge --no-verify` 同样整条跳过（实测）—— 不是本版新引入的，但既然 `merge-only`
+> 把审查推迟到 merge 那一刻，这个绕过就该和 ff 限制一样被知道。
+>
+> 已初始化的老项目要**手动补**这个文件（薄 shim 只让已存在的文件跟随全局版本，
+> `pre-merge-commit` 是新文件，全局升级长不出来）：
+>
+> ```bash
+> cp ~/.agent-gates/hooks/git/gate-shim.sh <repo>/.githooks/pre-merge-commit
+> chmod +x <repo>/.githooks/pre-merge-commit
+> ```
+>
+> （批量工具随后一版提供；⛔ 本版还没有，别照一个不存在的命令去执行。）
+
 Then integrate based on existing setup:
 
 **If `lefthook.yml` exists:**
+⚠️ 下面是**要合并进去的条目**，不是可以整段粘贴的顶层块 —— 已有 `lefthook.yml` 的项目
+直接粘会造出重复的顶层 `pre-commit:` key，轻则覆盖原有 commands，重则行为不可预期。
+把 `agent-quality-gate` 这一条加进**已存在**的 `pre-commit.commands` 下；
+`pre-merge-commit:` 这个顶层 key 若尚不存在才新建。
+
 ```yaml
-# Append to lefthook.yml under pre-commit.commands:
-  agent-quality-gate:
-    run: .githooks/agent-quality-gate.sh
+# 加进已有的 pre-commit.commands（不要新建第二个 pre-commit: 顶层 key）
+pre-commit:
+  commands:
+    agent-quality-gate:              # ← 只加这一条
+      run: .githooks/agent-quality-gate.sh
+
+# pre-merge-commit 通常还不存在，此时才整块新建
+pre-merge-commit:
+  commands:
+    agent-quality-gate:
+      run: .githooks/agent-quality-gate.sh
 ```
 
 **If `.husky/` exists:**
@@ -104,13 +137,24 @@ Then integrate based on existing setup:
 # Append to .husky/pre-commit:
 # AGENT_QUALITY_GATE
 .githooks/agent-quality-gate.sh
+
+# 并新建 .husky/pre-merge-commit。
+# ⛔ 不要 `cp .husky/pre-commit .husky/pre-merge-commit` —— 那会把原 pre-commit 里的
+# lint-staged / npm test / 自定义校验全部复制到 merge 钩子上，制造一堆与门禁无关的假失败。
+# 只放门禁本身，并带上 shebang（缺 shebang 的裸文本不是一个能执行的 husky hook）：
+printf '#!/usr/bin/env sh\n# AGENT_QUALITY_GATE\n.githooks/agent-quality-gate.sh\n' > .husky/pre-merge-commit
+chmod +x .husky/pre-merge-commit
 ```
 
 **If neither exists (bare git):**
 ```bash
 ln -sf agent-quality-gate.sh .githooks/pre-commit
+ln -sf agent-quality-gate.sh .githooks/pre-merge-commit
 git config core.hooksPath .githooks
 ```
+
+⚠️ 钩子必须**可执行**。git 会静默跳过一个不可执行的钩子 —— `git config` 和文件列表
+都看着正常，而实际什么都没在跑。装完用 `ls -l <hookdir>` 确认执行位。
 
 ### Step 4: Inject CLAUDE.md Instructions
 
@@ -373,6 +417,7 @@ mkdir -p .githooks
 cp ~/.agent-gates/hooks/git/gate-shim.sh .githooks/agent-quality-gate.sh
 chmod +x .githooks/agent-quality-gate.sh
 ln -sf agent-quality-gate.sh .githooks/pre-commit
+ln -sf agent-quality-gate.sh .githooks/pre-merge-commit
 git config core.hooksPath .githooks
 ```
 
