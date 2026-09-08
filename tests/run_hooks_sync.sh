@@ -222,6 +222,52 @@ echo "S18: 完全没部署痕迹的仓库仍然不报（避免噪音）"
   assert "不提这个仓库" "$([[ "$out" != *"$ROOT/e"* ]] && echo true || echo false)"
   teardown )
 
+echo "S19: ⛔ 只在注释里提到 gate 的 no-op 钩子，不算自己人"
+# 第 5 轮为了让「文档形态的 husky」不被当成 foreign，把归属识别放宽到只要出现
+# AGENT_QUALITY_GATE / agent-quality-gate.sh 字样即算自己人 —— 过度纠正了：
+# 一个只含该注释、实际什么都不做的钩子也会被认领，直接违反「不碰非本工具的钩子」。
+( setup
+  d="$ROOT/noop"; mkdir -p "$d/.githooks" && git -C "$d" init -q
+  printf '#!/bin/sh\n# AGENT_QUALITY_GATE\nexit 0\n' > "$d/.githooks/pre-commit"
+  chmod +x "$d/.githooks/pre-commit"; git -C "$d" config core.hooksPath .githooks
+  out=$(bash "$SYNC" --apply "$ROOT" 2>&1)
+  assert "⛔ 未给它补 pre-merge-commit" "$([[ ! -f "$d/.githooks/pre-merge-commit" ]] && echo true || echo false)"
+  assert "报告说明未触碰" "$([[ "$out" == *未触碰* || "$out" == *跳过* ]] && echo true || echo false)"
+  teardown )
+
+echo "S20: ✅ 真的调用 gate 的钩子仍要认成自己人（不能因为收紧而误伤文档形态）"
+( setup
+  d="$ROOT/real"; mkdir -p "$d/.githooks" && git -C "$d" init -q
+  printf '#!/bin/sh\n# AGENT_QUALITY_GATE\n.githooks/agent-quality-gate.sh\n' > "$d/.githooks/pre-commit"
+  chmod +x "$d/.githooks/pre-commit"; git -C "$d" config core.hooksPath .githooks
+  bash "$SYNC" --apply "$ROOT" >/dev/null 2>&1
+  assert "补上了 pre-merge-commit" "$([[ -f "$d/.githooks/pre-merge-commit" ]] && echo true || echo false)"
+  teardown )
+
+echo "S21: 🔴 symlink 钩子一律拒绝 —— --apply 会写穿到仓库外的文件"
+# 实测复现：pre-merge-commit 是指向 /tmp 的 symlink 时，脚本会把那个仓库外的文件覆写成 shim。
+( setup; mk_repo a githooks
+  OUT_TARGET=$(mktemp -d)/outside-target
+  printf '# Agent Quality Gate\n' > "$OUT_TARGET"
+  BEFORE=$(shasum -a 256 < "$OUT_TARGET")
+  ln -s "$OUT_TARGET" "$ROOT/a/.githooks/pre-merge-commit"
+  out=$(bash "$SYNC" --apply "$ROOT" 2>&1)
+  AFTER=$(shasum -a 256 < "$OUT_TARGET")
+  assert "⛔ 仓库外的目标文件未被改写" "$([[ "$BEFORE" == "$AFTER" ]] && echo true || echo false)"
+  assert "报告点明是 symlink" "$([[ "$out" == *symlink* || "$out" == *软链* ]] && echo true || echo false)"
+  rm -rf "$(dirname "$OUT_TARGET")"; teardown )
+
+echo "S22: 🔴 base pre-commit 是 symlink 时也不能 chmod 穿透"
+( setup
+  d="$ROOT/sl"; mkdir -p "$d/.githooks" && git -C "$d" init -q
+  OUT2=$(mktemp -d)/outside-pc
+  printf '#!/bin/sh\n# agent-gates per-project gate shim\nexit 0\n' > "$OUT2"; chmod 644 "$OUT2"
+  ln -s "$OUT2" "$d/.githooks/pre-commit"
+  git -C "$d" config core.hooksPath .githooks
+  bash "$SYNC" --apply "$ROOT" >/dev/null 2>&1
+  assert "⛔ 仓库外文件未被 chmod +x" "$([[ ! -x "$OUT2" ]] && echo true || echo false)"
+  rm -rf "$(dirname "$OUT2")"; teardown )
+
 echo
 read -r P F < "$RESULTS_FILE"
 echo "=== PASS=$P FAIL=$F ==="

@@ -268,6 +268,39 @@ echo "O13: 确有可自动补的项时才推荐 --apply"
   assert "推荐 --apply (行: ${row:-<空>})" "$([[ "$row" == *"--apply"* ]] && echo true || echo false)"
   rm -rf "$PROJ"; teardown )
 
+echo "O14: 🔴 migrate 缺失时不得报 all current（frozen/stale 这一维没扫）"
+# 我为修「守卫藏在 migrate 存在性后面」而解耦了它，结果 hooks-sync 一 clean 就直接
+# 宣称 all current —— 而 hooks-sync 只看 hook 完整性，不看 frozen copy。
+# 少任一工具都只能落到「未检查某维度」。这条是本分支新引入的回归。
+( setup
+  PROJ=$(mktemp -d); mkdir -p "$PROJ/p1/.githooks"; git -C "$PROJ/p1" init -q 2>/dev/null
+  cp "$SCRIPT_DIR/../hooks/git/gate-shim.sh" "$PROJ/p1/.githooks/pre-commit"
+  cp "$SCRIPT_DIR/../hooks/git/gate-shim.sh" "$PROJ/p1/.githooks/pre-merge-commit"
+  chmod +x "$PROJ/p1/.githooks/"*; git -C "$PROJ/p1" config core.hooksPath .githooks
+  mkdir -p "$AGENT_GATES_DIR/bin" "$AGENT_GATES_DIR/hooks/git"
+  cp "$SCRIPT_DIR/../bin/agent-gates-hooks-sync" "$AGENT_GATES_DIR/bin/"
+  cp "$SCRIPT_DIR/../hooks/git/gate-shim.sh" "$AGENT_GATES_DIR/hooks/git/"
+  # 刻意不放 agent-gates-migrate
+  out=$(bash "$STATUS" --no-network --full "$PROJ" 2>&1)
+  row=$(proj_row "$out")
+  assert "⛔ 不报 all current (行: ${row:-<空>})" "$([[ "$row" != *"all current"* ]] && echo true || echo false)"
+  assert "说明 frozen/stale 未检查" "$([[ "$row" == *未检查* || "$row" == *migrate* ]] && echo true || echo false)"
+  rm -rf "$PROJ"; teardown )
+
+echo "O15: 两个工具都在且都 clean → 才允许 all current"
+( setup
+  PROJ=$(mktemp -d); mkdir -p "$PROJ/p1/.githooks"; git -C "$PROJ/p1" init -q 2>/dev/null
+  cp "$SCRIPT_DIR/../hooks/git/gate-shim.sh" "$PROJ/p1/.githooks/pre-commit"
+  cp "$SCRIPT_DIR/../hooks/git/gate-shim.sh" "$PROJ/p1/.githooks/pre-merge-commit"
+  chmod +x "$PROJ/p1/.githooks/"*; git -C "$PROJ/p1" config core.hooksPath .githooks
+  mkdir -p "$AGENT_GATES_DIR/bin" "$AGENT_GATES_DIR/hooks/git"
+  cp "$SCRIPT_DIR/../bin/agent-gates-hooks-sync" "$SCRIPT_DIR/../bin/agent-gates-migrate" "$AGENT_GATES_DIR/bin/"
+  cp "$SCRIPT_DIR/../hooks/git/gate-shim.sh" "$AGENT_GATES_DIR/hooks/git/"
+  out=$(bash "$STATUS" --no-network --full "$PROJ" 2>&1)
+  row=$(proj_row "$out")
+  assert "允许 all current (行: ${row:-<空>})" "$([[ "$row" == *"all current"* ]] && echo true || echo false)"
+  rm -rf "$PROJ"; teardown )
+
 echo
 read -r P F < "$RESULTS_FILE"
 echo "=== PASS=$P FAIL=$F ==="

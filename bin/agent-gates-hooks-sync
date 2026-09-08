@@ -46,6 +46,29 @@ SHIM_MARKER="agent-gates per-project gate shim"
 # one that was missing everywhere.
 NEEDED=(pre-merge-commit)
 
+# Ownership = "we authored this", and a COMMENT naming the gate is not authorship.
+# Widening the match to any occurrence of AGENT_QUALITY_GATE / agent-quality-gate.sh
+# (added so the documented husky form would stop being classified foreign) over-corrected:
+# a no-op hook carrying only `# AGENT_QUALITY_GATE` got claimed as ours and had a
+# pre-merge-commit written next to it — breaking this file's own "never touch a hook we did
+# not author". So: the shim marker, or a NON-COMMENT line that actually invokes the gate.
+_owns_hook() {
+  local f="$1"
+  grep -q "$SHIM_MARKER" "$f" 2>/dev/null && return 0
+  grep -vE '^[[:space:]]*#' "$f" 2>/dev/null \
+    | grep -qE 'agent-quality-gate\.sh|GATE_VERSION|Agent Quality Gate' && return 0
+  return 1
+}
+
+# ⛔ A symlinked hook is never written through. `chmod +x` and `cp` both follow symlinks, so
+# --apply was overwriting whatever the link pointed at — reproduced writing a file OUTSIDE
+# the repository entirely. Scope escape, and silent.
+_refuse_symlink() {  # _refuse_symlink <path> <label> <repo>
+  [[ -L "$1" ]] || return 1
+  echo "⚠️  $2 是 symlink（→ $(readlink "$1" 2>/dev/null)），一律不改：写穿会动到仓库外的文件: $3"
+  return 0
+}
+
 if [[ ${#ROOTS[@]} -eq 0 ]]; then
   echo "agent-gates-hooks-sync: no root dir given." >&2
   echo "usage: agent-gates-hooks-sync [--apply] <root-dir> [<root-dir> ...]" >&2
@@ -110,12 +133,13 @@ while IFS= read -r gitdir; do
     broken=$((broken + 1))
     continue
   fi
-  if ! grep -q "$SHIM_MARKER" "$pc" 2>/dev/null; then
-    if ! grep -qE 'Agent Quality Gate|GATE_VERSION|mcdowell8023/agent-gates|AGENT_QUALITY_GATE|agent-quality-gate\.sh' "$pc" 2>/dev/null; then
-      echo "跳过 (pre-commit 不是 agent-gates 的钩子，未触碰): $repo"
-      foreign=$((foreign + 1))
-      continue
-    fi
+  if _refuse_symlink "$pc" "pre-commit" "$repo"; then
+    foreign=$((foreign + 1)); continue
+  fi
+  if ! _owns_hook "$pc"; then
+    echo "跳过 (pre-commit 不是 agent-gates 的钩子，未触碰): $repo"
+    foreign=$((foreign + 1))
+    continue
   fi
 
   # Only NOW, after ownership is established, may the base hook's mode be touched.
@@ -136,8 +160,10 @@ while IFS= read -r gitdir; do
     action=""      # "" = nothing to do · add · fix-mode · replace
     if [[ ! -f "$target" ]]; then
       action="add"
+    elif _refuse_symlink "$target" "$h" "$repo"; then
+      foreign=$((foreign + 1)); continue
     elif ! grep -q "$SHIM_MARKER" "$target" 2>/dev/null; then
-      if grep -qE 'Agent Quality Gate|GATE_VERSION|mcdowell8023/agent-gates|AGENT_QUALITY_GATE|agent-quality-gate\.sh' "$target" 2>/dev/null; then
+      if _owns_hook "$target"; then
         action="replace"       # an old frozen copy of ours — safe to refresh
       else
         # ⛔ Existence is not compliance. A hand-written `exit 0` here reports "complete"

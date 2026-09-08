@@ -209,8 +209,9 @@ fi
 # independent of it, and gating them behind another tool's existence is how a report goes
 # quiet about the thing it should be loudest about.
 if [[ "$FULL" -eq 1 ]]; then
-  TO_MIG=""; SHIMMED=""
+  TO_MIG=""; SHIMMED=""; MIG_RAN=0
   if [[ -x "$INSTALL_DIR/bin/agent-gates-migrate" ]]; then
+    MIG_RAN=1
     MIG="$("$INSTALL_DIR/bin/agent-gates-migrate" "${ROOTS[@]}" 2>/dev/null | tail -1)"
     TO_MIG="$(printf '%s' "$MIG" | sed -n 's/.*: \([0-9]*\) to migrate.*/\1/p')"
     SHIMMED="$(printf '%s' "$MIG" | sed -n 's/.*, \([0-9]*\) already shim.*/\1/p')"
@@ -255,6 +256,13 @@ if [[ "$FULL" -eq 1 ]]; then
     else
       row "projects" "${Y}${SHIMMED:-0} on shim · ${HS_SUMMARY}${N}（需人工处理，详见 agent-gates-hooks-sync 输出）"
     fi
+    ATTENTION=1
+  elif [[ "$MIG_RAN" -eq 0 ]]; then
+    # hooks-sync only judges hook completeness; the frozen-vs-shim dimension comes from
+    # migrate. With migrate absent that dimension was never scanned, so "all current" would
+    # be a claim about something nobody looked at. Same rule already applied when hooks-sync
+    # is the missing one — it just was not applied symmetrically.
+    row "projects" "${Y}未检查 frozen/stale（agent-gates-migrate 不可用）· ${HS_SUMMARY}${N}"
     ATTENTION=1
   else
     row "projects" "${G}${SHIMMED:-0} on shim, all current · ${HS_SUMMARY}${N}"
