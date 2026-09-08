@@ -197,7 +197,13 @@ agent-gates-verify-import <body.md> --paseo-agent <agent-id>
 来源必须声明，锚点由工具计算。⛔ **不要手写 `.dispatch.json`** —— 那是伪造派发记录；
 在 v2.5.0 之前那是唯一出路，现在不是了。
 
-opencode 与 codex 都跑不了时，**不要停在这里、也不要伪造锚点**。走两阶段：
+### 两阶段派发 —— 这是**标准流程**，不是最后手段
+
+⚠️ 此前这一节写的是「opencode 与 codex 都跑不了时」才走两阶段，把它定位成了兜底。
+方向是反的：CLI 那条路才是有 prompt 长度地雷的一条。**需要投递上下文的审查，默认走这里。**
+
+阶段 1 把 prompt 存成快照文件、并在那一刻捕获锚点 —— 所以长 prompt 天然不经过 argv，
+这个流程本身就绕开了那个坑。
 
 ```bash
 # 阶段 1：工具捕获锚点 + 快照 prompt + 发 token，退出码 77
@@ -232,9 +238,33 @@ agent-gates-review --import-result /tmp/review.md --token <token> \
 
 Cross-check MUST use a different model/vendor. Priority order:
 
+> 🔴 **先按「要投递多少 prompt」选通道，再选模型。** 这一步选错，后面全白费。
+>
+> | prompt 规模 | 通道 | 理由 |
+> |---|---|---|
+> | **需要投递上下文**（diff、多条待核项、超过 ~200 字符） | ⭐ **Paseo `create_agent`** | prompt 走**消息**，没有 argv 长度地雷；进度可见、可中途追问、可续跑 |
+> | 短且自足（让模型自己去读文件，prompt ≤200 字符） | `pi -p` CLI | ~7s 返回，跑完即退 |
+>
+> **实测（2026-09-02，变量隔离：同模型 `github-copilot/gpt-5.4`、同工具 `pi`、同一份 ~1000 字符 prompt）**：
+>
+> | 投递方式 | 结果 |
+> |---|---|
+> | `pi -p "<长 prompt>"`（走 argv） | **挂住**，数分钟无输出，只能杀掉 |
+> | Paseo `create_agent`（走消息） | 正常跑完 |
+>
+> ⛔ **不要把长 prompt 内联进任何 CLI。** 非交互模式下超长 prompt 会挂死（此前实测过 22 分钟），
+> 而且撞上之后**不要靠收窄 prompt 重试** —— 那会丢掉审查的具体性。两条正确出路：
+> ① 派 Paseo 子会话；② 把内容写进文件，给 CLI 一个 ~20 字符的 prompt 指向它
+> （`pi -p … "按 /tmp/x/prompt.md 做审查"`，模型自己去读）。
+>
+> ⚠️ 长 prompt 挂死的表现是**没有输出、也没有报错**；而模型不可用时 `pi` 打印
+> `OpenAI API error (400)` 却**退出码 0**。两种情况都不能只看退出码 ——
+> 收割前必须确认输出里有 `VERDICT` 行。
+
 | Priority | Tool | When to use |
 | --- | --- | --- |
-| 1. ⭐ **pi + heterogeneous model** (首选) | `pi -p --tools read,grep,find,ls --provider <provider> --model <model> "<prompt>"` （⚠️ `--provider` 与 `--model` 是**两个独立参数**，不能写成 `provider/model` 一串；prompt 是位置参数放最后） | **Default for all cross-checks** |
+| 1. ⭐ **Paseo `create_agent` + heterogeneous model**（审查默认） | `mcp__paseo__create_agent`，provider 形如 `pi/github-copilot/gpt-5.4`；prompt 作为 `initialPrompt` 传入 | **任何需要投递上下文的审查**：代码审查、计划审查、验收。见上方表 |
+| 1b. **pi CLI**（短问题快路径） | `pi -p --tools read,grep,find,ls --provider <provider> --model <model> "<prompt>"` （⚠️ `--provider` 与 `--model` 是**两个独立参数**，不能写成 `provider/model` 一串；prompt 是位置参数放最后；⛔ **≤200 字符**） | 一句话能问清、且模型自己去读文件的场合 |
 
 > 🔴 **`--tools read,grep,find,ls` 不是可选的。** pi 默认带 `edit` / `write` / `bash`，
 > 审查者会直接动手改。2026-09-01 实测：一次代码审查里 gemini-3.1-pro 改了被审的源文件、
