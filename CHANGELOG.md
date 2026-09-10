@@ -2,6 +2,75 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.9.2 — grok 接掉 gemini 的位置，顺带发现那个格子早就是空的
+
+用户反馈 gemini 的审查质量不行，要求换 grok-4.5。换型号本来是改一行数据，但查下去发现
+四件事。
+
+**1. 光改数据不生效。** `lib/hetero/select.sh` 的 `_extract_vendor` case 表里没有 grok，
+返回 `unknown`，而 `build_review_models` 里紧跟着一句 `[[ "$v" == "unknown" ]] && continue`
+—— 配置里写了 grok，池子里也不会有它，且全程没有一行输出说明原因。同一张表在
+`merge_capability` 的内联 python 里还有第二份（`vendors = [...]`），漏了 grok 会让
+`pv` 判成 `unknown`，与 platform 未探测出来时的 `coding_vendor='unknown'` 相等，
+于是**整份本地配置被 exit 1 拒掉**。两处都补了（`lib/hetero/family.sh` 早就有
+`grok-* → xai`，那张是公司名族表，不需要改）。
+
+**2. gemini 那个格子在被发现之前就已经是空的。**
+`github-copilot/gemini-3.1-pro-preview` 在 `opencode models` 和 pi 的 catalog 里都查不到
+（2026-09-08 实测），剩下的 gemini 型号全是 `gemini-*-flash`，而 `build_review_models`
+里有一句硬编码 `[[ "$name" == *flash* ]] && continue`。那一项从型号下架起就没被选中过。
+
+**3. `data/review-model-recommendations.json` 里 `excluded_patterns` 是个装饰字段。**
+声明了 `["flash","glm"]`，但**全库 lib/ 零引用** —— flash 的剔除来自上面那句硬编码
+（`build_review_models` 和 `filter_panel_pool` 各一份），`glm` 则完全没有拦，
+写在配置里也照样进池。⚠️ 本次第一版把机制写成「flash 命中 excluded_patterns」，
+两个审查模型都指出这是假叙事，并且配的那条测试（只读 JSON 字段、名字叫「仍然排除」）
+是**给死配置续命的假绿**。已改成两条特征测试：一条证实 glm 型号进得去，
+一条证实 `excluded_patterns` 为空也照样剔 flash —— 真去实现这个字段时它们会变红。
+
+**4. `skills/agent-review-protocol/SKILL.md` 的推荐表里有两行填不出来的型号。**
+除 gemini 那条，还有 `openai/gpt-5.5-pro` —— **`openai` 这个 provider 根本不存在**
+（opencode 侧只有 github-copilot / opencode / openrouter-free / volcengine-*；pi 侧只有
+volcengine-coding / volcengine-agent-plan / jdcloud-joyagent / github-copilot）。
+表已重写，逐个探活过。同一次复查还发现推荐数据里三个 `bailian/*` 也是同样状态
+（本机没有 bailian provider），已就地标注而非删除 —— 别的机器可能配了。
+
+`tests/run_review_vendor_grok.sh` 13 条，含一条端到端：fake opencode 列出 grok-4.5，
+断言它必须真的出现在 `panel_pool` —— 只测 `_extract_vendor` 的返回值不够，那句
+`continue` 在别的函数里。
+
+`tests/run-all.sh` 一并带入。⚠️ 不带它这个新测试文件就是装饰：main 上唯一的 runner
+`tests/run.sh` 只跑 memory-reminder fixture，`run_*.sh` 一个都不执行 —— 审查抓到的，
+和之前「测试没覆盖本次新增文件」是同一类。
+
+### 顺带纠正文档里的三处错误断言
+
+- `panel_active` 被写成 "concurrent reviewers"。**一次异构审查只有一路。** 两边都是串行
+  fallback、第一个成功就停。`panel_active` 准确说是 `panel_pool[:panel_active]` 的切片上限，
+  实际链长 = `min(panel_active, len(panel_pool))`，还要再过 `panel_mode`。
+- 通道链尾写成 `→ codebuddy → agent-tool`。实际 codebuddy 之后 `channel` 保持
+  `exhausted`，**没有 agent-tool 兜底**。
+- 把 `panel_pool` 和 `channels.opencode.enabled` 绑在一起说 —— 这是本次新造的错误断言。
+  两套机制互不相干：`hetero_dispatch` 受 `channels.*` 约束、读 `pi_models.primary`；
+  而 `panel_pool` 走 `bin/agent-gates-review` → `run_fallback_chain`，
+  **完全不看 channel 开关**，只要 `opencode` 二进制在、serve 起得来就会用。
+  文档里补了一张两列对照表。
+- 「第二轮必须换族」改成「建议」：仓库不记录上一轮 reviewer 的族，也没有跨轮校验，
+  那是外部工作规则，不是 agent-gates 能强制的。
+
+⚠️ 已知未改：`_extract_vendor`（8 个厂商，marketing 名）与 `lib/hetero/family.sh`
+（14 个族，公司名）是同一个概念的两份实现。合并要连 `infer_coding_vendor`、`select_primary`
+和所有已存配置里的 `coding_vendor` 一起改，超出本次范围。代价是
+`doubao` / `hunyuan` / `mai-code` / `minimax` 在 select.sh 里仍然落在 `unknown`。
+
+### 审查记录
+
+两路并行、都是异构（实施者是 claude/anthropic）：`github-copilot/gpt-5.6-sol`（openai）
+7 条 → **FAIL**，`github-copilot/grok-4.5`（xai）多条 → **FAIL**。
+两边独立指向同一个核心问题（`excluded_patterns` 假叙事 + 那条假绿测试）；
+grok 另外单独抓到 `panel_pool` ↔ `channels.opencode` 那条错误绑定，gpt 没抓到。
+全部修完后复审。
+
 ## v2.9.1 — merge 门禁此前没有可运行的钩子点
 
 `merge-only` 档把审查推迟到「合并进集成分支」那一刻。而 git 对 merge commit 走的是

@@ -272,12 +272,33 @@ agent-gates v2.4.0 起该通道默认关闭，v2.4.1 起 `oc-review` 在禁用�
 
 ### Model Selection for Cross-Check
 
+全部型号 2026-09-08 逐个探活过（`opencode models` 列举 + `pi -p ... "Reply with exactly: OK"` 实调）。
+
 | Scenario | Recommended model |
 | --- | --- |
 | Development review (find bugs/gaps) | `github-copilot/gpt-5.6-sol` |
-| Diagnosis / root-cause verification | `openai/gpt-5.5-pro` (strong reasoning) |
-| Large document review | `github-copilot/gemini-3.1-pro-preview` (long context + different perspective) |
+| 换族复核（建议第二轮换族，⛔ 门禁不强制、见下文） | `github-copilot/grok-4.5`（xai，500K 上下文） |
+| 性价比优先 | `volcengine-coding/deepseek-v4-flash` |
 | Small patch / short code | code-reviewer agent (fast, acceptable for trivial) |
+
+⚠️ 这张表 2026-09-08 之前有两行是**填不出来的型号**，两条都不会报"型号不存在"，只会表现为
+审查失败或降级：
+
+- `openai/gpt-5.5-pro` —— **`openai` 这个 provider 根本不存在**。opencode 侧只有
+  github-copilot / opencode / openrouter-free / volcengine-*；pi 侧只有 volcengine-coding /
+  volcengine-agent-plan / jdcloud-joyagent / github-copilot。
+- 同一次复查还发现推荐数据里三个 `bailian/*` 也在同样的状态：**本机两个 catalog 都没有
+  bailian provider**，所以它们和下架前的 gemini 一样选不出来（没删是因为别的机器可能配了，
+  见 `data/review-model-recommendations.json` 的 `_note_bailian_unverified`）。
+- `github-copilot/gemini-3.1-pro-preview` —— 型号已下架，两个 catalog 里都查不到，
+  剩下的 gemini 全是 `gemini-*-flash`，而 `build_review_models` / `filter_panel_pool` 里
+  各有一句**硬编码** `[[ "$name" == *flash* ]] && continue`（⛔ 剔 flash 靠的是这句，
+  **不是** `data/review-model-recommendations.json` 的 `excluded_patterns` —— 那个字段
+  全库 `lib/` 零引用，`glm` 写在里面也照样进池）。也就是说
+  **gemini 这个格子在被发现之前就已经是空的**。
+
+⛔ 往这张表里填任何型号之前先探活：`pi -p --provider <p> --model <m> --no-tools "Reply with exactly: OK"`。
+反过来也别把一次探测失败写成永久结论 —— `gpt-5.5` 在 09-01 连续 5 次返回 400，09-08 复验又正常了。
 
 ### opencode Command Template
 
@@ -682,7 +703,35 @@ Note: L0/L1/L2/L3 refer to capability levels set by `doctor.sh`, not route prior
 
 **Route 1 — use `oc-review`, not bare `opencode run`** (v1.13.0): `~/.agent-gates/bin/oc-review` wraps `opencode run` with **retry-on-empty** and **shared serve** management. It auto-starts a persistent `opencode serve --pure --port 4096` and injects `--attach` to route all runs through it, eliminating per-run serve stacking (the P1 memory leak that caused kernel panic). On persistent empty output it exits **75** with an `oc-review:`-prefixed stderr line → treat as route failure and fall through to route 2 (codex). Set `OC_SERVE_DISABLED=1` to skip serve integration. Orphaned serves are swept by `~/.agent-gates/bin/oc-reaper --apply`.
 
-**Model selection (v1.13.0 D6)**: `doctor.sh` runs the D6 algorithm to detect available models, exclude flash/coding-vendor duplicates, probe reachability, and persist `review_models` in `review-capability.json`. Fields: `coding_vendor` (inferred from platform), `primary` (reverse-heterogeneous pick), `panel_pool` (verified alternative models), `panel_active` (concurrent reviewers). Static recommendations live in `~/.agent-gates/data/review-model-recommendations.json`.
+**Model selection (v1.13.0 D6)**: `doctor.sh` runs the D6 algorithm to detect available models, exclude flash/coding-vendor duplicates, probe reachability, and persist `review_models` in `review-capability.json`. Fields: `coding_vendor` (inferred from platform), `primary` (reverse-heterogeneous pick), `panel_pool` (verified alternative models), `panel_active` (how many of `panel_pool` are
+eligible — **not** how many reviewers run at once; see below). Static recommendations live in `~/.agent-gates/data/review-model-recommendations.json`.
+
+⚠️ **一次异构审查只有一路，不是两路。** 名字容易误读，而且这里其实是**两套互不相干的机制**，
+第一版说明把它们绑在一起，是审查抓出来的新错误断言：
+
+| | verify / 门禁派发 | `agent-gates-review` 的 hetero 分支 |
+| --- | --- | --- |
+| 入口 | `hetero_dispatch`（`lib/hetero/dispatch.sh`） | `run_fallback_chain`（`lib/hetero/select.sh`） |
+| 读哪个配置 | `pi_models.primary` / `HETERO_OC_MODEL` | `review_models.primary` + `panel_pool` |
+| 受 `channels.*.enabled` 约束 | ✅ 是，关掉的通道直接跳过 | ❌ **否** —— `_try_review_model` 只查 `opencode` 二进制在不在、`oc_serve_ensure` 能不能起 |
+
+两边都是**串行 fallback，第一个成功就停**，不是并发扇出：
+
+- `hetero_dispatch` 每段通道前面都是 `if [[ "$channel" == "exhausted" ]]`。链是
+  paseo → pi → opencode → codex → codebuddy → **exhausted**。
+  ⚠️ 链尾**没有** agent-tool 兜底：codebuddy 之后 `channel` 保持 `exhausted`，
+  源码里那段注释叫它 "echo fallback"。别指望链尾还能自动补一次审查。
+- `run_fallback_chain` 先试 `primary`，**只有 primary 失败**才依次试 panel。
+- `panel_active` 是 `panel_pool[:panel_active]` 的**切片上限**，不是并发数、也不完全等于备胎链长度
+  —— 实际链长 = `min(panel_active, len(panel_pool))`，还要再过 `panel_mode`：
+  `off` 完全不用 panel / `always` 总用 / **`auto` 看 prompt 长度 ≥ 500 字符**
+  （`bin/agent-gates-review:269-271` 的 `_AUTO_PANEL_THRESHOLD`）。
+  ⚠️ `lib/hetero/select.sh` 里的 `get_review_models()` 对 `auto` 用的是另一套判据
+  （severity 为 critical|important），但那个函数**只有 `tests/run_review_selection.sh` 在调**，
+  `bin/` 零引用 —— 生产走的是 prompt 长度那条。看文档时别把它当成生效逻辑。
+
+想要真的两路，得**同一份 diff 派两次**、两次换族。⛔ 仓库不记录上一轮 reviewer 的族，
+也没有跨轮校验 —— 「第二轮换族」是外部工作规则，不是 agent-gates 能强制的东西。
 
 **Route 2 — codex prompt MUST go via stdin** (`< prompt-file`), NOT as a positional arg. `codex exec "..."` blocks on "Reading additional input from stdin..." in non-TTY/background contexts. `-s read-only` sandboxes the reviewer so it physically cannot modify files.
 
