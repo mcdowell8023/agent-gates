@@ -2,6 +2,41 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.9.7 — 免 token 登记「自己已经跑完的审查」
+
+🔴 卡人的实况（2026-09-10，wb 一条长会话）：它用 `pi -p` 跑完七轮审查、结论都在手上，
+但 `--import-result` **强制要 `--token`**，而 token 只能由**派发**签发 ⇒ 已经审完的东西
+拿不到 token ⇒ 那条线判断「凑不出官方产物」，停在原地不合 master。
+
+而做同一件事的 `agent-gates-verify-import` **不要 token、锚点当场算**。同一个仓库里
+两种形状，后者才是对的：
+
+| | token 证明的 | 锚点证明的 |
+| --- | --- | --- |
+| 内容 | 审查发生在派发**之后** | 审的**就是这份代码** |
+| 价值 | 只是顺序 | 顺序防不住的实际问题它都能防 |
+| 当场算会不会削弱 | — | ⛔ 不会 |
+
+⇒ `--import-result` 不带 `--token` 时走 `tokenless_import()`：`capture_review_anchor`
+当场算锚点（⛔ 从不接受调用方传进来的锚点），产物记 `REVIEW_TOOL: external` +
+模型 `unverified`，CHECK 5 照常认。
+
+### 三条 fail-closed
+
+- **必须自报型号**：不给 `--imported-model` 直接拒 —— 匿名审查无法记账，
+  异构是按「产出它的模型」判的
+- **⛔ 免 token 模式不接受 `--paseo-agent`**：没有派发记录就没有 `created_at`，
+  无从排除「旧 agent 给新审查顶账」（那正是 `--paseo-agent` 那条路要防的）⇒
+  与其发一份假的「已核实」，不如拒绝并说明
+- **没有 staged 变更就拒**：没东西可锚定
+
+### 测试
+
+`tests/run_review_import_tokenless.sh` 16 条，含带 token 老路子的回归。
+⚠️ 测试第一版 harness 自己有 bug：`$(mkrepo)` 是子 shell，里面的 `cd` 带不到调用方，
+后面所有 git 命令都跑在测试自己的 cwd 上（症状是 `pathspec 'src.ts' did not match`），
+而那时 ③④⑤ 三段是**空过**的 —— token 那道门把所有输入都挡在前面，看起来全绿。
+
 ## v2.9.6 — doctor 不再复活 opencode，也不再静默死掉
 
 起因：用户 2026-09-10 卸载 opencode 后，`~/.opencode` 在 40 分钟内**自己回来了**，
