@@ -656,8 +656,50 @@ PY
   printf '%s' "$out"
 }
 
+# 免 token 登记：把「我自己已经跑完的审查」变成合法产物。
+#
+# 🔴 卡人的实况（2026-09-10）：一条会话用 pi -p 跑完七轮审查、结论都在手上，
+# 但 --import-result 强制要 --token，而 token 只能由**派发**签发 ⇒ 已经审完的东西
+# 拿不到 token ⇒ 它判断「凑不出官方产物」，停在原地不合 master。
+#
+# ⭐ 而做同一件事的 agent-gates-verify-import **不要 token、锚点当场算**。同一个仓库
+# 两种形状，后者才是对的：token 唯一证明的是「审查发生在派发之后」，而锚点证明的是
+# 「审的就是这份代码」—— 后者才有价值，且当场算一点不削弱它。
+#
+# ⛔ 这条路**不能**产出"已核实"的凭据：没有派发记录就没有 created_at，无从证明某个
+# Paseo agent 后于派发创建（旧 agent 顶账正是 --paseo-agent 要防的）⇒ 免 token 模式下
+# 拒绝 --paseo-agent，产物一律记 REVIEW_TOOL: external + model unverified。
+tokenless_import() {
+  [[ -f "$IMPORT_RESULT" && -s "$IMPORT_RESULT" ]] || {
+    echo "agent-gates-review: review file missing or empty: $IMPORT_RESULT" >&2; exit 75; }
+  [[ -n "$IMPORTED_MODEL" ]] || {
+    echo "agent-gates-review: --import-result without --token needs --imported-model <provider/model> — an anonymous review cannot be accounted for (heterogeneity is checked against the model that produced it)" >&2
+    exit 1; }
+  [[ -z "$PASEO_AGENT" ]] || {
+    echo "agent-gates-review: --paseo-agent needs --token — without a dispatch record there is no created_at to check the agent against, so 'an older agent vouching for a newer review' cannot be ruled out. Drop --paseo-agent (recorded as unverified), or dispatch first with --route paseo." >&2
+    exit 1; }
+
+  # 锚点当场算 —— 与 agent-gates-verify-import 同一形状，⛔ 从不接受调用方传进来的锚点。
+  capture_review_anchor
+  [[ "$REVIEW_ANCHOR_ENABLED" == "1" ]] || {
+    echo "agent-gates-review: nothing staged — there is no content to anchor this review to. Stage the change you had reviewed, then import." >&2
+    exit 75; }
+
+  local body; body=$(cat "$IMPORT_RESULT")
+  if ! has_valid_conclusion "$body"; then
+    echo "agent-gates-review: imported review produced no VERDICT line — it must contain a line matching 'VERDICT: PASS|REVISE|FAIL|ISSUES|APPROVED|REJECT'. Review said: $(printf '%.200s' "$body" | tr '\n' ' ')" >&2
+    exit 75
+  fi
+
+  local product mrc=0
+  product=$(append_marker "external" "${IMPORTED_MODEL} (unverified)" "$body") || mrc=$?
+  [[ $mrc -eq 0 ]] || exit "$mrc"
+  echo "agent-gates-review: imported without a dispatch token — recorded as REVIEW_TOOL: external, model '${IMPORTED_MODEL}' marked unverified; anchors computed at import time" >&2
+  output_result "$product"
+  exit 0
+}
+
 paseo_import() {
-  [[ -n "$IMPORT_TOKEN" ]] || { echo "agent-gates-review: --import-result requires --token" >&2; exit 1; }
   [[ -f "$IMPORT_RESULT" && -s "$IMPORT_RESULT" ]] || { echo "agent-gates-review: review file missing or empty: $IMPORT_RESULT" >&2; exit 75; }
   # The channel is not prescribed: any reviewer can be imported. --paseo-agent additionally
   # proves a heterogeneous Paseo agent existed; without it the import still works but the
@@ -768,7 +810,11 @@ print(a['enabled']); print(a['head']); print(a['files_sha256']); print(a['diff_s
 paseo_sweep "$IMPORT_TOKEN"
 
 if [[ -n "$IMPORT_RESULT" ]]; then
-  paseo_import
+  if [[ -n "$IMPORT_TOKEN" ]]; then
+    paseo_import
+  else
+    tokenless_import
+  fi
 fi
 
 if [[ "$ROUTE" == "paseo" ]]; then
