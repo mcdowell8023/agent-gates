@@ -4,12 +4,26 @@
 # selection, panel pool filtering, capability merge, fallback chain.
 # Requires: bash 4+, python3.
 
+# ⚠️ This is a SECOND vendor table — 8 vendors here, against the 14 families in
+# lib/hetero/family.sh (which include xai/bytedance/tencent/minimax). That one answers in
+# company names
+# — anthropic/openai/google — while this one answers in the marketing names that
+# `infer_coding_vendor` and the persisted `coding_vendor` field already use
+# (claude/gpt/gemini). Merging them means remapping both plus every stored config, so
+# they stay separate for now. The cost of that split is that a vendor added to one is
+# NOT known to the other: `doubao` / `hunyuan` / `mai-code` / `minimax` all still land
+# in "unknown" here.
+#
+# "unknown" is not inert. build_review_models has `[[ "$v" == "unknown" ]] && continue`,
+# so an unrecognised vendor is dropped from the panel pool silently — configure the
+# model all you like, it will never be a candidate and nothing says why.
 _extract_vendor() {
   local name="${1#*/}"
   case "$name" in
     *gpt*) echo "gpt" ;;
     *claude*) echo "claude" ;;
     *gemini*) echo "gemini" ;;
+    *grok*) echo "grok" ;;
     *qwen*) echo "qwen" ;;
     *deepseek*) echo "deepseek" ;;
     *kimi*) echo "kimi" ;;
@@ -101,7 +115,11 @@ if 'review_models' in local_data:
         coding_vendor = rm.get('coding_vendor', '')
         new_primary = lrm['primary']
         name = new_primary.split('/')[-1] if '/' in new_primary else new_primary
-        vendors = ['gpt', 'claude', 'gemini', 'qwen', 'deepseek', 'kimi', 'glm']
+        # Keep in step with _extract_vendor above — this is the same table, a third time,
+        # in python. Missing a vendor here does not drop the model; it makes pv 'unknown',
+        # which collides with coding_vendor 'unknown' (platform undetected) and rejects the
+        # whole local config with a bare exit 1.
+        vendors = ['gpt', 'claude', 'gemini', 'grok', 'qwen', 'deepseek', 'kimi', 'glm']
         pv = 'unknown'
         for v in vendors:
             if v in name.lower():
