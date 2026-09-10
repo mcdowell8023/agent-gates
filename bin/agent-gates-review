@@ -193,13 +193,57 @@ append_marker() {
   fi
 }
 
+# 产物同时写进按**仓库**（不是按 worktree）分键的共享库。
+#
+# 🔴 为什么需要它：`.gitignore` 排除 `.agent/reviews/` 与 `.agent/verify/`（wb 的项目
+# 整个 `.agent/` 都 ignore），而 `merge-only` 把审查/验收推迟到「合并进 strict 分支」
+# 那一刻。产物在**功能分支的 worktree** 里生成、merge 在**主仓 worktree** 发生 ——
+# 既不进 git 又不跨 worktree ⇒ **永远到不了那个检查点**。
+#
+# repo-key 取自 `git rev-parse --git-common-dir`：同一仓库的所有 worktree 同键，
+# 不同仓库不同键（⛔ 不能跨仓串）。⛔ 不动任何项目的 .gitignore —— 那要各项目分别改，
+# 而且会把审查正文推进 git 历史。
+artifact_store_dir() {   # artifact_store_dir <reviews|verify>
+  local kind="$1" common key
+  common=$(git rev-parse --git-common-dir 2>/dev/null) || return 1
+  [[ -n "$common" ]] || return 1
+  # 相对值（主 worktree 里就是 `.git`）先转成绝对，否则不同仓库会撞同一个键。
+  # ⛔ 必须解析软链后再算 key。macOS 上 worktree 里 `git rev-parse --git-common-dir`
+  # 返回 `/private/var/...`，而主 worktree 返回相对的 `.git`；把相对值转绝对会得到
+  # `/var/...` —— `/var` 是 `/private/var` 的软链 ⇒ **同一个仓库在两个 worktree 里算出
+  # 不同的 key**，共享库当场失效（2026-09-10 实测）。用 `pwd -P` 统一到物理路径。
+  local pdir base
+  pdir=$(cd -P "$(dirname "$common")" 2>/dev/null && pwd -P) || return 1
+  base=$(basename "$common")
+  common="$pdir/$base"
+  key=$(printf '%s' "$common" | sha256_stream | cut -c1-16)
+  printf '%s/artifacts/%s/%s' "${AGENT_GATES_DIR:-$HOME/.agent-gates}" "$key" "$kind"
+}
+
+artifact_store_put() {   # artifact_store_put <reviews|verify> <content>
+  local kind="$1" content="$2" dir
+  dir=$(artifact_store_dir "$kind") || return 0      # 不在 git 里就跳过，⛔ 不因此失败
+  mkdir -p "$dir" 2>/dev/null || return 0
+  local f="$dir/$(date +%Y%m%d-%H%M%S)-$$.md"
+  printf '%s\n' "$content" > "$f" 2>/dev/null || true
+  return 0
+}
+
 output_result() {
   local content="$1"
   if [[ -n "$RESULT_FILE" ]]; then
-    printf '%s\n' "$content" > "$RESULT_FILE"
+    # ⛔ 写失败不能静默。原来是裸 `> "$RESULT_FILE"`：父目录不存在时重定向失败，
+    # 而函数照样返回 0、调用方照样 exit 0 —— 表现为「命令说成功了，产物却不在」。
+    # `.agent/reviews/` 正好是被 gitignore 的目录，新 worktree 里天然不存在 ⇒ 必踩。
+    mkdir -p "$(dirname "$RESULT_FILE")" 2>/dev/null || true
+    if ! printf '%s\n' "$content" > "$RESULT_FILE"; then
+      echo "agent-gates-review: could not write the review to '$RESULT_FILE' — refusing to report success for an artifact that does not exist" >&2
+      return 75
+    fi
   else
     printf '%s\n' "$content"
   fi
+  artifact_store_put reviews "$content"
 }
 
 # parse_opencode_json / has_valid_conclusion moved to lib/hetero/conclusion.sh so the
@@ -695,7 +739,7 @@ tokenless_import() {
   product=$(append_marker "external" "${IMPORTED_MODEL} (unverified)" "$body") || mrc=$?
   [[ $mrc -eq 0 ]] || exit "$mrc"
   echo "agent-gates-review: imported without a dispatch token — recorded as REVIEW_TOOL: external, model '${IMPORTED_MODEL}' marked unverified; anchors computed at import time" >&2
-  output_result "$product"
+  output_result "$product" || exit $?
   exit 0
 }
 
@@ -800,7 +844,7 @@ print(a['enabled']); print(a['head']); print(a['files_sha256']); print(a['diff_s
     exit "$mrc"
   fi
 
-  output_result "$product"
+  output_result "$product" || { rm -rf "$proc"; exit $?; }
   rm -rf "$proc"
   exit 0
 }

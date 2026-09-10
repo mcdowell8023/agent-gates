@@ -52,6 +52,25 @@ _gate_resolve_project_cfg() {
   printf '%s' "$rel"
 }
 _GATE_CFG_PROJECT=$(_gate_resolve_project_cfg)
+
+# 与 bin/agent-gates-review 的 artifact_store_dir 必须同口径（同一个 repo-key 算法），
+# ⛔ 两边分叉的话门禁就找不到刚写进去的产物 —— 而那种失败长得像「审查根本没做」。
+_gate_artifact_store_dir() {   # _gate_artifact_store_dir <reviews|verify>
+  local kind="$1" common key
+  common=$(git rev-parse --git-common-dir 2>/dev/null) || return 1
+  [[ -n "$common" ]] || return 1
+  # ⛔ 必须解析软链后再算 key。macOS 上 worktree 里 `git rev-parse --git-common-dir`
+  # 返回 `/private/var/...`，而主 worktree 返回相对的 `.git`；把相对值转绝对会得到
+  # `/var/...` —— `/var` 是 `/private/var` 的软链 ⇒ **同一个仓库在两个 worktree 里算出
+  # 不同的 key**，共享库当场失效（2026-09-10 实测）。用 `pwd -P` 统一到物理路径。
+  local pdir base
+  pdir=$(cd -P "$(dirname "$common")" 2>/dev/null && pwd -P) || return 1
+  base=$(basename "$common")
+  common="$pdir/$base"
+  key=$(printf '%s' "$common" | { command -v sha256sum >/dev/null 2>&1 && sha256sum || shasum -a 256; } 2>/dev/null | awk '{print $1}' | cut -c1-16)
+  [[ -n "$key" ]] || return 1
+  printf '%s/artifacts/%s/%s' "${AGENT_GATES_DIR:-$HOME/.agent-gates}" "$key" "$kind"
+}
 _GATE_CFG_USER="${AGENT_GATES_DIR:-$HOME/.agent-gates}/gates.json"
 GATE_MODE_SOURCE=""
 
@@ -575,7 +594,16 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
           PASS_REVIEW_FILE="$rf"
         fi
       fi
-    done < <(find .agent/reviews/ -type f -name "*.md" -print 2>/dev/null | sort)
+    # 除项目内的 `.agent/reviews/`，还要扫按仓库分键的共享库 ——
+    # 那两个目录都被 .gitignore 排除，产物在功能分支 worktree 里生成、merge 在主仓发生，
+    # 不扫共享库就**永远看不到自己刚生成的产物**（2026-09-10 实测，当时只能手工 cp）。
+    # repo-key 取自 git-common-dir ⇒ 同仓库所有 worktree 同键，⛔ 不跨仓。
+    done < <( {
+      find .agent/reviews/ -type f -name "*.md" -print 2>/dev/null || true
+      _gate_store=$(_gate_artifact_store_dir reviews) || true
+      [[ -n "${_gate_store:-}" && -d "$_gate_store" ]] && \
+        { find "$_gate_store" -type f -name "*.md" -print 2>/dev/null || true; }
+    } | sort )
 
     REVIEW_FILE="$PASS_REVIEW_FILE"
     if [[ -n "$NEGATIVE_REVIEW_FILE" ]]; then
