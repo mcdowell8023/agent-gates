@@ -30,7 +30,28 @@ set -euo pipefail
 # strict_branches: on these branches, and on merges INTO them, strict is forced regardless
 # of configuration. That is where "one full review before it reaches test/master" lands.
 # ---------------------------------------------------------------------------
-_GATE_CFG_PROJECT=".agent/gates.json"
+# 🔴 一线反馈（2026-09-10）：项目 .gitignore 里有 `.agent/`（wb 的 crm-center / crm-platform
+# 都是），所以 gates.json 从未被 git 跟踪 ⇒ `git worktree add` 出来的目录里根本没有它。
+# gate 找不到项目策略就按 strict 走，在普通业务分支上也强制要求 review + verify 产物，
+# 每建一个 worktree 都得手工 cp 一份。
+#
+# 采纳反馈里的第二个建议：**回退到主 worktree 去找**。`git rev-parse --git-common-dir`
+# 在 worktree 里返回主仓的 .git，其父目录就是主 worktree 根。一处改动覆盖所有项目，
+# ⛔ 不动任何项目的 .gitignore（那要各项目分别改，且会把策略文件推进 git）。
+_gate_resolve_project_cfg() {
+  local rel=".agent/gates.json"
+  [[ -f "$rel" ]] && { printf '%s' "$rel"; return 0; }
+  local common main
+  common=$(git rev-parse --git-common-dir 2>/dev/null) || { printf '%s' "$rel"; return 0; }
+  # 主 worktree 里这个值是相对的 `.git`，那时父目录就是 `.`，与上面的分支等价。
+  case "$common" in
+    /*) main="${common%/.git}" ;;
+    *)  printf '%s' "$rel"; return 0 ;;
+  esac
+  [[ -f "$main/$rel" ]] && { printf '%s' "$main/$rel"; return 0; }
+  printf '%s' "$rel"
+}
+_GATE_CFG_PROJECT=$(_gate_resolve_project_cfg)
 _GATE_CFG_USER="${AGENT_GATES_DIR:-$HOME/.agent-gates}/gates.json"
 GATE_MODE_SOURCE=""
 
@@ -270,7 +291,12 @@ done < <(git diff --cached --name-only --diff-filter=ACMR \
 MAX_SINGLE_FILE_LINES=0
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
-  flines=$(git diff --cached -- "$f" | grep -c '^+[^+]' 2>/dev/null || echo "0")
+  # ⛔ 不要写 `|| echo "0"`。`grep -c` 无匹配时**打印 0 并且退出码 1** ⇒ 那个 `||`
+  # 会再补一个 0，变量变成两行 `0\n0`，随后 `[[ "$flines" -gt N ]]` 抛算术语法错。
+  # `&&` 短路让循环继续，所以**不报错、不中断** —— MAX_SINGLE_FILE_LINES 从此不再更新，
+  # 单文件行数上限检查静默失效。触发条件只需 diff 里有一个纯删除文件（新增行数 0）。
+  # 一线实测反馈（2026-09-10），追到 6fffbf9（2026-06-27）—— 存在两个半月没人发现。
+  flines=$(git diff --cached -- "$f" | { grep -c '^+[^+]' 2>/dev/null || true; })
   [[ "$flines" -gt "$MAX_SINGLE_FILE_LINES" ]] && MAX_SINGLE_FILE_LINES="$flines"
 done < <(git diff --cached --name-only --diff-filter=ACMR \
   | grep -vE '(\.(lock|md|json|yaml|yml)$|generated/|migrations/|\.d\.ts$)' \
@@ -1044,7 +1070,8 @@ except Exception:
                 [[ -z "$sf" || ! -f "$sf" ]] && continue
                 SF_MTIME=$(stat -f %m "$sf" 2>/dev/null || stat -c %Y "$sf" 2>/dev/null || echo "0")
                 if [[ "$SF_MTIME" -gt "$VERIFY_MTIME" ]]; then
-                  sf_lines=$(git diff --cached -- "$sf" | grep -c '^+[^+]' 2>/dev/null || echo "0")
+                  # 同款（见上）：这处会让 POST_VERIFY_LINES 的累加中断。
+                  sf_lines=$(git diff --cached -- "$sf" | { grep -c '^+[^+]' 2>/dev/null || true; })
                   POST_VERIFY_LINES=$((POST_VERIFY_LINES + sf_lines))
                 fi
               done < <(git diff --cached --name-only --diff-filter=ACMR \

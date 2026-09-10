@@ -2,6 +2,56 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.9.5 — 一线反馈的两条 bug（都不是本次会话引入的）
+
+来自 `~/wb` 一条长会话的实测反馈（Paseo agent `3e2ffb58`，2026-09-10）。⚠️ 这两条我
+**此前完全不知道**，而且 BUG 1 就在我这两天连改三轮的那个文件里。
+
+## BUG 1 — `grep -c` + `|| echo "0"` 产出两行，静默废掉行数上限检查
+
+`hooks/git/agent-quality-gate.sh:273` 与 `:1047`（反馈里的 327/1101 是 2.9.1 行号）：
+
+```bash
+flines=$(git diff --cached -- "$f" | grep -c '^+[^+]' 2>/dev/null || echo "0")
+```
+
+`grep -c` 无匹配时**打印 `0` 并且退出码 1** ⇒ 那个 `||` 再补一个 `0`，变量成了 `0\n0`，
+随后 `[[ "$flines" -gt N ]]` 抛算术语法错。**`&&` 短路让循环继续，所以不报错、不中断**
+—— `MAX_SINGLE_FILE_LINES` 从此不再更新，单文件行数上限检查静默失效；`:1047` 那处
+同理会中断 `POST_VERIFY_LINES` 的累加。
+
+触发条件只需 diff 里有**一个纯删除文件**（新增行数 0）。引入于 `6fffbf9`
+（2026-06-27）—— 存在两个半月。
+
+改成 `{ grep -c '^+[^+]' 2>/dev/null || true; }`（`grep -c` 本来就一定打印数字）。
+全仓扫过，没有第三处同形状。
+
+## BUG 2 — 新 worktree 丢 `gates.json` ⇒ 门禁退回 strict
+
+项目 `.gitignore` 里有 `.agent/`（wb 的 crm-center / crm-platform 都是）⇒ `gates.json`
+从未被 git 跟踪 ⇒ `git worktree add` 出来的目录里根本没有它。门禁找不到项目策略就按
+**strict** 走，在普通业务分支上也强制要求 review + verify 产物，每建一个 worktree
+都得手工 `cp` 一份。
+
+采纳反馈里的第二个建议：**回退到主 worktree 去找**。`git rev-parse --git-common-dir`
+在 worktree 里返回主仓的 `.git`，其父目录就是主 worktree 根。一处改动覆盖所有项目，
+⛔ 不动任何项目的 `.gitignore`（那要各项目分别改，且会把策略文件推进 git）。
+
+⚠️ **我今天撞到的是同一族的另一个面**却没往上想一层：`.agent/reviews/` 被 ignore，
+导致审查产物在功能分支 worktree 里生成、merge 在主仓发生、**产物到不了那个检查点** ——
+当时我是手工 `cp` 过去才让门禁通过的（见 v2.9.3 的「已知未修」）。同一个根因。
+
+## 测试
+
+`tests/run_gate_reported_bugs.sh` 7 条。⚠️ 测试自己踩了两个坑，都写进注释：
+
+- `agent-quality-gate.sh:8` 那行 `AGENT_MODE != 1` **直接 exit 0、一个字不打印** ——
+  第一版没设它，把"输出为空"读成了断言失败
+- 断言 grep 的是 `mode: off`，而实际输出是 `mode=off`
+
+另外第一版试图 `eval` 从门禁里抽出来的代码片段做行为验证 —— 那段依赖门禁里的其它变量，
+抽出来跑等于测另一个东西。改成让**真门禁**跑在一个只删不加的 staged diff 上。
+
 ## v2.9.4 — opencode 从审查路径彻底移除
 
 用户 2026-09-10 卸载 opencode（`~/.opencode` 185MB + volta 上的 `oh-my-opencode` +
