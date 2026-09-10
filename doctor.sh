@@ -5,7 +5,12 @@
 
 set -euo pipefail
 
-INSTALL_DIR="$HOME/.agent-gates"
+# 🔴 必须听 AGENT_GATES_DIR。原来是硬编码 $HOME/.agent-gates ——
+# 于是**任何一次带 AGENT_GATES_DIR 的 doctor 调用（包括测试）都会写真实配置**。
+# 2026-09-10 实测代价：一次 RED 阶段的测试跑把用户手工设的
+# review_models.primary（gpt-5.6-sol → gpt-5.5）和 panel_pool（[grok-4.5] → []）冲掉了，
+# 而 doctor 只打印 "wrote ~/.agent-gates/hetero-check.json"，看不出它写的不是测试目录。
+INSTALL_DIR="${AGENT_GATES_DIR:-$HOME/.agent-gates}"
 REPO_URL="https://github.com/mcdowell8023/agent-gates"
 QUIET=0
 NO_NETWORK=0
@@ -385,7 +390,42 @@ check_cross_review_capability() {
   local preferred="" fallback=""
 
   # -- tool detection --
-  if command -v opencode &>/dev/null; then
+  # 🔴 2026-09-10：opencode 必须先过通道开关，⛔ 不能无条件探测。
+  #
+  # 实测触发的问题：用户卸载 opencode 后，`~/.opencode` 在 40 分钟内自己回来了，
+  # 端口 4096 上又起了一个 PPID=1 的 `opencode serve`（目录时间戳全是原始的 ⇒ 被还原、
+  # 不是重装）。最可能就是这里：探测链路里的 `oc_serve_ensure` 会**直接把 serve 拉起来**，
+  # 只要二进制还在，任何一次 doctor 都能复活它。同时 doctor 还把能力报成
+  # "L3 (opencode + codex)"，而那台机器上 opencode 已经不存在。
+  #
+  # 一个把用户明确关掉的通道重新拉起来的体检命令，比一个大声失败的更糟 ——
+  # 设置在所有人认知里还在，实际已经被绕过。
+  # ⛔ 内联读取，⛔ 不 source lib/hetero/select.sh —— doctor 跑在 set -euo pipefail 下，
+  # 把那个库整份 source 进来会连带执行它的顶层代码，行为随 AGENT_GATES_DIR 的内容而变
+  # （实测过：同一份 doctor 在两个 fake 目录下走出两条不同的路）。
+  # ⚠️ 默认值必须与 lib/hetero/select.sh 的 _review_chan_default 保持一致：
+  # opencode 默认 0（关），其余默认 1。改一处就要改另一处。
+  local _oc_chan_on _oc_chan_note=""
+  _oc_chan_on=$(python3 -c '
+import json, os, sys
+env = os.environ.get("HETERO_CHAN_OPENCODE")
+if env not in (None, ""):
+    print("1" if env == "1" else "0"); sys.exit(0)
+f = os.path.join(os.environ.get("AGENT_GATES_DIR") or os.path.expanduser("~/.agent-gates"),
+                 "hetero-check.json")
+try:
+    d = json.load(open(f))
+except Exception:
+    print("0"); sys.exit(0)          # 读不到就按默认（opencode=关），⛔ 不放行
+c = (d.get("channels") or {}).get("opencode") or {}
+e = c.get("enabled")
+print("0" if e is None else ("1" if e else "0"))
+' 2>/dev/null) || _oc_chan_on=0
+  [[ "$_oc_chan_on" == "1" ]] || _oc_chan_on=0
+  _OC_CHAN_ON="$_oc_chan_on"      # 供 check_opencode_health 等后续检查复用
+  if [[ "$_oc_chan_on" != "1" ]]; then
+    _oc_chan_note="opencode channel disabled (channels.opencode.enabled=false / HETERO_CHAN_OPENCODE=0) — skipped detection entirely; ⛔ probing it can start a serve"
+  elif command -v opencode &>/dev/null; then
     opencode_available=true
     opencode_path=$(command -v opencode)
   fi
@@ -423,6 +463,7 @@ check_cross_review_capability() {
   fi
 
   # -- capability level --
+  [[ -n "$_oc_chan_note" ]] && note "$_oc_chan_note"
   if [[ "$opencode_available" == "true" && "$codex_available" == "true" ]]; then
     level="L3"
     preferred="opencode"
@@ -554,10 +595,18 @@ RCEOF
 
 # v1.8.0: observe opencode serve leak (detect only — cleanup is oc-reaper's job).
 check_opencode_health() {
+  # 🔴 通道关掉时整段跳过：这里会 pgrep / lsof / 读 serve 状态，而用户明确关掉 opencode
+  # 之后不该再有任何一处代码去关心它的 serve。
+  [[ "${_OC_CHAN_ON:-1}" == "1" ]] || { note "opencode serve health: channel disabled, skipping"; return 0; }
   command -v opencode &>/dev/null || return 0
   command -v lsof &>/dev/null || { note "opencode serve health: lsof unavailable, skipping"; return 0; }
   local total orphans=0 pid port
-  total=$(pgrep -f "opencode serve" 2>/dev/null | wc -l | tr -d ' ')
+  # ⛔ `pgrep` 无匹配时退出码 1 ⇒ pipefail 放大 ⇒ 赋值非零 ⇒ `set -e` 直接杀掉 doctor。
+  # 后果是**下一行那个 `pass "no leaked serve processes"` 永远到不了** ——
+  # 它看着在处理"零个 serve"，实际是死代码；而 doctor 在 opencode 在 PATH 上、
+  # 却没有 serve 在跑时，会**不打汇总、静默退出**（2026-09-10 实测）。
+  # 与本轮一线反馈的 BUG 1（`grep -c ... || echo`）是同一个家族。
+  total=$( { pgrep -f "opencode serve" 2>/dev/null || true; } | wc -l | tr -d ' ')
   if [[ "${total:-0}" -eq 0 ]]; then pass "opencode: no leaked serve processes"; return 0; fi
   local keep_port="${OC_REVIEW_PORT:-}"
   while IFS= read -r pid; do
@@ -583,7 +632,7 @@ check_opencode_health() {
   # v1.13.0: shared serve health + RSS
   local serve_port="${OC_SERVE_PORT:-${OC_REVIEW_PORT:-4096}}"
   local serve_pid
-  serve_pid=$(pgrep -f "opencode serve.*port ${serve_port}" 2>/dev/null | head -1)
+  serve_pid=$( { pgrep -f "opencode serve.*port ${serve_port}" 2>/dev/null || true; } | head -1)
   if [[ -n "$serve_pid" ]]; then
     local serve_rss rss_mb
     serve_rss=$(ps -o rss= -p "$serve_pid" 2>/dev/null | tr -d ' ')

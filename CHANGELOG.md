@@ -2,6 +2,58 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.9.6 — doctor 不再复活 opencode，也不再静默死掉
+
+起因：用户 2026-09-10 卸载 opencode 后，`~/.opencode` 在 40 分钟内**自己回来了**，
+端口 4096 上又起了一个 PPID=1 的 `opencode serve`（目录时间戳全是原始的 ⇒ 是被还原、
+不是重装）。排查排除了 Syncthing（三个 folder 都不覆盖它）、cron、hermes。
+最可能的机制是 doctor：它的 D6 探测**无条件** shell out 到 opencode，链路里的
+`oc_serve_ensure` 会直接把 serve 拉起来 —— 只要二进制还在，任何一次 doctor 都能复活它。
+同时它把能力报成 `L3 (opencode + codex)`，而那台机器上 opencode 已经不存在。
+
+⭐ 一个把用户明确关掉的通道重新拉起来的体检命令，比一个大声失败的更糟：
+设置在所有人认知里还在，实际已经被绕过。
+
+### 改了三处
+
+**① opencode 探测先过通道开关。** `channels.opencode.enabled=false`（或
+`HETERO_CHAN_OPENCODE=0`）时完全不探测、不进能力判定，并打印跳过原因。
+`check_opencode_health` 整段一起门控 —— 关掉之后不该再有任何代码去 pgrep 它的 serve。
+⚠️ 读取是**内联**的，⛔ 不 source `lib/hetero/select.sh`：doctor 跑在 `set -euo pipefail`
+下，整份 source 会连带执行库的顶层代码，实测同一份 doctor 在两个 fake 目录下走出了
+两条不同的路。默认值必须与 `_review_chan_default` 保持一致（opencode=0，其余=1）。
+
+**② `INSTALL_DIR` 改为听 `AGENT_GATES_DIR`。** 原来硬编码 `$HOME/.agent-gates`
+⇒ **任何一次带 `AGENT_GATES_DIR` 的 doctor 调用（包括测试）都会写真实配置**。
+本轮 RED 阶段一次测试跑就把用户手工设的 `review_models.primary`
+（`gpt-5.6-sol` → `gpt-5.5`）和 `panel_pool`（`[grok-4.5]` → `[]`）冲掉了，
+而 doctor 只打印 `wrote ~/.agent-gates/hetero-check.json`，看不出它写的不是测试目录。
+已从备份恢复。测试里加了一条断言：跑完后真实配置**一个字节都不能变**。
+
+**③ `check_opencode_health` 在 0 个 serve 时会把 doctor 杀掉。**
+
+```bash
+total=$(pgrep -f "opencode serve" 2>/dev/null | wc -l | tr -d ' ')
+if [[ "${total:-0}" -eq 0 ]]; then pass "opencode: no leaked serve processes"; return 0; fi
+```
+
+`pgrep` 无匹配退出码 1 ⇒ pipefail 放大 ⇒ 赋值非零 ⇒ `set -e` 直接退出。
+**后果是下一行那个 `pass` 永远到不了 —— 它看着在处理"零个 serve"，实际是死代码**；
+而 doctor 在 opencode 在 PATH 上、却没有 serve 在跑时，会**不打汇总就退出**，
+看起来像"跑完了"。同族的 `serve_pid=$(pgrep ... | head -1)` 一并修。
+
+⚠️ 这与本轮一线反馈的 BUG 1（`grep -c ... || echo`）**是同一个家族**：
+命令"打印了结果但退出码非零"，而调用方用管道赋值。一天里同一类踩了三次
+（BUG 1 两处 + 这里两处），全仓已扫过 `=$( (pgrep|grep -c) ... |` 形状，无残留。
+
+### 测试
+
+`tests/run_doctor_channel.sh` 11 条。⚠️ 正对照改过两次判据：
+最初用「fake opencode 是否被执行」，但真正会 exec 它的是 D6 的
+`detect_available_models`，那条链还要 `$INSTALL_DIR/bin/with-timeout.mjs` 等一整套
+安装布局，fake 目录凑不出来 ⇒ 断言永远为假，是个**空心的正对照**。
+最终判据落在「能力行里有没有 opencode」。
+
 ## v2.9.5 — 一线反馈的两条 bug（都不是本次会话引入的）
 
 来自 `~/wb` 一条长会话的实测反馈（Paseo agent `3e2ffb58`，2026-09-10）。⚠️ 这两条我
