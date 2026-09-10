@@ -27,9 +27,19 @@
 #   AG_REVIEW_MODEL       opencode model (default "github-copilot/gpt-5.5")
 #   AG_REVIEW_MAX_CHARS   opencode prompt char limit (default 800). Legacy L0-L3 routing
 #                         only — the hetero branch does not gate on prompt length.
-#   AG_REVIEW_TIMEOUT     seconds allowed per reviewer invocation (default 300). Applies
-#                         to opencode and codex alike; exceeding it is reported as a
-#                         timeout rather than left to hang.
+#   AG_REVIEW_TIMEOUT     seconds allowed per OPENCODE reviewer invocation (default 120).
+#                         ⛔ Does NOT apply to the pi channel — see AG_REVIEW_PI_TIMEOUT.
+#                         The header used to claim 300 while the code read 120.
+#   AG_REVIEW_PI_TIMEOUT  seconds allowed per PI reviewer invocation (default 300). pi
+#                         deliberately does not inherit AG_REVIEW_TIMEOUT: 120s is the
+#                         point at which opencode is considered wedged, whereas pi at 120s
+#                         is still working — four measured real reviews took 1.5-4.5 min,
+#                         and the channel's first end-to-end run was cut off at 200s.
+#   AG_REVIEW_PI          path to the pi binary (default: pi on PATH).
+#   HETERO_CHAN_PI        1/0 — overrides channels.pi.enabled. Default enabled.
+#   HETERO_CHAN_OPENCODE  1/0 — overrides channels.opencode.enabled. ⛔ Default DISABLED
+#                         (matches lib/hetero/config.sh; opencode was measured timing out
+#                         at 120-200s and needing a long-lived serve).
 #
 # Source: https://github.com/mcdowell8023/agent-gates
 set -uo pipefail
@@ -285,7 +295,10 @@ print(','.join(pool))
   # came back empty — the caller just defaulted to the primary, so a panel model's review
   # was stamped with the primary model's name and nobody noticed. Now that the TOOL also
   # has to survive, use an explicit sidecar file instead of a variable.
-  _side_file=$(mktemp)
+  if ! _side_file=$(mktemp 2>/dev/null) || [[ -z "$_side_file" ]]; then
+    echo "agent-gates-review: could not create the provenance sidecar (mktemp failed) — refusing to run a review whose tool/model cannot be recorded" >&2
+    exit 75
+  fi
   export _REVIEW_SIDECAR="$_side_file"
 
   if [[ "$_RM_PANEL_MODE" == "off" ]]; then
@@ -303,10 +316,14 @@ print(','.join(pool))
   _used_model=$(sed -n 's/^model=//p' "$_side_file" 2>/dev/null | head -1)
   rm -f "$_side_file"
   unset _REVIEW_SIDECAR
-  # Fail-safe on the label, not on the routing: an unreported tool must not be announced as
-  # a specific one. "unknown" is visible in the artifact and greppable; "opencode" would be
-  # a false receipt the moment any other channel answers.
-  [[ -n "$_used_tool" ]] || _used_tool="unknown"
+  # ⛔ fail-CLOSED, not "label it unknown". The first version stamped tool="unknown" and let
+  # the model fall back to the primary, then exited 0 — so a panel model's review could ship
+  # under the primary's name with an unknown tool, and still pass the gate. REVIEW_MODEL
+  # exists for heterogeneity accounting; a wrong one is worse than a refusal.
+  if [[ $_rc -eq 0 && ( -z "$_used_tool" || -z "$_used_model" ) ]]; then
+    echo "agent-gates-review: the review succeeded but its provenance was not recorded (tool='${_used_tool}', model='${_used_model}') — refusing to emit an artifact that misstates which tool and model produced it" >&2
+    exit 75
+  fi
 
   if [[ $_rc -eq 0 && -n "$_raw_output" ]]; then
     # ⛔ Only opencode speaks NDJSON. pi returns plain text, and parse_opencode_json yields
@@ -318,7 +335,7 @@ print(','.join(pool))
       _parsed="$_raw_output"
     fi
     if [[ -n "$_parsed" ]] && has_valid_conclusion "$_parsed"; then
-      _actual_model="${_used_model:-${_REVIEW_MODEL_USED:-$_RM_PRIMARY}}"
+      _actual_model="$_used_model"
       _result=$(append_marker "$_used_tool" "$_actual_model" "$_parsed")
       _marker_rc=$?
       [[ $_marker_rc -eq 0 ]] || exit "$_marker_rc"
@@ -368,64 +385,11 @@ FALLBACK=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.
 
 # --- Review runners ---
 
-run_opencode() {
-  local opencode_bin="${OC_REVIEW_OPENCODE:-opencode}"
-  local oc_review="$GATES_DIR/bin/oc-review"
-
-  local raw rc
-  if [[ -x "$oc_review" && -z "${OC_REVIEW_OPENCODE:-}" ]]; then
-    raw=$("$oc_review" run -m "$MODEL" --dir "${PWD}" --format json "$PROMPT_CONTENT" 2>/dev/null)
-    rc=$?
-  else
-    local _ro_script_dir
-    _ro_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    if [[ -z "${_OC_SERVE_SOURCED:-}" && -f "$_ro_script_dir/../lib/hetero/serve.sh" ]]; then
-      source "$_ro_script_dir/../lib/hetero/serve.sh"
-    fi
-    if ! oc_serve_ensure 2>/dev/null; then
-      return 1
-    fi
-    raw=$(${TIMEOUT_CMD[@]+"${TIMEOUT_CMD[@]}"} "$opencode_bin" run --attach "$OC_SERVE_URL" -m "$MODEL" --dir "${PWD}" --format json "$PROMPT_CONTENT" 2>/dev/null)
-    rc=$?
-  fi
-
-  # v2.0.2: these four outcomes used to collapse into a bare `return 1`, so the caller
-  # could only say "review failed" — which is what sent a day of troubleshooting at the
-  # transport when the real problem was prompt formatting. Keep them distinguishable.
-  if [[ $rc -eq 124 ]]; then
-    echo "agent-gates-review: opencode timed out after ${TIMEOUT_SECS}s (model=$MODEL)" >&2
-    return 1
-  fi
-  if [[ $rc -ne 0 ]]; then
-    echo "agent-gates-review: opencode exited $rc (model=$MODEL)" >&2
-    return 1
-  fi
-  if [[ -z "$raw" ]] || ! echo "$raw" | grep -q '[^[:space:]]'; then
-    echo "agent-gates-review: opencode exited 0 but produced empty output (model=$MODEL)" >&2
-    return 1
-  fi
-
-  local parsed
-  parsed=$(echo "$raw" | parse_opencode_json)
-
-  if [[ -z "$parsed" ]] || ! echo "$parsed" | grep -q '[^[:space:]]'; then
-    echo "agent-gates-review: opencode returned ${#raw} bytes but NDJSON parsed to empty text (model=$MODEL)" >&2
-    return 1
-  fi
-
-  if ! has_valid_conclusion "$parsed"; then
-    echo "agent-gates-review: model answered ${#parsed} chars but produced no VERDICT line (model=$MODEL) — the prompt must require a line matching 'VERDICT: PASS|REVISE|FAIL|ISSUES|APPROVED|REJECT'. Model said: $(printf '%.200s' "$parsed" | tr '\n' ' ')" >&2
-    return 1
-  fi
-
-  local result
-  result=$(append_marker "opencode" "$MODEL" "$parsed")
-  local marker_rc=$?
-  [[ $marker_rc -eq 0 ]] || return "$marker_rc"
-  output_result "$result"
-  return 0
-}
-
+# 🔴 run_opencode() 于 2026-09-10 删除（用户卸载 opencode）。
+# 它是 legacy L0–L3 路由那条独立的 opencode 通道，与 hetero 分支的
+# _review_via_opencode 是两份实现 —— 只拔一份等于没拔。
+# 现在 preferred_route=opencode 的机器会走到下面的 codex fallback；两者都没有就 exit 78，
+# 由调用方降级到同模型 agent-tool（⛔ 那不满足异构要求，见 §1）。
 run_codex() {
   local raw
   # Bounded for the same reason as opencode — a hung fallback is worse than a failed
@@ -534,7 +498,22 @@ paseo_dispatch() {
 
   capture_review_anchor
 
-  local token dir
+  local token dir _pi_on=0 _oc_on=0
+  # select.sh is sourced inside run_hetero_review, which runs LATER than this function —
+  # so _review_chan_enabled is not defined yet here. Source it now (idempotent) instead of
+  # reading undefined flags and reporting every channel as disabled.
+  if ! declare -f _review_chan_enabled >/dev/null 2>&1; then
+    local _pd_bin; _pd_bin="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    # shellcheck disable=SC1090
+    [[ -f "$_pd_bin/../lib/hetero/select.sh" ]] && source "$_pd_bin/../lib/hetero/select.sh"
+  fi
+  if declare -f _review_chan_enabled >/dev/null 2>&1; then
+    _review_chan_enabled pi       && _pi_on=1
+    _review_chan_enabled opencode && _oc_on=1
+  else
+    # No select.sh: fall back to the documented defaults rather than claiming both are off.
+    _pi_on=1
+  fi
   token=$(python3 -c "import secrets;print(secrets.token_hex(16))")
   dir="$PASEO_PENDING_DIR/$token"
   mkdir -p "$dir" || { echo "agent-gates-review: cannot create $dir" >&2; exit 1; }
@@ -562,27 +541,36 @@ json.dump({
 PY
 
   # Write the request last: if it fails there must be no dangling token left behind.
-  if ! python3 - "$DISPATCH_OUT" "$token" "$dir/prompt" "$psha" "$expires" <<'PY'
+  if ! python3 - "$DISPATCH_OUT" "$token" "$dir/prompt" "$psha" "$expires" "$_pi_on" "$_oc_on" <<'PY'
 import json, sys
-out, token, prompt_file, psha, expires = sys.argv[1:6]
+out, token, prompt_file, psha, expires, pi_on, oc_on = sys.argv[1:8]
+pi_on, oc_on = pi_on == "1", oc_on == "1"
+
+# Built from the live channel flags. Naming a channel the operator switched off is exactly
+# how "⛔ never review with opencode" kept getting broken — the agent did what the tool
+# recommended.
+_alts = []
+if pi_on:
+    _primary = "pi/github-copilot/gpt-5.6-sol"
+    _alts.append("pi/github-copilot/grok-4.5")
+else:
+    _primary = "paseo/create_agent (pi 通道已关：channels.pi.enabled=false)"
+_alts.append("paseo/create_agent (要看进度、要能中途叫停时用这条)")
+_alts.append("codex/gpt-5.5")
+if oc_on:
+    _alts.append("opencode/github-copilot/gpt-5.5 (⛔ 末选：需常驻 serve，实测 120-200s 超时)")
+_SUGGESTED = {
+    "provider": _primary,
+    "alternatives": _alts,
+    "channels": {"pi": "enabled" if pi_on else "disabled",
+                 "opencode": "enabled" if oc_on else "disabled"},
+}
+
 req = {
     "token": token,
     "prompt_file": prompt_file,
     "prompt_sha256": psha,
-    # v2.9.3: pi first, opencode last, and opencode carries its own warning.
-    # This block used to name opencode as THE suggestion with no pi entry at all — on a
-    # machine where channels.opencode.enabled=false had been set precisely to stop agents
-    # reviewing through it. A dispatch request that recommends the banned channel is how
-    # the ban kept getting broken: the agent did what the tool told it to.
-    "suggested": {
-        "provider": "pi/github-copilot/gpt-5.6-sol",
-        "alternatives": [
-            "pi/github-copilot/grok-4.5",
-            "paseo/create_agent (要看进度、要能中途叫停时用这条)",
-            "codex/gpt-5.5",
-            "opencode/github-copilot/gpt-5.5 (⛔ 末选：需常驻 serve，实测 120-200s 超时)",
-        ],
-    },
+    "suggested": _SUGGESTED,
     "requirements": {
         "read_only": True,
         "verdict_line": "最后一行必须是裸行 VERDICT: PASS / ISSUES / FAIL（无 markdown 装饰、无缩进、英文半角冒号）",
@@ -805,7 +793,8 @@ case "$LEVEL" in
       echo "agent-gates-review: codex also failed" >&2
       exit 75
     fi
-    run_opencode
+    echo "agent-gates-review: the opencode route was removed on 2026-09-10 (opencode uninstalled) — set review_models/hetero_models to use the pi channel, or install codex for the fallback route" >&2
+    exit 78
     _route_rc=$?
     [[ $_route_rc -eq 0 ]] && exit 0
     [[ $_route_rc -eq 74 ]] && exit 74
@@ -822,7 +811,8 @@ case "$LEVEL" in
       echo "agent-gates-review: prompt too long for opencode (${PROMPT_LEN} > ${MAX_CHARS} chars) and no codex fallback (L2). Shorten prompt to ≤${MAX_CHARS} chars or install codex for L3." >&2
       exit 76
     fi
-    run_opencode
+    echo "agent-gates-review: the opencode route was removed on 2026-09-10 (opencode uninstalled) — set review_models/hetero_models to use the pi channel, or install codex for the fallback route" >&2
+    exit 78
     _route_rc=$?
     [[ $_route_rc -eq 0 ]] && exit 0
     [[ $_route_rc -eq 74 ]] && exit 74

@@ -2,6 +2,143 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.9.4 — opencode 从审查路径彻底移除
+
+用户 2026-09-10 卸载 opencode（`~/.opencode` 185MB + volta 上的 `oh-my-opencode` +
+`.zshrc` 的 PATH + Paseo 里 6 个残留 profile；卸载时端口 4096 上**正挂着一个
+`opencode serve`**）。它的历史成本全是实测的：`agent-gates-review` 走它 120s 超时、
+手动 `--attach` 200s，同一任务 pi 约 7s；一个 serve 被观察到 4 天不退、133 分钟 CPU、
+机器上零客户端；每个 Paseo agent 起自己那份 1–1.5GB 且 idle 后不回收。
+
+### 删掉的东西
+
+- `lib/hetero/select.sh` 的 `_review_via_opencode()`（94 行）—— `_try_review_model`
+  现在是 pi-only
+- `bin/agent-gates-review` 的 `run_opencode()`（58 行）—— ⚠️ 它是 **legacy L0–L3 路由**
+  那条独立的 opencode 通道，与 hetero 分支那份是**两份实现**，只拔一份等于没拔
+- 9 个纯 opencode 测试文件：`run_oc_review` / `run_oc_review_guard` / `run_oc_serve` /
+  `run_oc_reaper` ×3 / `run_review_cmd`（60 条断言里 64 处提 opencode，是 legacy 路由的
+  集成测试）
+
+⚠️ **清理侧的 `oc-reaper` / `lib/hetero/serve.sh` 暂留** —— 万一哪天冒出个野 serve
+还能清，且它们不参与审查路径。`agent-gates-status` 的 opencode 行同理。
+
+⛔ 不要"为了兼容"把审查通道加回来。要加通道就加新的 one-shot CLI，
+别复活需要常驻 serve 的。
+
+### 同时修掉前一版审查抓到的 8 条
+
+`gpt-5.6-sol`（走新 pi 通道，产物 marker `REVIEW_TOOL: pi`）+ `grok-4.5` 两路并审：
+
+1. **通道默认与 `config.sh` 相反**（高）—— `_review_chan_enabled` 照抄了
+   `bin/oc-review` 的守卫，缺文件/缺键时把 opencode 判为**开**；而
+   `lib/hetero/config.sh` 是 `0`，`tests/run_hetero_chan_defaults.sh` D1 也钉着
+   「无配置 opencode=0」。⇒ **同一仓库两套相反默认，两边测试都绿**。两个审查者独立抓到。
+   现在按 channel 各自的默认（opencode=0，其余=1），且缺键/坏 JSON 一律落到默认而非放行。
+2. **`AG_REVIEW_TIMEOUT` 一存在，pi 的 300s 就永不生效**（高）——
+   写的是 `${AG_REVIEW_PI_TIMEOUT:-${AG_REVIEW_TIMEOUT:-300}}`，而那个变量在文档和
+   环境里常见 `120`。CHANGELOG 上一段刚论证「pi 该有自己的默认」，下一行就撤销了，
+   而且测试把它锁死成「pi 听 AG_REVIEW_TIMEOUT」。现在两个旋钮完全独立。
+3. **here-string 建临时文件失败 → `timeout_cmd` 空数组 → pi 无界运行**（高）——
+   fail-closed 被一个无关的磁盘问题绕过。改成断言数组长度。
+4. **sidecar 写失败被 `|| true` 吞**（高）—— 调用方读到空 sidecar 后转成
+   `tool=unknown` + `model=<primary 兜底>`，然后 exit 0 交出格式完好的产物。
+   一份同时写错工具和模型的凭据比没有凭据更糟（`REVIEW_MODEL` 存在的意义就是异构记账）。
+   两侧都改 fail-closed。
+5. `_REVIEW_CHAN_NOTES` 在 `set -u` 下直接调 helper 会 unbound
+6. 通道链尾的 `agent-tool` 兜底不存在（文档已改）
+7. `suggested` 写死推荐 opencode、alternatives 里连 pi 都没有 —— 在一台
+   `channels.opencode.enabled=false` 的机器上。**工具在推荐被禁的通道，agent 照做**，
+   这就是那条禁令被破两次的机制。现在按实时开关生成，并给出 `import_cmd_no_agent`。
+8. `AG_REVIEW_PI` / `AG_REVIEW_PI_TIMEOUT` 完全没文档化；头部还写着
+   `AG_REVIEW_TIMEOUT` default 300 而代码是 120
+
+### 测试
+
+41 个文件全绿，进程零残留。⚠️ errexit 那条断言**空过了两次**才修对：
+两个用例都够不到 `raw=$(...)`（pi 缺失时提前 return、pi 成功时命令替换不失败）；
+补了 pi 非零退出的用例后**仍然**空过 —— 因为 `f || true` 把整个函数放进 AND-OR 列表，
+而 bash 在 AND-OR 列表内部**挂起 errexit**。最终判据落在**错误信息有没有被打出来**
+（有守卫先打印再 return；无守卫死在赋值行、一字不出），注入变异确认变红。
+
+## v2.9.3 — agent-gates-review 终于真的能用 pi 审查
+
+`channels.opencode.enabled=false` 是 2026-08-26 设的，文档也把 opencode 降到第 3，
+但**代码层三处入口一处都没改**：
+
+- `_try_review_model()` 硬编码 `${OC_REVIEW_OPENCODE:-opencode}`，⛔ 不查任何通道开关
+- `agent-gates-review` 全文对 pi **零命中**（`grep -c` 就是 0）
+- 唯一实现了 pi 通道、唯一读 `channels.*.enabled` 的 `hetero_dispatch`，
+  **没有任何生产调用点** —— 全仓非注释引用全在 `tests/` 里
+
+`bin/oc-review:69` 的注释里早就写着这件事：
+"v2.4.0 turned that channel off by default, but only hetero_dispatch consults the flag."
+
+后果不是「配置没生效」这么轻。用户 0818 明令「⛔ 不许用 opencode 做审查」，两个子会话
+各自拿 opencode 审完报 PASS。**规则靠任务书传递，工具自己拦不住。** 更糟的是
+`--route paseo --dispatch-out` 输出的 `suggested.provider` 写死 `opencode/...`、
+alternatives 里连 pi 都没有 —— 工具在推荐被禁的通道，agent 照做。
+
+### 改了什么
+
+`_try_review_model` 变成通道路由器，原 opencode 主体拆成 `_review_via_opencode`，
+新增 `_review_via_pi`。顺序即偏好：**pi 优先，opencode 末位**。
+
+- `_review_chan_enabled <chan>`：env `HETERO_CHAN_<CHAN>` > `channels.<chan>.enabled`；
+  只强制「显式关闭」，缺文件缺键都按放行（与 `bin/oc-review` 的守卫同口径）
+- 模型 id 两边通用（`github-copilot/gpt-5.6-sol` → pi 的 `--provider` + `--model`），
+  所以复用 `review_models`，⛔ 不引入新配置键
+- ⛔ pi 一律带 `--tools read,grep,find,ls`。pi 默认工具集含 edit/write/bash，
+  2026-09-01 实测一个审查者改了被审源文件、建了分支、还 push 了
+- ⛔ pi 返回**纯文本**，不能过 `parse_opencode_json`（那个 helper 对纯文本解析出空，
+  会读成「模型什么都没说」而丢掉一份好审查）
+- `append_marker` 不再写死 `"opencode"`。工具名经 **sidecar 文件**回传 ——
+  真实调用方是 `_raw=$(run_fallback_chain ...)`，命令替换里的赋值随子 shell 消失。
+  `_REVIEW_MODEL_USED` 一直有这个洞，只是调用方静默兜底成 primary，所以 panel 模型的
+  审查一直被盖上 primary 的名字
+- pi 单独的默认超时 **300s**（`AG_REVIEW_PI_TIMEOUT` 可覆盖）。`AG_REVIEW_TIMEOUT` 的
+  120s 是给 opencode 调的 —— 那是「该通道判定为卡死」的界；pi 到 120s 是**正在干活**：
+  四次实测真实审查在 1.5–4.5 分钟，本通道第一次端到端跑就死在 200s 半途
+- `suggested` 改成 pi 首选、opencode 末位带警告；`import_cmd_no_agent` 一并给出 ——
+  自己跑完审查的会话没有 Paseo agent，此前因此认为「凑不出官方产物」而停在原地
+
+### 三条来自本通道自审的修复
+
+通道建好后拿它自己审自己（产物 marker 写着 `REVIEW_TOOL: pi`、
+`REVIEW_MODEL: github-copilot/gpt-5.6-sol`），抓到三条并全部修掉：
+
+1. **`has_valid_conclusion` 缺失时 fail-open** —— `declare -f X && ! X` 的写法在函数
+   不存在时跳过整个校验，任何非空输出（报错、拒答、半截回复）都算通过。pi 的 raw 就是
+   最终产物，select.sh 内部没有第二道解析兜得住它 ⇒ 改成 fail-closed
+2. **`X=$(...)` 后跟 `rc=$?`** —— 门禁 source 本文件（`agent-quality-gate.sh:664`）
+   且跑在 `set -euo pipefail` 下，命令替换失败会在 `rc=$?` 之前杀掉进程，整段错误处理
+   不可达。两处都改成 `if X=$(...); then`（既有的 opencode 路径是同一形状，
+   只修新的就是下次还会咬）
+3. `_l` 未声明 `local`，会覆盖调用者同名变量
+
+### 测试
+
+`tests/run_review_pi_channel.sh` 42 条。⚠️ 其中 errexit 那条**第一版是空过的**：
+两个用例都够不到 `raw=$(...)`（pi 缺失时提前 return、pi 成功时命令替换不失败），
+注入变异后照样全绿。补了 pi **非零退出**的判别用例后**仍然**空过 —— 因为 `f || true`
+把整个函数放进 AND-OR 列表，而 bash 在 AND-OR 列表内部**挂起 errexit**。
+最终判据落在**错误信息有没有被打出来**（有守卫先打印再 return；无守卫死在赋值行、
+一字不出），注入变异确认变红。
+
+同时给 12 个早于本通道的测试文件补了文件作用域 fail-safe
+`export AG_REVIEW_PI="${AG_REVIEW_PI:-/nonexistent/pi-must-not-run-in-tests}"` ——
+它们只 fake 了 opencode，而 pi 现在排第一且真的 `pi` 就在 PATH 上。
+第一版试图用收窄 PATH 来隔离，结果为了把 node 放回去写了 `dirname $(which node)`，
+那正是 `~/homebrew/bin` —— **真 pi 也在里面**，测试当场发了一次真实 API 调用并挂到 120s。
+
+### ⚠️ 本次发现但未修
+
+`.gitignore` 排除了 `.agent/reviews/` 与 `.agent/verify/`，而 `merge-only` 档把审查
+推迟到 merge 那一刻。审查产物在功能分支的 worktree 里生成，merge 发生在主仓 worktree
+—— **产物既不进 git 又不跨 worktree，等于永远到不了那个检查点**。本次是手工 `cp`
+过去才让门禁通过的。另外 `--import-result` 强制要 `--token`（只能由派发签发），
+而同样的 `agent-gates-verify-import` **不需要 token、锚点当场算** —— 后者才是对的形状。
+
 ## v2.9.2 — grok 接掉 gemini 的位置，顺带发现那个格子早就是空的
 
 用户反馈 gemini 的审查质量不行，要求换 grok-4.5。换型号本来是改一行数据，但查下去发现

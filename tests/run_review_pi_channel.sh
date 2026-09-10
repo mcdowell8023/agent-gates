@@ -100,9 +100,22 @@ out=$(AGENT_GATES_DIR="$D" HETERO_CHAN_OPENCODE=1 bash -c "source '$LIB'; _revie
 eq "env 压过配置文件" "$out" "ON"
 D2=$(mktemp -d)
 out=$(AGENT_GATES_DIR="$D2" bash -c "source '$LIB'; _review_chan_enabled opencode && echo ON || echo OFF" 2>/dev/null)
-eq "没有配置文件 = 没人说要关（放行）" "$out" "ON"
+# ⛔ 缺配置时 opencode 必须**关**。第一版钉的是「放行 ON」（照抄 bin/oc-review 的守卫），
+# 而 tests/run_hetero_chan_defaults.sh D1 钉的是「无配置 opencode=0」——
+# 同一仓库两套相反默认，两边都绿。两个审查者独立抓到。禁用类默认要 fail-safe 偏关。
+eq "⭐ 没有配置文件 = opencode 关（与 config.sh 同口径）" "$out" "OFF"
 out=$(AGENT_GATES_DIR="$D2" bash -c "source '$LIB'; _review_chan_enabled pi && echo ON || echo OFF" 2>/dev/null)
 eq "pi 默认开" "$out" "ON"
+D3=$(mktemp -d)
+python3 -c "
+import json,sys
+json.dump({'level':'L3','channels':{'pi':{'enabled':True}}}, open(sys.argv[1],'w'))
+" "$D3/hetero-check.json"
+out=$(AGENT_GATES_DIR="$D3" bash -c "source '$LIB'; source \"$HELPERS\"; _review_chan_enabled opencode && echo ON || echo OFF" 2>/dev/null)
+eq "⭐ 有文件但缺 channels.opencode 键 = 关" "$out" "OFF"
+printf 'not json at all' > "$D3/hetero-check.json"
+out=$(AGENT_GATES_DIR="$D3" bash -c "source '$LIB'; source \"$HELPERS\"; _review_chan_enabled opencode && echo ON || echo OFF" 2>/dev/null)
+eq "⭐ JSON 坏掉也是关，不是放行" "$out" "OFF"
 
 echo
 echo "--- §2 opencode 关掉时必须走 pi ---"
@@ -146,41 +159,23 @@ for line in sys.stdin:
 assert "⭐ pi 走通（没被 NDJSON 解析判成空）" "$([[ "$out" == *OK* ]] && echo true || echo false)"
 
 echo
-echo "--- §5 pi 关掉时回落 opencode，且工具名如实 ---"
+# 🔴 §5 于 2026-09-10 删除：它测的是"pi 关掉时回落 opencode"，而 opencode 已卸载、
+# 审查路径不再有那个分支 —— pi 是唯一通道，关掉它就是明确失败（§6 覆盖）。
+echo "--- §6 pi 关掉 = 明确拒绝（它已是唯一通道）---"
 reset_calls
-D=$(mkcfg 1 0)
-out=$(AGENT_GATES_DIR="$D" bash -c "
-  source '$LIB'; source "$HELPERS"
-  _try_review_model github-copilot/gpt-5.6-sol '审一下' >/dev/null && echo \"TOOL=\$_REVIEW_TOOL_USED\"
-" 2>/dev/null)
-assert "调了 opencode" "$(called OC_ARGS)"
-assert "没调 pi" "$([[ "$(called PI_ARGS)" == "false" ]] && echo true || echo false)"
-assert "_REVIEW_TOOL_USED=opencode" "$([[ "$out" == *"TOOL=opencode"* ]] && echo true || echo false)"
-
-echo
-echo "--- §6 两个都关 = 明确拒绝，不静默穿过去 ---"
-reset_calls
-D=$(mkcfg 0 0)
+D=$(mkcfg 0 0)   # pi=0：唯一通道被关
 err=$(AGENT_GATES_DIR="$D" bash -c "
   source '$LIB'; source "$HELPERS"
   _try_review_model github-copilot/gpt-5.6-sol '审一下'
 " 2>&1 >/dev/null); rc=$?
 assert "非零退出（实际 ${rc}）" "$([[ $rc -ne 0 ]] && echo true || echo false)"
 assert "两个通道都没被调用" "$([[ "$(called PI_ARGS)" == "false" && "$(called OC_ARGS)" == "false" ]] && echo true || echo false)"
-assert "⭐ 报错点名两个通道（不是沉默）" \
-  "$([[ "$err" == *pi* && "$err" == *opencode* ]] && echo true || echo false)"
+assert "⭐ 报错点名 pi 是唯一通道 + opencode 已卸载（不是沉默）" \
+  "$([[ "$err" == *pi* && "$err" == *"ONLY review channel"* ]] && echo true || echo false)"
 
 echo
-echo "--- §7 pi 不在就回落，不是整条链失败 ---"
-reset_calls
-D=$(mkcfg 1 1)
-out=$(AGENT_GATES_DIR="$D" AG_REVIEW_PI="$BIN/does-not-exist" bash -c "
-  source '$LIB'; source "$HELPERS"
-  _try_review_model github-copilot/gpt-5.6-sol '审一下' >/dev/null && echo \"TOOL=\$_REVIEW_TOOL_USED\"
-" 2>/dev/null)
-eq "pi 缺失 → 用 opencode" "${out}" "TOOL=opencode"
-
-echo
+# 🔴 §7 同上删除：没有第二个通道可回落了。pi 二进制缺失现在是硬失败，
+# 报错文本点名"opencode 已于 2026-09-10 卸载、pi 是唯一通道"（§6 断言那句）。
 echo "--- §8 型号格式不合法时跳过 pi，不发 --provider '' ---"
 reset_calls
 D=$(mkcfg 1 1)
@@ -196,7 +191,7 @@ echo "--- §9 pi 也必须有超时 ---"
 reset_calls
 D=$(mkcfg 0 1)
 t0=$(date +%s)
-AGENT_GATES_DIR="$D" AG_REVIEW_PI="$BIN/pi-hangs" AG_REVIEW_TIMEOUT=3 bash -c "
+AGENT_GATES_DIR="$D" AG_REVIEW_PI="$BIN/pi-hangs" AG_REVIEW_PI_TIMEOUT=3 bash -c "
   source '$LIB'; _try_review_model github-copilot/gpt-5.6-sol '审一下'
 " >/dev/null 2>&1
 t1=$(date +%s); E=$((t1-t0))
@@ -221,9 +216,14 @@ echo "--- §10b 两个通道的默认超时不同 ---"
 # 非平凡审查上看起来是坏的。
 eq "pi 默认 300s" "$(bash -c "source '$LIB'; _review_timeout_secs pi")" "300"
 eq "opencode 默认仍是 120s" "$(bash -c "source '$LIB'; _review_timeout_secs opencode")" "120"
-eq "AG_REVIEW_TIMEOUT 显式设置时 pi 听它" \
-  "$(AG_REVIEW_TIMEOUT=45 bash -c "source '$LIB'; _review_timeout_secs pi")" "45"
-eq "AG_REVIEW_PI_TIMEOUT 优先级最高" \
+# ⛔ 反了。第一版钉「AG_REVIEW_TIMEOUT 设了 pi 就听它 → 45」，于是该变量只要存在
+# （文档和环境里常见 120），pi 的 300 就永不生效 —— CHANGELOG 上一段刚论证「pi 该有
+# 自己的默认」，下一行就撤销了它，而测试把它锁死了。
+eq "⭐ AG_REVIEW_TIMEOUT 不影响 pi（各自独立旋钮）" \
+  "$(AG_REVIEW_TIMEOUT=45 bash -c "source '$LIB'; _review_timeout_secs pi")" "300"
+eq "AG_REVIEW_TIMEOUT 只管 opencode" \
+  "$(AG_REVIEW_TIMEOUT=45 bash -c "source '$LIB'; _review_timeout_secs opencode")" "45"
+eq "AG_REVIEW_PI_TIMEOUT 是 pi 的唯一旋钮" \
   "$(AG_REVIEW_TIMEOUT=45 AG_REVIEW_PI_TIMEOUT=600 bash -c "source '$LIB'; _review_timeout_secs pi")" "600"
 
 echo
@@ -270,8 +270,30 @@ print(s.get('provider',''), '|', ','.join(s.get('alternatives',[])), '|', 'HAS_N
 assert "⭐ suggested.provider 走 pi" "$([[ "$SUG" == pi/* ]] && echo true || echo false)"
 assert "alternatives 里有 pi 的第二型号" "$([[ "$SUG" == *"pi/github-copilot/grok-4.5"* ]] && echo true || echo false)"
 assert "⭐ opencode 不是首选" "$([[ "$SUG" != opencode/* ]] && echo true || echo false)"
-assert "opencode 带警告出现在 alternatives 末尾" \
-  "$([[ "$SUG" == *"opencode/github-copilot/gpt-5.5 (⛔"* ]] && echo true || echo false)"
+# 这份 fixture 没有 channels 键 ⇒ opencode 按默认**关**，所以它不该出现在建议里。
+# 推荐一个操作者已关掉的通道，正是「⛔ 不许用 opencode」被破两次的机制。
+assert "⭐ opencode 关着时不出现在 alternatives 里" \
+  "$([[ "$SUG" != *"opencode/"* ]] && echo true || echo false)"
+# 显式打开时又要出现，且带警告 —— 否则上一条可能只是「永远不列 opencode」而空过。
+DGD2=$(mktemp -d); DOUT2=$(mktemp)
+python3 - "$DGD2/hetero-check.json" <<'PY3'
+import json, sys
+json.dump({'level': 'L3', 'review_models': {'primary': 'github-copilot/gpt-5.6-sol',
+          'panel_pool': [], 'panel_active': 2, 'panel_mode': 'off'},
+          'channels': {'opencode': {'enabled': True}}}, open(sys.argv[1], 'w'))
+PY3
+( cd "$SCRIPT_DIR/.." && AGENT_GATES_DIR="$DGD2" bash bin/agent-gates-review "$PMT" \
+    --route paseo --dispatch-out "$DOUT2" ) >/dev/null 2>&1
+SUG2=$(python3 -c "
+import json,sys
+try: d=json.load(open(sys.argv[1]))
+except Exception: print(''); raise SystemExit
+s=d.get('suggested',{})
+print(s.get('provider',''), '|', ','.join(s.get('alternatives',[])))
+" "$DOUT2" 2>/dev/null)
+assert "⭐ 显式打开时 opencode 带警告出现在末尾" \
+  "$([[ "$SUG2" == *"opencode/github-copilot/gpt-5.5 (⛔"* ]] && echo true || echo false)"
+assert "打开 opencode 也不改首选（仍是 pi）" "$([[ "$SUG2" == pi/* ]] && echo true || echo false)"
 assert "⭐ 给出了无 Paseo agent 的登记命令" "$([[ "$SUG" == *HAS_NOAGENT* ]] && echo true || echo false)"
 
 echo
