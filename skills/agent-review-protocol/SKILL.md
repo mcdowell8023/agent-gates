@@ -713,7 +713,20 @@ eligible — **not** how many reviewers run at once; see below). Static recommen
 | --- | --- | --- |
 | 入口 | `hetero_dispatch`（`lib/hetero/dispatch.sh`） | `run_fallback_chain`（`lib/hetero/select.sh`） |
 | 读哪个配置 | `pi_models.primary` / `HETERO_OC_MODEL` | `review_models.primary` + `panel_pool` |
-| 受 `channels.*.enabled` 约束 | ✅ 是，关掉的通道直接跳过 | ❌ **否** —— `_try_review_model` 只查 `opencode` 二进制在不在、`oc_serve_ensure` 能不能起 |
+| 受 `channels.*.enabled` 约束 | ✅ 是 | ✅ 是（**v2.9.3 起**） |
+| 有 pi 通道 | ✅ 一直有 | ✅ **v2.9.3 起** |
+| 有 opencode 通道 | ✅ 有 | ⛔ **v2.9.4 起没有了** —— 已删除 |
+
+🔴 **2026-09-10：opencode 已从本机卸载，审查路径只剩 pi。** `_review_via_opencode` 与
+legacy 路由的 `run_opencode` 两份实现都删了（只拔一份等于没拔）。9 个纯 opencode 测试
+文件一并退役。清理侧的 `oc-reaper` / `serve.sh` 暂留 —— 万一冒出野 serve 能清，
+且不参与审查路径。⛔ 不要"为了兼容"加回来；要加通道就加新的 one-shot CLI。
+
+⚠️ **v2.9.3 之前这一行是「❌ 否」**：`_try_review_model` 硬编码 opencode 二进制、
+不查任何通道开关，`agent-gates-review` 全文对 pi 零命中，而唯一实现了 pi 通道又会读
+那个开关的 `hetero_dispatch` **没有任何生产调用点**。所以 2026-08-26 写下的
+`channels.opencode.enabled=false` 对实际被走到的审查路径完全无效 —— 用户明令禁止的
+通道照样在审查并报 PASS。现在两边同口径。
 
 两边都是**串行 fallback，第一个成功就停**，不是并发扇出：
 
@@ -721,7 +734,9 @@ eligible — **not** how many reviewers run at once; see below). Static recommen
   paseo → pi → opencode → codex → codebuddy → **exhausted**。
   ⚠️ 链尾**没有** agent-tool 兜底：codebuddy 之后 `channel` 保持 `exhausted`，
   源码里那段注释叫它 "echo fallback"。别指望链尾还能自动补一次审查。
-- `run_fallback_chain` 先试 `primary`，**只有 primary 失败**才依次试 panel。
+- `run_fallback_chain` 先试 `primary`，**只有 primary 失败**才依次试 panel；
+  而每个型号内部又先试 pi、再试 opencode（`_try_review_model` 是通道路由器）。
+  模型 id 两边通用，所以 `review_models` 一份配置同时服务两个通道，⛔ 不需要为 pi 另配键。
 - `panel_active` 是 `panel_pool[:panel_active]` 的**切片上限**，不是并发数、也不完全等于备胎链长度
   —— 实际链长 = `min(panel_active, len(panel_pool))`，还要再过 `panel_mode`：
   `off` 完全不用 panel / `always` 总用 / **`auto` 看 prompt 长度 ≥ 500 字符**

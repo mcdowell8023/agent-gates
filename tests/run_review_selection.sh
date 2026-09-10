@@ -4,12 +4,14 @@
 #         D5 auto/local merge, D4 fallback chain.
 set -uo pipefail
 
-# ⛔ FAIL-SAFE (v2.9.3): pi is now tried BEFORE opencode, and the real `pi` sits on PATH.
-# This file predates the pi channel and fakes only opencode, so without this it would make
-# live API calls with whatever model name the fixture happens to use. Pointing pi at a
-# missing binary makes it fall through to the opencode fake — the behaviour this file was
-# written against. A test that wants the pi channel overrides it explicitly.
+# ⛔ FAIL-SAFE: 真的 `pi` 在 PATH 上，而 pi 通道排在 opencode 之前。本文件只 fake 了
+# opencode，不显式把 pi 指向不存在的路径就会发真实 API 调用（踩过，挂到 120s）。
+# ⚠️ opencode 二进制已于 2026-09-10 卸载，但这些用例走的是 OC_REVIEW_OPENCODE 指定的
+# **fake**，与真机是否装了 opencode 无关 ⇒ 照常有效。
 export AG_REVIEW_PI="${AG_REVIEW_PI:-/nonexistent/pi-must-not-run-in-tests}"
+# v2.9.4: opencode 现在默认**关**（与 lib/hetero/config.sh 同口径）。本文件测的就是
+# opencode 路径，所以显式打开 —— 否则通道被跳过，断言看起来像"审查功能坏了"。
+export HETERO_CHAN_OPENCODE="${HETERO_CHAN_OPENCODE:-1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELECTION_LIB="$SCRIPT_DIR/../lib/hetero/select.sh"
