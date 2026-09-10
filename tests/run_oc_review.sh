@@ -4,6 +4,13 @@
 # simulate empty-output (P2) and verify oc-review retries / falls back deterministically.
 set -uo pipefail
 
+# ⛔ FAIL-SAFE (v2.9.3): pi is now tried BEFORE opencode, and the real `pi` sits on PATH.
+# This file predates the pi channel and fakes only opencode, so without this it would make
+# live API calls with whatever model name the fixture happens to use. Pointing pi at a
+# missing binary makes it fall through to the opencode fake — the behaviour this file was
+# written against. A test that wants the pi channel overrides it explicitly.
+export AG_REVIEW_PI="${AG_REVIEW_PI:-/nonexistent/pi-must-not-run-in-tests}"
+
 # These cases exercise oc-review itself, and since v2.4.1 it refuses to run when the
 # opencode channel is disabled (v2.4.0 turned that off by default). The dependency has to
 # be stated rather than inherited from whatever the machine happens to be configured with.
