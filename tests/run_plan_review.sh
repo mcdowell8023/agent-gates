@@ -14,6 +14,13 @@
 #   - a plan review whose verdict was FAIL still passed, because only presence was checked
 set -uo pipefail
 
+# ⛔ FAIL-SAFE (v2.9.3): pi is now tried BEFORE opencode, and the real `pi` sits on PATH.
+# This file predates the pi channel and fakes only opencode, so without this it would make
+# live API calls with whatever model name the fixture happens to use. Pointing pi at a
+# missing binary makes it fall through to the opencode fake — the behaviour this file was
+# written against. A test that wants the pi channel overrides it explicitly.
+export AG_REVIEW_PI="${AG_REVIEW_PI:-/nonexistent/pi-must-not-run-in-tests}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PR="$SCRIPT_DIR/../bin/agent-gates-plan-review"
 RESULTS_FILE=$(mktemp); echo "0 0" > "$RESULTS_FILE"

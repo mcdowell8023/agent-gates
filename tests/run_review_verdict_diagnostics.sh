@@ -12,6 +12,13 @@
 # fall back to codex instead of dead-ending at exit 75.
 set -uo pipefail
 
+# ⛔ FAIL-SAFE (v2.9.3): pi is now tried BEFORE opencode, and the real `pi` sits on PATH.
+# This file predates the pi channel and fakes only opencode, so without this it would make
+# live API calls with whatever model name the fixture happens to use. Pointing pi at a
+# missing binary makes it fall through to the opencode fake — the behaviour this file was
+# written against. A test that wants the pi channel overrides it explicitly.
+export AG_REVIEW_PI="${AG_REVIEW_PI:-/nonexistent/pi-must-not-run-in-tests}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REVIEW_CMD="$SCRIPT_DIR/../bin/agent-gates-review"
 WITH_TIMEOUT="$SCRIPT_DIR/../bin/with-timeout.mjs"
@@ -306,7 +313,10 @@ test_hetero_self_heals_serve() {
   # _try_review_model probing with oc_serve_health_check, so a dead shared serve made the
   # opencode channel permanently unavailable while legacy run_opencode self-healed.
   local sel="$SCRIPT_DIR/../lib/hetero/select.sh"
-  local body; body=$(awk '/^_try_review_model\(\)/,/^\}/' "$sel")
+  # v2.9.3: the opencode invocation moved out of _try_review_model (now a channel router)
+  # into _review_via_opencode. Scan where the code lives now — the guard is about the
+  # opencode path ensuring the serve, not about which function holds it.
+  local body; body=$(awk '/^_review_via_opencode\(\)/,/^\}/' "$sel")
   assert "calls oc_serve_ensure" \
     "$(printf '%s' "$body" | grep -q 'oc_serve_ensure' && echo true || echo false)"
   assert "does not gate solely on oc_serve_health_check" \

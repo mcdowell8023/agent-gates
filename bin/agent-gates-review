@@ -280,6 +280,14 @@ print(','.join(pool))
 
   _err_file=$(mktemp)
 
+  # ⚠️ The review runs inside `$(...)`, so anything it assigns to a shell variable dies
+  # with the subshell. `_REVIEW_MODEL_USED` has always been read back this way and always
+  # came back empty — the caller just defaulted to the primary, so a panel model's review
+  # was stamped with the primary model's name and nobody noticed. Now that the TOOL also
+  # has to survive, use an explicit sidecar file instead of a variable.
+  _side_file=$(mktemp)
+  export _REVIEW_SIDECAR="$_side_file"
+
   if [[ "$_RM_PANEL_MODE" == "off" ]]; then
     _raw_output=$(_try_review_model "$_RM_PRIMARY" "$PROMPT_CONTENT" 2>"$_err_file")
     _rc=$?
@@ -291,11 +299,27 @@ print(','.join(pool))
     _rc=$?
   fi
 
+  _used_tool=$(sed -n 's/^tool=//p' "$_side_file" 2>/dev/null | head -1)
+  _used_model=$(sed -n 's/^model=//p' "$_side_file" 2>/dev/null | head -1)
+  rm -f "$_side_file"
+  unset _REVIEW_SIDECAR
+  # Fail-safe on the label, not on the routing: an unreported tool must not be announced as
+  # a specific one. "unknown" is visible in the artifact and greppable; "opencode" would be
+  # a false receipt the moment any other channel answers.
+  [[ -n "$_used_tool" ]] || _used_tool="unknown"
+
   if [[ $_rc -eq 0 && -n "$_raw_output" ]]; then
-    _parsed=$(echo "$_raw_output" | parse_opencode_json)
+    # ⛔ Only opencode speaks NDJSON. pi returns plain text, and parse_opencode_json yields
+    # EMPTY for plain text — routing pi's answer through it would read as "the model said
+    # nothing" and discard a perfectly good review.
+    if [[ "$_used_tool" == "opencode" ]]; then
+      _parsed=$(echo "$_raw_output" | parse_opencode_json)
+    else
+      _parsed="$_raw_output"
+    fi
     if [[ -n "$_parsed" ]] && has_valid_conclusion "$_parsed"; then
-      _actual_model="${_REVIEW_MODEL_USED:-$_RM_PRIMARY}"
-      _result=$(append_marker "opencode" "$_actual_model" "$_parsed")
+      _actual_model="${_used_model:-${_REVIEW_MODEL_USED:-$_RM_PRIMARY}}"
+      _result=$(append_marker "$_used_tool" "$_actual_model" "$_parsed")
       _marker_rc=$?
       [[ $_marker_rc -eq 0 ]] || exit "$_marker_rc"
       output_result "$_result"
@@ -545,9 +569,19 @@ req = {
     "token": token,
     "prompt_file": prompt_file,
     "prompt_sha256": psha,
+    # v2.9.3: pi first, opencode last, and opencode carries its own warning.
+    # This block used to name opencode as THE suggestion with no pi entry at all — on a
+    # machine where channels.opencode.enabled=false had been set precisely to stop agents
+    # reviewing through it. A dispatch request that recommends the banned channel is how
+    # the ban kept getting broken: the agent did what the tool told it to.
     "suggested": {
-        "provider": "opencode/github-copilot/gpt-5.5",
-        "alternatives": ["codex/gpt-5.5", "codebuddy-code/deepseek-v4-pro"],
+        "provider": "pi/github-copilot/gpt-5.6-sol",
+        "alternatives": [
+            "pi/github-copilot/grok-4.5",
+            "paseo/create_agent (要看进度、要能中途叫停时用这条)",
+            "codex/gpt-5.5",
+            "opencode/github-copilot/gpt-5.5 (⛔ 末选：需常驻 serve，实测 120-200s 超时)",
+        ],
     },
     "requirements": {
         "read_only": True,
@@ -556,7 +590,13 @@ req = {
         "heterogeneous": "provider 不能是 claude —— 同模型审查不算异构审查",
     },
     "expires_at": expires,
+    # Both forms, because only one of them was ever documented and the other is the one
+    # most sessions actually need. A session that ran the review itself (pi -p, or any
+    # other channel) has no Paseo agent to point at, concluded it "could not assemble the
+    # official artifact", and stopped — with a finished review in hand.
     "import_cmd": f"agent-gates-review --import-result <review.md> --token {token} --paseo-agent <agent-id> --result <out>",
+    "import_cmd_no_agent": f"agent-gates-review --import-result <review.md> --token {token} --imported-model <provider/model> --result <out>",
+    "import_note": "自己跑完的审查（pi -p / 手工 / 任何通道）用 import_cmd_no_agent —— 产物会标记 REVIEW_TOOL: external、模型 unverified，锚点照样成立。⛔ 不要因为没有 Paseo agent 就放弃登记。",
 }
 json.dump(req, open(out, "w"), ensure_ascii=False, indent=2)
 PY

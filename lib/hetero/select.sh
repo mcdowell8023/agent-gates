@@ -136,16 +136,223 @@ PYEOF
   return $?
 }
 
+# ============================================================
+# Review channels (v2.9.3)
+# ============================================================
+# THE GAP this closes: `channels.opencode.enabled=false` was set on 2026-08-26 and the
+# docs demoted opencode to third choice, but no code path under `agent-gates-review` ever
+# read either. `_try_review_model` shelled straight out to the opencode binary. The one
+# function that does implement a pi channel AND does read the flag — `hetero_dispatch` —
+# has no production caller at all (every non-comment reference is in tests/).
+#
+# bin/oc-review:69 already said so out loud:
+#   "v2.4.0 turned that channel off by default, but only hetero_dispatch consults the flag."
+#
+# The cost was not a stale setting. The user's standing instruction is "⛔ never review with
+# opencode"; two sub-sessions reviewed through it anyway and reported PASS. A ban that only
+# travels in task briefs is a ban the tool cannot enforce.
+
+# Only an EXPLICIT disable is enforced here — a missing file or key means "nobody said to
+# turn it off", matching bin/oc-review's guard. Preference between channels is expressed by
+# the order they are tried in, not by defaults.
+_review_chan_enabled() {   # _review_chan_enabled <channel>
+  local chan="$1" envvar ev
+  # NOTE: `tr`, not ${chan^^} — macOS ships bash 3.2 where that is a runtime
+  # "bad substitution", and this function failing open would re-enable a banned channel.
+  envvar="HETERO_CHAN_$(printf '%s' "$chan" | tr '[:lower:]-' '[:upper:]_')"
+  ev="${!envvar:-}"
+  if [[ -n "$ev" ]]; then
+    [[ "$ev" == "1" ]]
+    return
+  fi
+  local f="${AGENT_GATES_DIR:-$HOME/.agent-gates}/hetero-check.json"
+  [[ -f "$f" ]] || return 0
+  local v
+  v=$(python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+c = (d.get("channels") or {}).get(sys.argv[2]) or {}
+e = c.get("enabled")
+print("" if e is None else ("1" if e else "0"))
+' "$f" "$chan" 2>/dev/null)
+  [[ "$v" != "0" ]]
+}
+
+# Which tool/model actually answered. Set as shell variables for in-process callers, and
+# ALSO written to $_REVIEW_SIDECAR when that is set — because the real caller runs
+# `_raw=$(run_fallback_chain ...)`, and a variable assigned inside a command substitution
+# dies with the subshell. `_REVIEW_MODEL_USED` has always had that hole; it went unnoticed
+# because the caller silently defaults to the primary model, so a panel model's review was
+# stamped with the primary's name.
+_review_record_tool() {   # _review_record_tool <tool> <model>
+  _REVIEW_TOOL_USED="$1"
+  _REVIEW_MODEL_USED="$2"
+  [[ -n "${_REVIEW_SIDECAR:-}" ]] || return 0
+  printf 'tool=%s\nmodel=%s\n' "$1" "$2" > "$_REVIEW_SIDECAR" 2>/dev/null || true
+}
+
+# Shared bound. Both backends refuse rather than run unbounded: an unbounded review was
+# measured burning 80 minutes and producing nothing.
+#
+# ⚠️ The two channels need DIFFERENT defaults. `AG_REVIEW_TIMEOUT`'s 120s was tuned for
+# opencode, where 120s is already the point past which that channel is considered wedged.
+# pi is not wedged at 120s — it is working: a real review that reads files took 1.5–4.5
+# minutes across four measured runs on 2026-09-08/09, and the first end-to-end run of this
+# very channel died at 200s mid-review. Inheriting 120s would make a healthy pi channel
+# look broken on every non-trivial review, and the caller would see a timeout rather than
+# "this needs longer".
+_review_timeout_cmd() {   # _review_timeout_cmd [channel]
+  local wt="${BASH_SOURCE[0]%/*}/../../bin/with-timeout.mjs"
+  [[ -f "$wt" ]] && command -v node >/dev/null 2>&1 || return 1
+  local secs
+  case "${1:-opencode}" in
+    pi) secs="${AG_REVIEW_PI_TIMEOUT:-${AG_REVIEW_TIMEOUT:-300}}" ;;
+    *)  secs="${AG_REVIEW_TIMEOUT:-120}" ;;
+  esac
+  printf '%s\n%s\n%s\n' node "$wt" "$secs"
+}
+
+# The number actually used, so the timeout message can name it truthfully.
+_review_timeout_secs() {  # _review_timeout_secs [channel]
+  case "${1:-opencode}" in
+    pi) echo "${AG_REVIEW_PI_TIMEOUT:-${AG_REVIEW_TIMEOUT:-300}}" ;;
+    *)  echo "${AG_REVIEW_TIMEOUT:-120}" ;;
+  esac
+}
+
+_review_via_pi() {
+  local model="$1" prompt="$2"
+  local pi_bin="${AG_REVIEW_PI:-pi}"
+
+  if ! command -v "$pi_bin" &>/dev/null; then
+    _REVIEW_CHAN_NOTES="${_REVIEW_CHAN_NOTES}pi: no '$pi_bin' on PATH; "
+    return 1
+  fi
+
+  # A slash alone is not enough: `github-copilot/` and `/gpt-5.6-sol` both match `*/*` yet
+  # leave one side empty, and `pi --provider ""` does not fail fast. Same guard the
+  # dispatch-side pi channel carries.
+  if [[ "$model" != */* || -z "${model%%/*}" || -z "${model#*/}" ]]; then
+    _REVIEW_CHAN_NOTES="${_REVIEW_CHAN_NOTES}pi: '$model' is not a '<provider>/<model>' pair (both sides must be non-empty), e.g. github-copilot/gpt-5.6-sol; "
+    return 1
+  fi
+  local provider="${model%%/*}" id="${model#*/}"
+
+  local _tc
+  if ! _tc=$(_review_timeout_cmd pi); then
+    echo "review-fail[$model]: timeout wrapper unavailable (bin/with-timeout.mjs, node required) — refusing to run pi unbounded (fail-closed)" >&2
+    return 1
+  fi
+  local timeout_cmd=() _l
+  while IFS= read -r _l; do [[ -n "$_l" ]] && timeout_cmd+=("$_l"); done <<< "$_tc"
+
+  # ⛔ Read-only tool set, not a style preference. pi's defaults include edit/write/bash,
+  # and on 2026-09-01 a reviewer used them: it modified the source under review, created a
+  # branch, and pushed it. `--provider` and `--model` are two separate flags — writing
+  # `--model provider/model` as one string is the documented footgun.
+  local raw rc secs
+  secs=$(_review_timeout_secs pi)
+  # ⚠️ `if X=$(...); then` — NOT `X=$(...)` followed by `rc=$?`. The gate sources this file
+  # (hooks/git/agent-quality-gate.sh:664) and runs under `set -euo pipefail`, where a failing
+  # command substitution terminates the process BEFORE `rc=$?` executes, with no message at
+  # all. The whole error-handling block below would be unreachable. Same shape that once made
+  # the gate exit 1 straight after printing its banner.
+  if raw=$(${timeout_cmd[@]+"${timeout_cmd[@]}"} "$pi_bin" -p \
+        --provider "$provider" --model "$id" \
+        --tools read,grep,find,ls \
+        "$prompt" 2>/dev/null); then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [[ $rc -eq 124 ]]; then
+    echo "review-fail[$model]: pi timed out after ${secs}s (raise AG_REVIEW_TIMEOUT, or narrow the prompt — an unbounded 'go find everything' prompt makes the model crawl the repo)" >&2
+    return 1
+  fi
+  if [[ $rc -ne 0 ]]; then
+    echo "review-fail[$model]: pi exited $rc" >&2
+    return 1
+  fi
+  if [[ -z "${raw//[[:space:]]/}" ]]; then
+    echo "review-fail[$model]: pi exited 0 but produced empty output" >&2
+    return 1
+  fi
+
+  # ⛔ pi returns PLAIN TEXT. Do not send it through parse_opencode_json — that helper
+  # parses an NDJSON stream and yields empty for plain text, which would read as
+  # "the model answered nothing" and fall through every channel.
+  # ⛔ fail-CLOSED on a missing helper. The opencode path skips its checks when the helper
+  # is absent (it is sourced from bin/agent-gates-review), but pi's raw text IS the final
+  # artifact — there is no later parse step inside this file to catch a verdict-less answer.
+  # Skipping here would accept an error message, a refusal, or a half-written reply as a
+  # passing review.
+  if ! declare -f has_valid_conclusion >/dev/null 2>&1; then
+    echo "review-fail[$model]: has_valid_conclusion is not defined — cannot tell a review from arbitrary output, refusing to accept it (fail-closed). Source bin/agent-gates-review's helpers, or define has_valid_conclusion before calling." >&2
+    return 1
+  fi
+  if ! has_valid_conclusion "$raw"; then
+    echo "review-fail[$model]: answered ${#raw} chars but produced no VERDICT line — the prompt must require a line matching 'VERDICT: PASS|REVISE|FAIL|ISSUES|APPROVED|REJECT'. Model said: $(printf '%.200s' "$raw" | tr '\n' ' ')" >&2
+    return 1
+  fi
+
+  printf '%s\n' "$raw"
+  return 0
+}
+
 _try_review_model() {
   local model="$1" prompt="$2"
 
   if [[ "$model" == FAKE_AVAILABLE* ]]; then
+    _review_record_tool fake "$model"
     echo "review: panel model $model"
     return 0
   fi
   if [[ "$model" == FAKE_UNREACHABLE* || "$model" == FAKE_* ]]; then
     return 1
   fi
+
+  # Channel order IS the preference: pi first. pi is one-shot (~200MB peak, zero residue),
+  # while opencode needs a long-lived `opencode serve` — one was observed at 4 days uptime
+  # and 133 minutes of CPU with no client on the machine.
+  # Channel notes accumulate and are printed ONLY if nothing succeeds. On a machine
+  # without pi, announcing "pi not found" ahead of every successful opencode review is
+  # noise that actively misleads — a caller reading it alongside a real error concludes
+  # the model was unreachable when the model in fact answered.
+  _REVIEW_CHAN_NOTES=""
+  local tried=0
+  if _review_chan_enabled pi; then
+    tried=1
+    if _review_via_pi "$model" "$prompt"; then
+      _review_record_tool pi "$model"
+      return 0
+    fi
+  else
+    _REVIEW_CHAN_NOTES="${_REVIEW_CHAN_NOTES}pi: disabled (channels.pi.enabled=false / HETERO_CHAN_PI=0); "
+  fi
+
+  if _review_chan_enabled opencode; then
+    tried=1
+    if _review_via_opencode "$model" "$prompt"; then
+      _review_record_tool opencode "$model"
+      return 0
+    fi
+  else
+    _REVIEW_CHAN_NOTES="${_REVIEW_CHAN_NOTES}opencode: disabled (channels.opencode.enabled=false / HETERO_CHAN_OPENCODE=0); "
+  fi
+
+  if [[ "$tried" -eq 0 ]]; then
+    echo "review-fail[$model]: both the pi and the opencode channel are disabled — there is nothing left to review with. Enable one: channels.pi.enabled / channels.opencode.enabled in hetero-check.json, or HETERO_CHAN_PI=1 / HETERO_CHAN_OPENCODE=1. [$_REVIEW_CHAN_NOTES]" >&2
+  elif [[ -n "$_REVIEW_CHAN_NOTES" ]]; then
+    echo "review[$model]: channels skipped — ${_REVIEW_CHAN_NOTES%; }" >&2
+  fi
+  return 1
+}
+
+_review_via_opencode() {
+  local model="$1" prompt="$2"
 
   local opencode_bin="${OC_REVIEW_OPENCODE:-opencode}"
   if ! command -v "$opencode_bin" &>/dev/null; then
@@ -197,8 +404,13 @@ _try_review_model() {
   # timeout_cmd regardless — bash 3.2 (macOS default) errors under `set -u` on "${arr[@]}"
   # for an empty array, and staying safe against a future edit costs nothing here.
   local raw rc
-  raw=$(${timeout_cmd[@]+"${timeout_cmd[@]}"} "$opencode_bin" run "${attach_args[@]}" --pure -m "$model" --dir "${PWD}" --format json "$prompt" 2>/dev/null)
-  rc=$?
+  # Same errexit guard as the pi path above — this line predates it and carried the same
+  # hole; fixing only the new one is the asymmetry that comes back later.
+  if raw=$(${timeout_cmd[@]+"${timeout_cmd[@]}"} "$opencode_bin" run "${attach_args[@]}" --pure -m "$model" --dir "${PWD}" --format json "$prompt" 2>/dev/null); then
+    rc=0
+  else
+    rc=$?
+  fi
   if [[ $rc -eq 124 ]]; then
     echo "review-fail[$model]: opencode timed out after ${_timeout_secs}s (raise AG_REVIEW_TIMEOUT, or narrow the prompt — an unbounded 'go find everything' prompt makes the model crawl the repo)" >&2
     return 1
@@ -245,9 +457,12 @@ run_fallback_chain() {
   done
 
   _REVIEW_MODEL_USED=""
+  _REVIEW_TOOL_USED=""
 
+  # ⛔ Do NOT re-assign _REVIEW_MODEL_USED here: _try_review_model already recorded which
+  # model AND which tool answered, via _review_record_tool. Setting it again from the loop
+  # variable is how the tool name would get lost.
   if _try_review_model "$primary" "$prompt"; then
-    _REVIEW_MODEL_USED="$primary"
     return 0
   fi
 
@@ -257,7 +472,6 @@ run_fallback_chain() {
     for m in "${panel_models[@]}"; do
       [[ -z "$m" ]] && continue
       if _try_review_model "$m" "$prompt"; then
-        _REVIEW_MODEL_USED="$m"
         return 0
       fi
     done
