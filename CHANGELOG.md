@@ -2,6 +2,48 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.9.8 — 审查产物终于能跨 worktree 被门禁看见
+
+🔴 卡人的实况（2026-09-10，我自己撞的）：`.gitignore` 排除 `.agent/reviews/` 与
+`.agent/verify/`（wb 的项目更狠，整个 `.agent/` 都 ignore），而 `merge-only` 档把
+审查推迟到「合并进 strict 分支」那一刻。产物在**功能分支的 worktree** 里生成、
+merge 发生在**主仓 worktree** —— 既不进 git 又不跨 worktree
+⇒ **它永远到不了那个检查点**。当天我是手工 `cp` 过去才让门禁通过的。
+
+⇒ 产物同时写进按**仓库**（不是按 worktree）分键的共享库：
+
+```
+$AGENT_GATES_DIR/artifacts/<repo-key>/reviews/
+```
+
+`repo-key` 取自 `git rev-parse --git-common-dir` ⇒ 同一仓库的所有 worktree 同键，
+不同仓库不同键。CHECK 5 现在同时扫项目内的 `.agent/reviews/` 和这个共享库。
+⛔ 不动任何项目的 `.gitignore` —— 那要各项目分别改，而且会把审查正文推进 git 历史。
+
+### ⚠️ 差点埋进去的坑：macOS 的 /var 软链
+
+worktree 里 `git-common-dir` 返回 `/private/var/...`，主 worktree 返回**相对**的 `.git`。
+把相对值转绝对得到 `/var/...` —— 而 `/var` 是 `/private/var` 的软链 ⇒ **同一个仓库在
+两个 worktree 里算出不同的 key，共享库当场失效**。实测撞到，两处实现都改成 `pwd -P`
+统一到物理路径。
+
+两处实现分叉的失败**长得像「审查根本没做」**，所以测试里钉了一条可观察的断言：
+主仓与 worktree 各登记一次后，键目录必须仍是 1 个。
+（⛔ 别把 CLI 当库 source 去问它算出什么 —— 它会跑主流程。第一版就是这么写的。）
+
+### 顺带修掉一处 fail-open
+
+`output_result()` 原来是裸 `> "$RESULT_FILE"`：父目录不存在时重定向失败，
+而函数照样返回 0、调用方照样 `exit 0` —— 表现为**「命令说成功了，产物却不在」**。
+而 `.agent/reviews/` 正是被 gitignore 的目录，新 worktree 里天然不存在 ⇒ 必踩。
+现在建父目录 + 写失败返回 75，调用方检查返回值。
+
+### 已知未做
+
+verify 侧（CHECK 6）还没接共享库：它的产物是 `.md` + `.dispatch.json` 成对的，
+接进去要动 CHECK 6 的配对逻辑，是另一块。⚠️ 但那一侧目前没有同等的卡点 ——
+`agent-gates-verify-import` 本来就不要 token、锚点当场算，可以直接在主仓生成。
+
 ## v2.9.7 — 免 token 登记「自己已经跑完的审查」
 
 🔴 卡人的实况（2026-09-10，wb 一条长会话）：它用 `pi -p` 跑完七轮审查、结论都在手上，
