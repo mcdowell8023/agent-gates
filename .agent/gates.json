@@ -1,4 +1,5 @@
 {
   "mode": "merge-only",
-  "_note": "小分支迭代时不要求逐次审查；合并进 main（strict 分支）时强制 review + verify。改成 strict 可逐次要求，改成 off 可关闭——status 会把当前档位打出来。"
+  "strict_branches": ["master", "test", "prod-*", "release/*"],
+  "_note": "AgentWorkspace 策略（2026-09-10）：业务分支上完全不要求审查产物；main 不在 strict 列表里，合进 main 只跑 Gate 1 / CHECK 2 / CHECK 3，不要求 review + verify 产物。只有 master / test / prod-* / release/* 才强制 review + verify 且结论必须 PASS。配套 git config merge.ff=false 让普通 merge 产生 merge commit 触发 pre-merge-commit。要更严就把 main 加回 strict_branches。"
 }
