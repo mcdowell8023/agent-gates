@@ -257,7 +257,7 @@ echo "--- T13 非法限定结论 + 合法 PASS 同文件 ⇒ ⛔ 不算干净 PA
 # 只要同文件里还有一条合法 PASS 就仍判 PASS ⇒ 能取代一份真 FAIL。
 # ⚠️ 而我写的注释声称「带限定词的结论落到 NONE」—— **那句话是假的**，
 #    只在文件里没有别的合法 PASS 时才成立。又一次「解释性文字撒谎」。
-for bad in 'VERDICT: PASS_WITH_ISSUES' 'VERDICT: FAIL but blockers remain' '## VERDICT: 待定' 'VERDICT: PASSENGER'; do
+for bad in 'VERDICT: PASS_WITH_ISSUES' 'VERDICT: FAIL but blockers remain' 'VERDICT: APPROVED_WITH_CONDITIONS' 'VERDICT: PASSENGER'; do
   out=$(mkcase "stale@VERDICT: FAIL" "cur@${bad};;VERDICT: PASS")
   assert "⛔ [${bad}] + 合法 PASS 仍取代不了过期 FAIL" \
     "$([[ "$(_rc "$out")" != "0" ]] && echo true || echo false)"
@@ -265,6 +265,16 @@ done
 out=$(mkcase "stale@VERDICT: FAIL" "cur@VERDICT: PASS_WITH_ISSUES;;VERDICT: PASS")
 assert "⭐ 报错要点出那条非法结论（⛔ 否则没法修）" \
   "$([[ "$out" == *PASS_WITH_ISSUES* ]] && echo true || echo false)"
+
+echo
+echo "--- T13b ⛔ 不含取值的 VERDICT 散文行不该毒化整份产物（否则是误拦）---"
+# 🔴 「非法行毒化产物」必须只针对**带取值 token** 的限定结论。
+# `> VERDICT: 见上文` / `VERDICT: 待补充` 这类是报告散文，也命中前置 grep（实测），
+# 毒化它们 ⇒ 一份正常审查报告因为正文里一句话就整份作废。⛔ 纯误拦。
+for prose in '> VERDICT: 见上文' 'VERDICT: 待补充' 'VERDICT：稍后补充'; do
+  out=$(mkcase "stale@VERDICT: FAIL" "cur@${prose};;VERDICT: PASS")
+  assert "⭐ [${prose}] 不影响那条合法 PASS（rc=$(_rc "$out")）" "$(_allowed "$out")"
+done
 
 echo
 echo "--- T14 合法 FAIL + 非法行 + 合法 PASS 同文件 ⇒ ⛔ FAIL 优先 ---"

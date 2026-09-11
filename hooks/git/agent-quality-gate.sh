@@ -75,7 +75,14 @@ _gate_classify_verdict() {
     #    ⚠️ 而当时的注释写着「带限定词的结论落到 NONE」—— 那句话是假的，
     #    只在文件里没有别的合法 PASS 时才成立。
     if ! has_valid_conclusion "$line"; then
-      [[ -n "$bad" ]] || bad="$line"
+      # ⛔ 只有**带取值 token** 的非法行才毒化整份产物。
+      # 危险的是「限定过的正/负结论」（PASS_WITH_ISSUES / FAIL but blockers remain）——
+      # 它们会被前缀匹配误读。而 `> VERDICT: 见上文` / `VERDICT: 待补充` 这类**不含任何
+      # 取值**的行是报告散文，毒化它们就是纯误拦（实测这两种都命中前置 grep）。
+      # ⚠️ 用户最反感的就是误拦，而这条门控的目的是防伪造，不是挑格式。
+      if printf '%s' "$line" | grep -qiE '(PASS|PASSED|FAIL|FAILED|ISSUES|REVISE|REVISED|APPROVE|APPROVED|REJECT|REJECTED)'; then
+        [[ -n "$bad" ]] || bad="$line"
+      fi
       continue
     fi
     val=$(extract_verdict_value "$line") || continue
