@@ -20,6 +20,14 @@ set -uo pipefail
 # opencode 路径，所以显式打开 —— 否则通道被跳过，断言看起来像"审查功能坏了"。
 export HETERO_CHAN_OPENCODE="${HETERO_CHAN_OPENCODE:-1}"
 
+# ⛔ 隔离**项目级**门禁配置，文件作用域。
+# 这些用例是在 agent-gates 自己的 worktree 里调 `agent-gates-review` 的 —— 而本仓
+# `.agent/gates.json` 是 `mode=merge-only`，业务分支上审查时机门控会先 exit 79，
+# 整个诊断路径一行都跑不到（实测 50 pass → 15 pass，且「exits non-zero」还照样绿，
+# 因为 79 也是非零 ⇒ 失败长得像「诊断信息全丢了」而不像「被门控拦了」）。
+# 已知的隔离只做了 AGENT_GATES_DIR（用户级），项目级那份是靠 cwd 找到的，管不住。
+export AGENT_GATES_REVIEW_MODE=strict
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REVIEW_CMD="$SCRIPT_DIR/../bin/agent-gates-review"
 WITH_TIMEOUT="$SCRIPT_DIR/../bin/with-timeout.mjs"

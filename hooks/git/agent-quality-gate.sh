@@ -30,6 +30,18 @@ set -euo pipefail
 # strict_branches: on these branches, and on merges INTO them, strict is forced regardless
 # of configuration. That is where "one full review before it reaches test/master" lands.
 # ---------------------------------------------------------------------------
+# 档位/strict 分支判定抽到 lib/gate-mode.sh —— bin/agent-gates-review 要用同一份来判
+# 「现在轮不到审查」。⛔ 缺库就 fail-closed：判不出档位时按 strict 走，
+# ⛔ 绝不能因为找不到库就静默放行。
+_GATE_MODE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib/gate-mode.sh"
+if [[ -f "$_GATE_MODE_LIB" ]]; then
+  # shellcheck disable=SC1090
+  source "$_GATE_MODE_LIB"
+else
+  echo "❌ GATE: lib/gate-mode.sh not found at $_GATE_MODE_LIB — cannot resolve the gate mode, refusing to run in an unknown configuration" >&2
+  exit 1
+fi
+
 # 🔴 一线反馈（2026-09-10）：项目 .gitignore 里有 `.agent/`（wb 的 crm-center / crm-platform
 # 都是），所以 gates.json 从未被 git 跟踪 ⇒ `git worktree add` 出来的目录里根本没有它。
 # gate 找不到项目策略就按 strict 走，在普通业务分支上也强制要求 review + verify 产物，
@@ -38,19 +50,6 @@ set -euo pipefail
 # 采纳反馈里的第二个建议：**回退到主 worktree 去找**。`git rev-parse --git-common-dir`
 # 在 worktree 里返回主仓的 .git，其父目录就是主 worktree 根。一处改动覆盖所有项目，
 # ⛔ 不动任何项目的 .gitignore（那要各项目分别改，且会把策略文件推进 git）。
-_gate_resolve_project_cfg() {
-  local rel=".agent/gates.json"
-  [[ -f "$rel" ]] && { printf '%s' "$rel"; return 0; }
-  local common main
-  common=$(git rev-parse --git-common-dir 2>/dev/null) || { printf '%s' "$rel"; return 0; }
-  # 主 worktree 里这个值是相对的 `.git`，那时父目录就是 `.`，与上面的分支等价。
-  case "$common" in
-    /*) main="${common%/.git}" ;;
-    *)  printf '%s' "$rel"; return 0 ;;
-  esac
-  [[ -f "$main/$rel" ]] && { printf '%s' "$main/$rel"; return 0; }
-  printf '%s' "$rel"
-}
 _GATE_CFG_PROJECT=$(_gate_resolve_project_cfg)
 
 # 与 bin/agent-gates-review 的 artifact_store_dir 必须同口径（同一个 repo-key 算法），
@@ -72,54 +71,16 @@ _gate_artifact_store_dir() {   # _gate_artifact_store_dir <reviews|verify>
   printf '%s/artifacts/%s/%s' "${AGENT_GATES_DIR:-$HOME/.agent-gates}" "$key" "$kind"
 }
 _GATE_CFG_USER="${AGENT_GATES_DIR:-$HOME/.agent-gates}/gates.json"
+
 GATE_MODE_SOURCE=""
 
 # Read a dotted path out of a config file. python3 rather than sed because review.mode /
 # verify.mode are nested, and a regex over nested JSON is how you get a value from the wrong
 # object.
-_gate_cfg_get() {
-  [[ -f "$1" ]] || return 1
-  local v
-  v=$(python3 -c '
-import json,sys
-try:
-    cur = json.load(open(sys.argv[1]))
-except Exception:
-    sys.exit(0)
-for k in sys.argv[2].split("."):
-    if not isinstance(cur, dict): sys.exit(0)
-    cur = cur.get(k)
-    if cur is None: sys.exit(0)
-print(cur)
-' "$1" "$2" 2>/dev/null)
-  [[ -n "$v" ]] || return 1
-  printf '%s' "$v"
-}
 
-_gate_norm_mode() {
-  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
-    strict|relaxed|merge-only|off) printf '%s' "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"; return 0 ;;
-  esac
-  return 1
-}
 
 # env > project config > user config > fallback. Used for the overall mode and for the
 # per-check overrides, so all three resolve the same way.
-_gate_resolve_mode() {   # <env-var-name> <cfg.path> <fallback> -> "<mode>|<source>"
-  local envvar="$1" path="$2" fb="$3" raw m
-  raw="$(eval "printf '%s' \"\${${envvar}:-}\"")"
-  if [[ -n "$raw" ]]; then
-    if m=$(_gate_norm_mode "$raw"); then printf '%s|env %s' "$m" "$envvar"; return 0; fi
-    echo "⚠️  ${envvar}='${raw}' is not one of strict|relaxed|merge-only|off — ignored" >&2
-  fi
-  local f
-  for f in "$_GATE_CFG_PROJECT" "$_GATE_CFG_USER"; do
-    if raw=$(_gate_cfg_get "$f" "$path") && m=$(_gate_norm_mode "$raw"); then
-      printf '%s|%s' "$m" "$f"; return 0
-    fi
-  done
-  printf '%s|%s' "$fb" "inherited"
-}
 
 _gm=$(_gate_resolve_mode AGENT_GATES_MODE mode strict)
 GATE_MODE="${_gm%%|*}"; GATE_MODE_SOURCE="${_gm##*|}"
@@ -134,40 +95,8 @@ GATE_VERIFY_MODE="${_gvm%%|*}"; GATE_VERIFY_SOURCE="${_gvm##*|}"
 
 # strict_branches: project config wins over user config; fall back to the usual integration
 # branch names. Patterns are globs, so release/* works.
-_gate_strict_branches() {
-  local f
-  for f in "$_GATE_CFG_PROJECT" "$_GATE_CFG_USER"; do
-    [[ -f "$f" ]] || continue
-    local out
-    out=$(python3 -c '
-import json,sys
-try:
-    d = json.load(open(sys.argv[1]))
-except Exception:
-    sys.exit(0)
-b = d.get("strict_branches")
-if isinstance(b, list):
-    for x in b:
-        if x: print(x)
-' "$f" 2>/dev/null)
-    [[ -n "$out" ]] && { printf '%s' "$out"; return 0; }
-  done
-  printf '%s' 'test
-master
-main'
-}
 
 _GATE_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
-_gate_branch_is_strict() {
-  local b="${1:-}" pat
-  [[ -z "$b" || "$b" == "HEAD" ]] && return 1
-  while IFS= read -r pat; do
-    [[ -z "$pat" ]] && continue
-    # Unquoted $pat on purpose — these are globs (release/*).
-    [[ "$b" == $pat ]] && return 0
-  done <<< "$(_gate_strict_branches)"
-  return 1
-}
 
 _GATE_ON_STRICT_BRANCH=0
 if _gate_branch_is_strict "$_GATE_BRANCH"; then

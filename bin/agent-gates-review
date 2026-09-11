@@ -5,6 +5,7 @@
 # capability level (L0-L3), then routes to the best available heterogeneous tool.
 #
 # Usage:  agent-gates-review <prompt-file> [--result <result-file>]
+#         agent-gates-review --due [-C <dir>]        # 只判时机，不跑审查
 #
 # Routing:
 #   L3 (opencode+codex): opencode → fallback codex
@@ -18,6 +19,7 @@
 #   75  review tool failed (caller should fall back to agent-tool)
 #   76  prompt too long for opencode and no codex fallback
 #   78  L0 machine — no heterogeneous tool available
+#   79  现在轮不到审查（`--due` 的 due=no，或时机门控拦下了一次提前审）
 #
 # Env:
 #   AGENT_GATES_DIR       override ~/.agent-gates
@@ -37,6 +39,9 @@
 #                         and the channel's first end-to-end run was cut off at 200s.
 #   AG_REVIEW_PI          path to the pi binary (default: pi on PATH).
 #   HETERO_CHAN_PI        1/0 — overrides channels.pi.enabled. Default enabled.
+#   AGENT_GATES_REVIEW_EARLY  1 = 等同 --early，绕过审查时机门控（会被打出来）
+#   AGENT_GATES_REVIEW_MODE   strict|relaxed|merge-only|off — 覆盖 review.mode，
+#                         优先级高于项目/用户配置文件。时机门控与 --due 都读它。
 #   HETERO_CHAN_OPENCODE  1/0 — overrides channels.opencode.enabled. ⛔ Default DISABLED
 #                         (matches lib/hetero/config.sh; opencode was measured timing out
 #                         at 120-200s and needing a long-lived serve).
@@ -59,13 +64,17 @@ MAX_CHARS="${AG_REVIEW_MAX_CHARS:-800}"
 # gate — one observed run burned 80 minutes and produced nothing at exit 0.
 _WT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/with-timeout.mjs"
 TIMEOUT_SECS="${AG_REVIEW_TIMEOUT:-120}"
+# fail-closed rather than fail-open: silently dropping the timeout would restore the
+# original hang risk while the code still claims every invocation is bounded.
+# ⛔ 这里只**算标志**，退出推迟到参数解析之后 —— `--due` 只读配置判时机，不跑任何
+# reviewer，不该因为这台机器没装 node 就答不出「现在该不该审」。退出点见下方 _WT_OK 检查。
+TIMEOUT_CMD=()
+_WT_OK=1
 if [[ ! -f "$_WT" ]] || ! command -v node >/dev/null 2>&1; then
-  # fail-closed rather than fail-open: silently dropping the timeout would restore the
-  # original hang risk while the code still claims every invocation is bounded.
-  echo "agent-gates-review: timeout wrapper unavailable ($_WT, node required) — refusing to run reviewers unbounded (fail-closed)" >&2
-  exit 75
+  _WT_OK=0
+else
+  TIMEOUT_CMD=(node "$_WT" "$TIMEOUT_SECS")
 fi
-TIMEOUT_CMD=(node "$_WT" "$TIMEOUT_SECS")
 
 PROMPT_FILE=""
 RESULT_FILE=""
@@ -75,6 +84,11 @@ IMPORT_RESULT=""
 IMPORT_TOKEN=""
 PASEO_AGENT=""
 IMPORTED_MODEL=""
+REVIEW_EARLY="${AGENT_GATES_REVIEW_EARLY:-0}"
+DUE_ONLY=0
+DUE_REPO=""
+DUE_REPO_SET=0
+EARLY_EXPLICIT=0
 
 _need_val() { [[ $2 -ge 2 ]] || { echo "agent-gates-review: $1 requires a value" >&2; exit 1; }; }
 
@@ -87,11 +101,100 @@ while [[ $# -gt 0 ]]; do
     --token)          _need_val "$1" $#; IMPORT_TOKEN="$2";  shift 2 ;;
     --paseo-agent)    _need_val "$1" $#; PASEO_AGENT="$2";   shift 2 ;;
     --imported-model) _need_val "$1" $#; IMPORTED_MODEL="$2"; shift 2 ;;
+    --early)          REVIEW_EARLY=1; EARLY_EXPLICIT=1;        shift ;;
+    --due)            DUE_ONLY=1;                              shift ;;
+    -C)               _need_val "$1" $#
+                      [[ "$DUE_REPO_SET" -eq 0 ]] || { echo "agent-gates-review: -C given more than once (${DUE_REPO} then $2) — refusing to silently take the last one" >&2; exit 1; }
+                      DUE_REPO="$2"; DUE_REPO_SET=1;           shift 2 ;;
     *)
       if [[ -z "$PROMPT_FILE" ]]; then PROMPT_FILE="$1"; shift
       else echo "agent-gates-review: unknown arg: $1" >&2; exit 1; fi ;;
   esac
 done
+
+# ============================================================
+# `--due` —— 只判时机，不跑审查
+# ============================================================
+# 🔴 为什么要有这个子命令：下面那道时机门控只拦「走本命令的审查」。而 2026-09-10 烧掉
+# 11 个 agent 的那条会话是**自己用 Paseo 直接派**审查的 —— 根本没经过这里。派发侧要能在
+# 花钱之前问一句「现在轮到审查了吗」，所以需要一个零成本、可脚本解析的判定入口。
+#
+# 契约（`rift-dispatch` 的派发前校验照这个写，⛔ 改了就是破坏调用方）：
+#   exit 0  = 该审     stdout: due=yes
+#   exit 79 = 轮不到   stdout: due=no
+#   stdout 恒为 key=value 行：due / reason / branch / review_mode / when
+#   ⛔ 不需要 prompt 文件、不读 capability 文件、不调任何模型、不写任何产物
+_review_load_gate_mode() {
+  declare -f _gate_review_due_eval >/dev/null 2>&1 && return 0
+  local lib
+  lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/gate-mode.sh"
+  [[ -f "$lib" ]] || return 1
+  # shellcheck disable=SC1090
+  source "$lib" 2>/dev/null || return 1
+  declare -f _gate_review_due_eval >/dev/null 2>&1 || return 1
+  _GATE_CFG_PROJECT=$(_gate_resolve_project_cfg 2>/dev/null || echo ".agent/gates.json")
+  _GATE_CFG_USER="${AGENT_GATES_DIR:-$HOME/.agent-gates}/gates.json"
+  return 0
+}
+
+_review_due_report() {
+  if _review_load_gate_mode; then
+    _gate_review_due_eval || true
+  else
+    # ⛔ fail-open：判不出来就放行。时机门控的目的是省 token，不是变成新的堵路。
+    # 但必须**说出来**是判不出来的 —— 伪装成「该审」等于让调用方以为门控在工作。
+    _TIM_DUE="yes"
+    _TIM_REASON="undetermined (lib/gate-mode.sh unavailable) — failing open"
+    _TIM_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+    _TIM_MODE="undetermined"
+    _TIM_WHEN=""
+  fi
+  printf 'due=%s\n'          "${_TIM_DUE:-yes}"
+  printf 'reason=%s\n'       "${_TIM_REASON:-}"
+  printf 'branch=%s\n'       "${_TIM_BRANCH:-}"
+  printf 'review_mode=%s\n'  "${_TIM_MODE:-}"
+  printf 'when=%s\n'         "${_TIM_WHEN:-}"
+  [[ "${_TIM_DUE:-yes}" == "yes" ]] && exit 0
+  exit 79
+}
+
+# 🔴 `--due` 必须和正常审查参数互斥。混用时它先退出 ⇒ **不跑 reviewer、不写 --result，
+# 却返回 exit 0** —— 把 0 当成「审查成功」的调用方会拿着一个不存在的产物往下走
+# （异构审 finding 1）。⛔ 静默忽略比报错危险得多。
+if [[ "$DUE_ONLY" == "1" ]]; then
+  _due_conflict=""
+  [[ -z "$PROMPT_FILE" ]]        || _due_conflict="${_due_conflict} <prompt-file>"
+  [[ -z "$RESULT_FILE" ]]        || _due_conflict="${_due_conflict} --result"
+  [[ -z "$ROUTE" ]]              || _due_conflict="${_due_conflict} --route"
+  [[ -z "$DISPATCH_OUT" ]]       || _due_conflict="${_due_conflict} --dispatch-out"
+  [[ -z "$IMPORT_RESULT" ]]      || _due_conflict="${_due_conflict} --import-result"
+  [[ -z "$IMPORT_TOKEN" ]]       || _due_conflict="${_due_conflict} --token"
+  [[ -z "$PASEO_AGENT" ]]        || _due_conflict="${_due_conflict} --paseo-agent"
+  [[ -z "$IMPORTED_MODEL" ]]     || _due_conflict="${_due_conflict} --imported-model"
+  # ⚠️ 只看**显式** --early。AGENT_GATES_REVIEW_EARLY 可能是全局 export 的，
+  #    那种情况下把 --due 判成冲突纯属添乱。
+  [[ "$EARLY_EXPLICIT" -eq 0 ]]  || _due_conflict="${_due_conflict} --early"
+  if [[ -n "$_due_conflict" ]]; then
+    echo "agent-gates-review: --due 不能和这些参数混用（它只判时机、不跑审查）:${_due_conflict}" >&2
+    echo "  ⛔ 混用会静默降级成「只查询」：不跑 reviewer、不写产物，却返回 exit 0。" >&2
+    echo "  判时机: agent-gates-review --due [-C <dir>]" >&2
+    echo "  真跑审查: agent-gates-review <prompt-file> --result <file>" >&2
+    exit 1
+  fi
+fi
+
+if [[ -n "$DUE_REPO" ]]; then
+  # ⛔ -C 目前只服务 --due：别的路径上 prompt / --result 都可能是相对路径，
+  #    悄悄换工作目录会让它们指向别处。
+  [[ "$DUE_ONLY" == "1" ]] || { echo "agent-gates-review: -C is only valid with --due" >&2; exit 1; }
+  cd "$DUE_REPO" 2>/dev/null || { echo "agent-gates-review: -C: cannot enter directory: $DUE_REPO" >&2; exit 1; }
+fi
+[[ "$DUE_ONLY" == "1" ]] && _review_due_report
+
+if [[ "$_WT_OK" != "1" ]]; then
+  echo "agent-gates-review: timeout wrapper unavailable ($_WT, node required) — refusing to run reviewers unbounded (fail-closed)" >&2
+  exit 75
+fi
 
 # Import mode takes no prompt file: the prompt was snapshotted at dispatch time and the
 # snapshot — not whatever the path holds now — is what gets verified.
@@ -848,6 +951,47 @@ print(a['enabled']); print(a['head']); print(a['files_sha256']); print(a['diff_s
   rm -rf "$proc"
   exit 0
 }
+
+# ============================================================
+# 审查时机门控（v2.9.9）
+# ============================================================
+# 🔴 实况（2026-09-10，一条会话自己算的账）：任务拆成小块并行开发，它**每修一小条就派
+# 一个 agent 跑一次全量审查**，自己每轮再复核一次全量 —— 「11 个 agent + 至少 7 次全量跑」。
+# 那些审查全部白烧：下一次改动之后，它们看见的代码已经不是最终代码
+# （实测那份审查根本没看见后来 637+ 行改动，包括它自己要求的修复）。
+#
+# ⭐ 门禁配置本来就说了「现在不用审」：`review.mode=merge-only` + `strict_branches`
+#    只含 test/master/main ⇒ 模块分支迭代期不审，合并进集成分支时审一次。
+#    ⛔ 但那句话**只在 commit 时才打印** —— 写代码阶段没有任何东西拦它。
+#
+# ⇒ 本命令自己判：轮不到审查就拒绝（exit 79），并说清什么时候该审。
+# ⛔ 逃生门保留（`--early` / `AGENT_GATES_REVIEW_EARLY=1`），但会被打出来 ——
+#    设计目标是「无法**静默**绕过」，不是「无法绕过」。
+_review_due_check() {
+  # 导入已有审查、或两阶段派发本身，都不受时机限制：那些是在**登记**，不是在烧 token。
+  [[ -z "$IMPORT_RESULT" ]] || return 0
+  [[ "$ROUTE" != "paseo" ]] || return 0
+
+  # 判不出来就别拦 —— ⛔ 时机门控不该变成新的堵路。
+  _review_load_gate_mode || return 0
+  _gate_review_due_eval && return 0      # 该审，放行
+
+  if [[ "$REVIEW_EARLY" == "1" ]]; then
+    echo "agent-gates-review: ⚠️  early review — ${_TIM_REASON}. 产物在合并点**仍需重跑**：现在这份看不到后续改动，锚点一改就作废。" >&2
+    return 0
+  fi
+
+  echo "agent-gates-review: 现在轮不到审查（exit 79）—— ${_TIM_REASON}." >&2
+  echo "  该审的时机：合并进这些分支之一时，审一次 —— ${_TIM_WHEN:-test master main}" >&2
+  echo "  ⛔ 迭代期每改一小条就跑一次全量审查是白烧：下一次改动之后，那份审查看见的" >&2
+  echo "     已经不是最终代码，锚点作废、结论不作数（实测 11 个 agent + 7 次全量全部重跑）。" >&2
+  echo "  先把这一批改完 → 合并进集成分支 → 那时审一次。" >&2
+  echo "  只想知道轮不轮到、不想跑审查：agent-gates-review --due（零成本，可脚本解析）。" >&2
+  echo "  真要提前审：加 --early（或 AGENT_GATES_REVIEW_EARLY=1）；它会被记一笔，且不替代合并点那次。" >&2
+  exit 79
+}
+
+_review_due_check
 
 # --- Main routing ---
 
