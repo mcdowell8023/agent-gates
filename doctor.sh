@@ -224,6 +224,14 @@ check_omo_registration() {
     note "OMO (OpenCode) not installed, skipping"
     return
   fi
+  # 🔴 目录存在 ≠ opencode 装着。**Paseo 的 daemon 每次启动都会往
+  # `~/.config/opencode/plugins/` 写 `paseo-terminal-activity.js`，不管 opencode 在不在** ——
+  # 所以卸载之后这个目录会自己回来（实测 2026-09-11 11:44 又被建了一次，里面只有那个插件）。
+  # 只看目录就会叫用户去给一个**不存在的工具**注册钩子，这正是「又和 opencode 纠缠」。
+  if ! command -v opencode >/dev/null 2>&1; then
+    note "OMO: ~/.config/opencode exists but opencode is not installed — skipping (Paseo re-creates that dir for its own plugin)"
+    return
+  fi
   local h="$HOME/.config/opencode/hooks.json"
   # Since v1.5.2, install.sh auto-registers the OMO hook via the same
   # register_hook() jq logic used for OMC/OMX. doctor still reports the

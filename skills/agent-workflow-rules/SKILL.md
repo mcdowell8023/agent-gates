@@ -57,6 +57,7 @@ Intent identified → 【Skill Gate: scan → load】 → Path A/B routing → s
 | Non-trivial change in a team project (has OpenSpec) | Confirm OpenSpec change + `.feature` exist (§5, §6) |
 | Multi-step plan ready for execution | **Plan review** (§7) |
 | About to claim "done" / "fixed" / "passing" | Follow §9 Verification Gate |
+| About to **launch a cross/gate review** (own or dispatched to an agent) | Ask `--due` first (§2.6) — not due ⇒ don't review |
 
 ### 🟡 Strong Defaults
 
@@ -74,6 +75,26 @@ ALL of the following must be true:
 - No new exports, routes, or components
 
 **🔴 Hard gates are NEVER skipped, even for trivial tasks.**
+
+### 2.6 审查的时机（🔴 Hard gate，接在上面那行后面）
+
+⛔ 轮不到审查的时候派审查 = 白烧。审查产物带锚点（`REVIEW_HEAD` / `REVIEW_DIFF_SHA256`），
+**代码一改锚点就作废** ⇒ 迭代期每改一小条审一次，每一次都在给中间态出结论。
+实测代价：一条会话 11 个 agent + ≥7 次全量，全部重跑；其中一份审查没看见后续 637+ 行改动。
+
+派审查之前问一句，零成本（不调模型、不写产物）：
+
+```bash
+bash "${AGENT_GATES_DIR:-$HOME/.agent-gates}/bin/agent-gates-review" --due -C <目标仓>
+# exit 0 = 该审   exit 79 = 轮不到（stdout 的 when= 那行说了什么时候该审）
+```
+
+- ⛔ **只有 exit 79 才算「轮不到」**。其它退出码（含命令不存在、旧版本不认 `--due`）
+  一律当「该审」放行 —— 问不出来不该把审查掐死。
+- `due=no` ⇒ 别派审查 agent。先把这一批改完，合并进集成分支，那时审**一次整批**。
+- 真要提前审：`--early`（会被打出来，且不替代合并点那一次）。
+
+颗粒度、反模式、完整判据表见 `agent-review-protocol` skill §2.5。
 
 ### Scope Escalation
 

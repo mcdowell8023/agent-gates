@@ -59,8 +59,13 @@ D=$(mkgd 0)
 out=$(AGENT_GATES_DIR="$D" PATH="$BIN:$PATH" node "$SCRIPT_DIR/../bin/with-timeout.mjs" 90 bash "$DOCTOR" 2>&1 || true)
 assert "⭐ 完全没调 opencode（不探测、更不可能起 serve）" \
   "$([[ ! -s "$CALLS" ]] && echo true || echo false)"
-assert "⭐ 能力报告里不再声称 opencode 可用" \
-  "$([[ "$out" != *"capability"*"opencode"* ]] && echo true || echo false)"
+# ⛔ 旧断言是 `$out != *capability*opencode*` —— glob **跨行匹配**：
+# 「Cross-review capability: L1 (codex)」和后面任何提到 opencode 路径的行合起来就命中
+# ⇒ 它其实在测「capability 之后有没有出现过 opencode 这个词」，不是「能力报告是否声称
+#    opencode 可用」。实测被一条无关的 OMO 路径警告触发（main 上就是红的）。改成只看那一行。
+cap_line=$(printf '%s\n' "$out" | grep -i 'Cross-review capability' | head -1)
+assert "⭐ 能力报告里不再声称 opencode 可用（只看 capability 那一行）" \
+  "$([[ -n "$cap_line" && "$cap_line" != *opencode* ]] && echo true || echo false)"
 assert "有说明为什么跳过（不是静默）" \
   "$(echo "$out" | grep -qiE 'opencode.*(disabled|关|跳过|skipped)' && echo true || echo false)"
 assert "doctor 本身没崩（仍打出汇总行）" \
@@ -120,6 +125,29 @@ if [[ -n "$LIVE_BEFORE" ]]; then
 fi
 
 echo
+echo
+echo "--- opencode 已卸载但 ~/.config/opencode 被别人重建 ⇒ ⛔ 不许再叫用户注册钩子 ---"
+# 🔴 实况（2026-09-11 11:44）：opencode 早已卸载，PATH 里没有它，但
+# `~/.config/opencode/plugins/paseo-terminal-activity.js` 又出现了 —— **Paseo 的 daemon
+# 每次启动都会写这个插件**，不管 opencode 在不在，顺手把目录建回来。
+# doctor 只看目录存在就判「OMO 装着」⇒ 警告用户 `install.sh --upgrade` 去给一个
+# **不存在的工具**注册钩子。用户的明确要求是「不想再看到哪个 agent 和 opencode 纠缠」。
+FH=$(mktemp -d)
+mkdir -p "$FH/.config/opencode/plugins"
+echo '// paseo plugin' > "$FH/.config/opencode/plugins/paseo-terminal-activity.js"
+D=$(mkgd 0)
+NODEDIR=$(dirname "$(command -v node)")
+out=$(HOME="$FH" AGENT_GATES_DIR="$D" PATH="$NODEDIR:/usr/bin:/bin:/usr/sbin:/sbin" \
+  bash "$DOCTOR" 2>&1 || true)
+assert "⛔ 不再报 hooks.json missing" \
+  "$([[ "$out" != *"OMO hooks.json missing"* ]] && echo true || echo false)"
+assert "⛔ 不再让用户跑 install.sh --upgrade 去注册 opencode 钩子" \
+  "$([[ "$out" != *"--upgrade to auto-register"* ]] && echo true || echo false)"
+assert "⭐ 但要说清为什么跳过（⛔ 不是静默）" \
+  "$(echo "$out" | grep -qiE 'opencode.*(not installed|未安装|skipping)' && echo true || echo false)"
+assert "⭐ doctor 本身没崩" \
+  "$(echo "$out" | grep -qE '[0-9]+ pass' && echo true || echo false)"
+
 read -r P F < "$RESULTS_FILE"
 echo "PASS=$P FAIL=$F"
 rm -f "$RESULTS_FILE"

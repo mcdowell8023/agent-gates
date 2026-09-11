@@ -2,6 +2,135 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.9.9 — 审查的**时机**：轮不到就别审
+
+🔴 实况（2026-09-10，另一条会话自己算的账）：任务拆成小块并行开发，它**每修一小条就派
+一个 agent 跑一次全量审查**，自己每轮再复核一次全量 ——「11 个 agent + 至少 7 次全量跑」。
+那些审查全部白烧：下一次改动之后，它们看见的代码已经不是最终代码
+（实测那份审查根本没看见后来 637+ 行改动，**包括它自己要求的修复**）。
+
+⭐ 门禁配置本来就说了「现在不用审」—— `review.mode=merge-only` + `strict_branches`
+只含 `test/master/main` ⇒ 模块分支迭代期不审，合并进集成分支时审一次。
+⛔ 但那句话**只在 commit 时才打印** —— 写代码阶段没有任何东西拦它。
+
+### 两个口子
+
+1. **`agent-gates-review` 自己判时机**：轮不到就 exit 79，并说清什么时候该审。
+   逃生门 `--early` / `AGENT_GATES_REVIEW_EARLY=1` 保留，但会被打出来 ——
+   设计目标是「无法**静默**绕过」，不是「无法绕过」。
+2. **`agent-gates-review --due`**（新）：只判时机、不跑审查。给**派发侧**用 ——
+   上面那道门控只拦走本命令的审查，而烧掉 11 个 agent 的那条会话是自己用 Paseo
+   直接派的，根本没经过这个命令。
+
+```
+$ agent-gates-review --due              # 也可 -C <dir> 判别的仓库
+due=no
+reason=review mode is merge-only and 'feat/module-a' is not an integration branch
+branch=feat/module-a
+review_mode=merge-only
+when=test master main
+$ echo $?
+79                                      # 0=该审 79=轮不到
+```
+
+契约：stdout 恒为 key=value 行，`exit 0`=该审 / `exit 79`=轮不到。
+⛔ 不需要 prompt 文件、不读 capability 文件、不调任何模型、不写任何产物。
+判不出来时 **fail-open**（`due=yes` + `review_mode=undetermined`）——
+时机门控的目的是省 token，不是变成新的堵路。
+
+档位判定只有一份实现（`lib/gate-mode.sh` 的 `_gate_review_due_eval`），
+门禁、时机门控、`--due` 三个调用方共用。⛔ 复制第三份 = 第三次「两处实现分叉」，
+而分叉的档位判定失败长得像「配置没生效」，没人会去怀疑是两套逻辑。
+
+### ⚠️ 它第一件拦住的事是 agent-gates 自己的测试
+
+`run_review_verdict_diagnostics.sh` 在本仓 worktree 里调 review CLI，而本仓
+`.agent/gates.json` 是 `merge-only` ⇒ 业务分支上直接 exit 79，诊断路径一行都没跑到：
+**50 pass → 15 pass，而「exits non-zero」那条还照样绿**（79 也是非零）
+⇒ 失败长得像「诊断信息全丢了」，不像「被门控拦了」。
+已有的隔离只做了 `AGENT_GATES_DIR`（用户级），项目级那份是靠 cwd 找到的，管不住。
+修法是测试自己 `export AGENT_GATES_REVIEW_MODE=strict`。
+差分跑（门控开/关各一遍，逐文件比断言数）确认**没有别的文件被静默降级**。
+
+### 异构审查抓到的 5 条（gpt-5.6-sol，第一轮 FAIL）
+
+| # | 问题 | 方向 |
+|---|---|---|
+| 1 | `--due` 和正常审查参数混用时**静默降级成查询** —— 不跑 reviewer、不写 `--result`，却返回 exit 0 | 调用方拿着不存在的产物往下走 |
+| 2 | strict 分支上 `review.mode=off` 与门禁**口径相反** ⇒ 死锁：门禁要产物、CLI 拒绝生成 | 只能靠 `--early` 绕 |
+| 3 | 非 git 目录 + 用户级 `merge-only`/`off` ⇒ branch="" 被判成「非集成分支」⇒ exit 79 | **不是** fail-open |
+| 4 | `strict_branches` 类型写错（字符串而非数组）⇒ 静默回落 `test/master/main` ⇒ 在 `release/1.0` 上判 due=no | **不是** fail-open |
+| 5 | 4 条断言是空心的 | 见下 |
+
+第 2 条最值钱：`lib/gate-mode.sh` 抽出来的**目的**就是消除两处实现分叉，结果第一版
+仍与门禁分叉 —— 门禁有 `strict_branches` override（strict 分支强制 strict），
+判定函数里没有。现在 strict 分支的判断**排在 `off` / `merge-only` 之前**，与门禁同序。
+
+第 3、4 条同一个形状：`_gate_cfg_get` / `_gate_strict_branches` 把「键不存在」和
+「文件坏了」都当成「取不到」并静默回落，而那个回落方向是**阻断**。新增
+`_gate_cfg_sane()` 专门分辨这两者；⛔ 有意不改那两个函数 —— 门禁也在用。
+
+空心断言（第 5 条）也都是真的：
+- 「没跑审查」查的是输出里没有 `REVIEW_TOOL` —— 而 fake `pi` 本来就失败、根本不会产出那个
+  marker ⇒ 门控失效、真去调了模型，它也照样绿。改成**比模型调用次数**。
+- off 档只要求 `rc != 0` ⇒ 75（reviewer 跑了又失败）也算过。改成钉 `79` + 零调用。
+- 门禁 strict 回归断言匹配通用 `"Agent Quality Gate"` —— 而 **trivial-skip 的横幅也含这串**
+  ⇒ 档位判定整个坏掉它也绿。strict 是默认值、不打 mode 行，所以正判据是「**没有** mode 行」
+  再配一条「它确实跑了」。
+
+### 第二轮异构审查（grok-4.6）：PASS
+
+6 条逐条复核为 fixed，另答了 4 个我追加的问题（`_gate_cfg_sane` 会不会新引入阻断、
+strict 提前判会不会过严、`EARLY_EXPLICIT` 顺序、`--show-toplevel` 在 linked worktree /
+bare / submodule / gitfile 四种仓库下的行为）。它指出一条低优先级残留并已修：
+
+**`_gate_cfg_sane` 靠 python3 校验配置，python3 不在时却报「配置 unparseable /
+strict_branches 类型错」** —— 方向没错（仍放行），但**诊断在撒谎**，拿着这句话去查配置的人
+白查。已分开成 return 2，reason 改成点名 python3。⚠️ 本轮变异测试刚在同一个形状上吃过亏
+（reason 撒谎而断言靠别的字段兜住，全绿），所以这条配了专门的断言钉 `reason=` 那一行。
+
+### 🔴 顺带解决了「opencode 卸载了又自己回来」这个悬案
+
+**resurrector 是 Paseo。** `~/.config/opencode/plugins/paseo-terminal-activity.js` ——
+Paseo 的 daemon **每次启动都会写这个插件，不管 opencode 在不在**，顺手把
+`~/.config/opencode/` 建回来（实测 2026-09-11 11:44 又被建了一次，目录里**只有**那个插件）。
+⚠️ 上一轮我推断是 doctor 探测链里的 `oc_serve_ensure` 拉起来的 —— 那个推断是错的。
+
+连锁后果（一条一条全对上了）：
+
+1. Paseo 重建 `~/.config/opencode/`
+2. `doctor.sh` 的 `check_omo_registration` 只看**目录存在**就判「OMO 装着」
+3. ⇒ 黄色警告让用户跑 `install.sh --upgrade`，**去给一个已经卸载的工具注册钩子**
+4. ⇒ `run_doctor_channel.sh` 那条断言被这行无关警告触发，**main 上一直是红的**
+
+⚠️ 这个修法**改变了前置条件**，连带让 `run_doctor.sh` 的 P0-1/P0-1b 变红 ——
+那两条是在 mock HOME 里造了合法 `hooks.json` 然后期望检测到，而新前置是「opencode 真的装着」
+⇒ mock 环境必须**也把 opencode 摆上 PATH**（加了 `fake_opencode_on_path`）。
+⭐ 这是正当的测试跟随，不是把红的改绿：前置条件变了，测试就该表达新的前置条件。
+
+修法：`check_omo_registration` 改成还要求 `command -v opencode`，否则打灰色 note 说明
+「目录是 Paseo 重建的，不是 opencode 装着」。⛔ 不删那个目录 —— 它是 Paseo 的，删了下次还来。
+
+### ⚠️ 同一个文件里的假绿断言
+
+`run_doctor_channel.sh` 那条 `[[ "$out" != *"capability"*"opencode"* ]]` 是**跨行** glob：
+「Cross-review capability: L1 (codex)」这行 + 后面任何提到 opencode 路径的行**合起来**就命中
+⇒ 它测的是「capability 之后有没有出现过 opencode 这个词」，而不是「能力报告是否声称
+opencode 可用」。改成只取 `Cross-review capability` 那一行判。
+
+### 顺带
+
+`bin/with-timeout.mjs` 的 fail-closed 检查从「解析参数前直接 exit 75」改成
+「先算标志、解析后再退」—— `--due` 只读配置判时机，不跑任何 reviewer，
+不该因为这台机器没装 node 就答不出「现在该不该审」。
+
+⚠️ 更正一句我自己先写错的话：这**不是**「非 `--due` 路径的行为一字不变」。
+合法调用确实仍在任何 reviewer 执行前 exit 75（异构审复核确认没有携带空 `TIMEOUT_CMD`
+进 reviewer 的路径），但**报错优先级变了**：node 缺失时，`--result` 缺值 / 未知参数 /
+没配 `--due` 的 `-C` 这类参数错误现在先 exit 1，而旧实现一律先 exit 75。
+
+---
+
 ## v2.9.8 — 审查产物终于能跨 worktree 被门禁看见
 
 🔴 卡人的实况（2026-09-10，我自己撞的）：`.gitignore` 排除 `.agent/reviews/` 与
