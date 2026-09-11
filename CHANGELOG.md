@@ -2,6 +2,115 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.9.10 — 后一轮 PASS 取代前一轮 FAIL；CHECK 6 报错指出导入命令
+
+🔴 一线实测被卡（2026-09-11）：第三轮审查是 PASS 且 `REVIEW_DIFF_SHA256` 与 commit
+**完全匹配**，门禁却选中了第二轮那份 FAIL（锚点早已失效）。
+
+后果不只是卡一次：**只要同一个 HEAD 上存在过一份 FAIL，CHECK 5 就永远过不去**，
+除非把那份产物删掉 —— 等于在教人删审查记录，门禁自己破坏审查链的完整性。
+而「修完再审一轮」本来就是设计里的正常流程。
+
+### 根因：两个分支不对称
+
+```bash
+if   grep -qiE '^VERDICT:.*(ISSUES|FAIL|REJECT)' "$rf"; then
+  NEGATIVE_REVIEW_FILE="$rf"                      # ⛔ 一句 diff 锚点判断都没有
+elif grep -qiE '^VERDICT:.*(PASS|APPROVED)' "$rf"; then
+  if [[ "$rf_diff_sha256" == "$CURRENT_REVIEW_DIFF_SHA256" ]]; then   # ← PASS 要查
+```
+
+而决策处又无条件先看 FAIL。⇒ 审查结论只对**它看见的那个状态**成立，FAIL 也必须按这条算。
+
+### 修法：一个前置步骤，既有判断链一字不动
+
+后一轮 PASS 精确命中当前 staged diff 时，清掉那份锚在旧状态的 FAIL 并**打印取代说明**。
+
+⛔ 三条不能放松（`tests/run_gate_review_select.sh` T2/T3/T4/T4b 锁住）：
+
+| 场景 | 必须 |
+|---|---|
+| 过期 PASS + 命中当前 diff 的 FAIL | **拦** —— 过期 PASS 不能盖掉当前 FAIL |
+| 同一份 diff 上 FAIL 与 PASS 并存 | **拦** —— 两个审查者对同一份代码分歧时 fail-closed |
+| 过期 FAIL + **过期** PASS | **拦** —— 没有任何产物绑定当前 diff 时行为一字不变 |
+
+⚠️ 最后那条是**真正的绕过路径**，我第一轮测试没覆盖：拿到 FAIL 后随便改一行
+（锚点即失效），再拿一份更早的过期 PASS 顶上 —— 若取代逻辑不要求「PASS 精确命中
+当前 diff」，就只剩一条警告然后放行。**是变异测试把它逼出来的**：摘掉那个条件后
+16 条断言全绿，说明当时的 T4「只断言还是红的」太松（FAIL 被清掉，倒在「缺 PASS 结论」
+上，仍是红但原因变了）。⇒ 断言要钉**拦的理由**，不是「拦了没有」。
+
+### 🔴 异构审查（gpt-5.6-sol，round1 FAIL）又抓到两条严重的 —— 都是**结论怎么读**
+
+门禁自己写了两条正则读 `VERDICT:` 行，**两个方向都错**，而 `lib/hetero/conclusion.sh`
+早就把这些处理对了（它的注释里点名警告过第一条）：
+
+| 写法 | 门禁原来判 | 规范实现判 | 后果 |
+|---|---|---|---|
+| `VERDICT: PASS` | PASS | PASS | ✓ |
+| `VERDICT: PASS_WITH_ISSUES` | **PASS** | 拒绝 | ⛔⛔ **把结论反了过来**，还能据此取代一份真 FAIL |
+| `VERDICT: PASSENGER` / `PASS-WITH-ISSUES` / `APPROVED_WITH_CONDITIONS` | **PASS** | 拒绝 | 同上（前缀匹配） |
+| `**VERDICT: FAIL**` | **看不见** | FAIL | ⛔⛔ 击穿「同 diff 分歧时 fail-closed」 |
+| `## VERDICT: FAIL` / `- VERDICT: FAIL` / `VERDICT：FAIL`（全角） | **看不见** | FAIL | 同上 |
+| `**VERDICT: PASS**` / `## VERDICT: PASS` / 全角 | **看不见** | PASS | ⛔ 合法写法被误拒（又是卡人） |
+| `VERDICT: REVISE` | 不认 | REVISE→FAIL | 该判未通过的没判上 |
+
+⇒ 门禁现在 source `lib/hetero/conclusion.sh`，用
+`has_valid_conclusion` + `extract_verdict_value` + `map_verdict_to_verify`。
+
+⚠️ **不能直接拿规范实现的 `extract_conclusion_line`** —— 它取 `head -1`，
+于是「`VERDICT: PASS` 在前、`VERDICT: FAIL` 在后」的文件会退化成 PASS，
+**比门禁原来的行为更松**（原来负面 grep 扫全文、顺序无关）。
+新增的 `_gate_classify_verdict` 扫**每一条** verdict 行并 fail-closed。
+
+### 🔴 第三个 bug：`review.mode` / `verify.mode` = `off` 完全没被认
+
+实测门禁自己打印 `review=off, verify=off`，**然后两个都照样拦**：
+
+```
+ℹ️  Agent Quality Gate mode: strict (…) — review=off, verify=off
+❌ GATE: No content-anchored review evidence covers the staged change
+❌ GATE: No verifier evidence (.agent/verify/ missing)
+```
+
+源码里 `merge-only` 和 `relaxed` 各有处理，**`off` 只在需求矩阵那一处生效**
+（`_V6_MATRIX_REQUIRED=0`），主 enforcement 一路无视。
+
+⚠️ 而 `bin/agent-gates-review --due` 是认 `review.mode=off` 的（判 due=no）⇒ **两边口径分叉**：
+CLI 说「现在不用审」，门禁说「没有审查证据，拒绝提交」。这类分叉的失败长得像
+「配置没生效」，没人会去怀疑是两套逻辑。⛔ `off` 的处理排在 `strict_branches`
+override **之后** —— 那里强制 strict，`off` 顶不掉它（`run_gate_dimension_off.sh` T4 锁住）。
+
+### 测试侧：异构审查指出 5 处空心
+
+- `mkcase` 用 `|| true` 吞掉门禁退出码 ⇒ 「放行」类断言只检查没出现拦截文案，
+  **取代之后再加一条别的 `fail` 也照样全绿**。⇒ 改成交出退出码，
+  「放行」判据是 `rc=0` + 打出 `PASSED` + 没有任何 `❌ GATE:`。
+  ⭐ 这一改当场抓出两条真问题：T1/T5 其实一直是红的（被 `verify=off` 那个 bug 拦着），
+  旧断言看不见。
+- T7 只触发了「`.agent/verify` 不存在」那一处文案，另一处以后改坏也不会红
+  ⇒ 补了「有目录但产物锚点对不上」的 fixture（要带 `staged_diff_hash` 的 dispatch 记录，
+  空目录走不到那个分支）。
+- T7 核对的是**已安装**那份 `verify-import`，不是仓库内待发布版本；且工具缺失时直接记 PASS
+  ⇒ 改成核仓库内那份，缺了就判失败。
+- T4b 第二条断言在第一条成立后恒真 ⇒ 换成钉退出码。
+- fixture 把被测分支放进了 `strict_branches`，触发「strict 分支强制 strict」把
+  `verify.mode=off` 一起顶掉 ⇒ 去掉。
+
+### CHECK 6 的报错现在指出 `agent-gates-verify-import`
+
+同一条会话的第二个卡点：verify 用 `pi -p` 直跑（这本身没错，快且便宜），
+但门禁只说「证据缺失」，两条报错**都没提那个导入工具**，其中一条还说
+「存到 `.agent/verify/<date>-<topic>.md`」—— **照做还是过不去**，因为 CHECK 6 要的是
+`VERIFY_VERDICT` 文档 **加** 一份 `staged_diff_hash` 绑定当前 diff 的 dispatch 记录，
+手写文件产不出锚点。那条会话只能自己 `ls ~/.agent-gates/bin/` 一个个翻。
+
+⚠️ 我第一版把提示写成 `--topic <name>` —— **那个参数不存在**，工具只认
+`--imported-model` / `--paseo-agent`。照抄一条跑不通的命令比不给提示更坑。
+⇒ T7 里加了一条断言：把提示里出现的每个 `--xxx` 逐个对照工具真实 usage。
+
+---
+
 ## v2.9.9 — 审查的**时机**：轮不到就别审
 
 🔴 实况（2026-09-10，另一条会话自己算的账）：任务拆成小块并行开发，它**每修一小条就派
