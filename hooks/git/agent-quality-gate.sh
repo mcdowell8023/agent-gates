@@ -63,11 +63,21 @@ fi
 # ⛔ 必须扫**每一条** verdict 行并 fail-closed —— 规范实现的 `extract_conclusion_line`
 # 取 `head -1`，直接拿它会让「PASS 在前、FAIL 在后」的文件退化成 PASS，
 # **比门禁原来的行为更松**（原来负面 grep 扫全文，顺序无关）。
+# 输出 `<PASS|FAIL|NONE>|<第一条非法结论行>`（后者可为空）。
+# ⛔ 用一行带分隔符的输出而不是全局变量：调用方是 `$(...)` 命令替换，子 shell 里设的
+#    全局变量出不来（本仓已为这个形状吃过亏）。
 _gate_classify_verdict() {
-  local f="$1" line val mapped has_pass=0 has_fail=0
+  local f="$1" line val mapped has_pass=0 has_fail=0 bad=""
   while IFS= read -r line; do
-    # ⭐ 整行校验：带限定词的结论在这里被拒，落到 NONE 而不是 PASS。
-    has_valid_conclusion "$line" || continue
+    # ⭐ 整行校验。⛔ 非法行**必须留痕**：第一版只是 `continue`，于是
+    #    「VERDICT: PASS_WITH_ISSUES」+「VERDICT: PASS」同文件仍判干净 PASS
+    #    ⇒ 能取代一份真 FAIL（异构审 round2 抓到）。
+    #    ⚠️ 而当时的注释写着「带限定词的结论落到 NONE」—— 那句话是假的，
+    #    只在文件里没有别的合法 PASS 时才成立。
+    if ! has_valid_conclusion "$line"; then
+      [[ -n "$bad" ]] || bad="$line"
+      continue
+    fi
     val=$(extract_verdict_value "$line") || continue
     mapped=$(map_verdict_to_verify "$val" 2>/dev/null) || continue
     case "$mapped" in
@@ -75,9 +85,21 @@ _gate_classify_verdict() {
       PASS) has_pass=1 ;;
     esac
   done < <(grep -iE '^[[:blank:]]*[#>*_`[:blank:]-]*VERDICT[[:blank:]]*(:|：)' "$f" 2>/dev/null || true)
-  if   [[ "$has_fail" -eq 1 ]]; then echo FAIL
-  elif [[ "$has_pass" -eq 1 ]]; then echo PASS
-  else echo NONE; fi
+  # FAIL 最优先；其次「有非法/限定结论」⇒ ⛔ 不算干净 PASS（fail-closed）；最后才是 PASS。
+  if   [[ "$has_fail" -eq 1 ]]; then printf 'FAIL|%s\n' "$bad"
+  elif [[ -n "$bad" ]];        then printf 'NONE|%s\n' "$bad"
+  elif [[ "$has_pass" -eq 1 ]]; then printf 'PASS|%s\n' "$bad"
+  else                              printf 'NONE|%s\n' "$bad"; fi
+}
+
+# REVIEW_LEVEL 的高低，用来在**多份都命中当前 diff** 的 PASS 之间挑一份。
+# 🔴 原来每份命中的都无条件覆盖 ⇒ 路径排序最后一份胜出；那份若 REVIEW_LEVEL 更低，
+# Gate 2b 就拦 —— 而机器上明明已有一份 L1 的当前证据。**只改文件名就能改变结果**，
+# 是 fail-closed 方向的假失败（异构审 round2）。
+_gate_review_level_rank() {
+  local l
+  l=$(grep -oE 'REVIEW_LEVEL:[[:space:]]*L[0-3]' "$1" 2>/dev/null | grep -oE 'L[0-3]' | head -1)
+  case "$l" in L1|L2|L3) echo 2 ;; L0) echo 1 ;; *) echo 0 ;; esac
 }
 
 # 🔴 一线反馈（2026-09-10）：项目 .gitignore 里有 `.agent/`（wb 的 crm-center / crm-platform
@@ -524,6 +546,7 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
     PASS_REVIEW_FILE=""
     NEGATIVE_REVIEW_FILE=""
     NEGATIVE_DIFF_MATCH_FILE=""
+    PASS_DIFF_RANK=0
     REVIEW_DIFF_MATCH=0
 
     while IFS= read -r rf; do
@@ -562,7 +585,13 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
       [[ "$review_covers_current" -eq 1 ]] || continue
       COVERING_REVIEW_COUNT=$((COVERING_REVIEW_COUNT + 1))
 
-      rf_verdict=$(_gate_classify_verdict "$rf")
+      rf_cls=$(_gate_classify_verdict "$rf")
+      rf_verdict="${rf_cls%%|*}"; rf_bad="${rf_cls#*|}"
+      if [[ -n "$rf_bad" ]]; then
+        echo "⚠️  CHECK 5: ${rf} 有一条结论行不合协议，已忽略 —— ${rf_bad}"
+        echo "     协议要求整行只有取值（PASS/FAIL/ISSUES/REVISE/APPROVED/REJECT），"
+        echo "     ⛔ 带限定词的 PASS 不算通过。修掉这一行或让审查者给明确结论。"
+      fi
       if [[ "$rf_verdict" == "FAIL" ]]; then
         NEGATIVE_REVIEW_FILE="$rf"
         # 🔴 FAIL 也要记它锚的是不是**当前**这份 diff。原来只有 PASS 分支查
@@ -571,7 +600,10 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
         [[ "$rf_diff_sha256" == "$CURRENT_REVIEW_DIFF_SHA256" ]] && NEGATIVE_DIFF_MATCH_FILE="$rf"
       elif [[ "$rf_verdict" == "PASS" ]]; then
         if [[ "$rf_diff_sha256" == "$CURRENT_REVIEW_DIFF_SHA256" ]]; then
-          PASS_REVIEW_FILE="$rf"
+          rf_rank=$(_gate_review_level_rank "$rf")
+          if [[ "$REVIEW_DIFF_MATCH" -ne 1 || "$rf_rank" -gt "$PASS_DIFF_RANK" ]]; then
+            PASS_REVIEW_FILE="$rf"; PASS_DIFF_RANK="$rf_rank"
+          fi
           REVIEW_DIFF_MATCH=1
         elif [[ -z "$PASS_REVIEW_FILE" ]]; then
           PASS_REVIEW_FILE="$rf"

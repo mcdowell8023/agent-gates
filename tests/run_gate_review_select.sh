@@ -67,9 +67,24 @@ mkcase() {
     DSHA=$(git diff --cached --binary -- . \
       ':(exclude).agent/reviews/**' ':(exclude).agent/verify/**' ':(exclude).agent/plans/**' | _sha)
 
-    local idx=0 spec which body anchor
+    # 共享产物库的 key —— ⛔ 这是对 `_gate_artifact_store_dir` 的镜像实现。
+    # 算错不会静默通过：T16 断言「共享库里的 PASS 取代了本地 FAIL」，key 不对就是红的。
+    local _common _pdir _base _key STORE
+    _common=$(git rev-parse --git-common-dir 2>/dev/null)
+    _pdir=$(cd -P "$(dirname "$_common")" 2>/dev/null && pwd -P)
+    _base=$(basename "$_common")
+    _key=$(printf '%s' "$_pdir/$_base" | _sha | cut -c1-16)
+    STORE="${AGENT_GATES_DIR}/artifacts/${_key}/reviews"
+
+    local idx=0 spec which body anchor dest
     for spec in "$@"; do
       idx=$((idx+1)); which="${spec%%@*}"; body="${spec#*@}"
+      # `shared-` 前缀 ⇒ 写进按仓库分键的共享库，而不是项目内 .agent/reviews/
+      if [[ "$which" == shared-* ]]; then
+        which="${which#shared-}"; mkdir -p "$STORE"; dest="$STORE/r${idx}.md"
+      else
+        dest=".agent/reviews/r${idx}.md"
+      fi
       [[ "$which" == "cur" ]] && anchor="$DSHA" || anchor="$STALE"
       {
         printf '<!-- REVIEW_HEAD: %s -->\n' "$H"
@@ -77,7 +92,7 @@ mkcase() {
         printf '<!-- REVIEW_FILES_SHA256: %s -->\n' "$FSHA"
         printf '<!-- REVIEW_DIFF_SHA256: %s -->\n\n' "$anchor"
         printf '%s\n' "${body//;;/$'\n'}"
-      } > ".agent/reviews/r${idx}.md"
+      } > "$dest"
     done
     local out rc
     out=$(AGENT_MODE=1 bash "$GATE" 2>&1); rc=$?
@@ -235,6 +250,61 @@ if [[ -f "$VERIFY_IMPORT" ]]; then
   assert "⭐ 提示里的参数都是 verify-import 真的接受的（多余的:${bad:-无}）" \
     "$([[ -z "$bad" ]] && echo true || echo false)"
 fi
+
+echo
+echo "--- T13 非法限定结论 + 合法 PASS 同文件 ⇒ ⛔ 不算干净 PASS（round2 严重）---"
+# 🔴 我第一版 `_gate_classify_verdict` 遇到非法 verdict 行直接 continue、**不留痕**，
+# 只要同文件里还有一条合法 PASS 就仍判 PASS ⇒ 能取代一份真 FAIL。
+# ⚠️ 而我写的注释声称「带限定词的结论落到 NONE」—— **那句话是假的**，
+#    只在文件里没有别的合法 PASS 时才成立。又一次「解释性文字撒谎」。
+for bad in 'VERDICT: PASS_WITH_ISSUES' 'VERDICT: FAIL but blockers remain' '## VERDICT: 待定' 'VERDICT: PASSENGER'; do
+  out=$(mkcase "stale@VERDICT: FAIL" "cur@${bad};;VERDICT: PASS")
+  assert "⛔ [${bad}] + 合法 PASS 仍取代不了过期 FAIL" \
+    "$([[ "$(_rc "$out")" != "0" ]] && echo true || echo false)"
+done
+out=$(mkcase "stale@VERDICT: FAIL" "cur@VERDICT: PASS_WITH_ISSUES;;VERDICT: PASS")
+assert "⭐ 报错要点出那条非法结论（⛔ 否则没法修）" \
+  "$([[ "$out" == *PASS_WITH_ISSUES* ]] && echo true || echo false)"
+
+echo
+echo "--- T14 合法 FAIL + 非法行 + 合法 PASS 同文件 ⇒ ⛔ FAIL 优先 ---"
+out=$(mkcase "cur@VERDICT: PASS_WITH_ISSUES;;VERDICT: FAIL;;VERDICT: PASS")
+assert "⛔ FAIL 仍然优先" "$(_blocked "$out")"
+
+echo
+echo "--- T15 两份都命中当前 diff 的 PASS，⛔ 不该因文件名排序产生假失败（round2 中等）---"
+# 🔴 每份命中的 PASS 都无条件覆盖 PASS_REVIEW_FILE ⇒ 排序最后一份胜出。
+# 若那份 REVIEW_LEVEL 更低（L0），Gate 2b 就拦 —— 而机器上明明已有一份 L1 的当前证据。
+# 这是 fail-closed 方向的**假失败**：只改文件名就能改变结果。
+CAP=$(mktemp -d)
+printf '{"level":"L1","review_models":{"primary":"x/y","panel_pool":[],"panel_active":2,"panel_mode":"off"}}' \
+  > "$CAP/hetero-check.json"
+# ⛔ **两个顺序都要测**：只测「好的在前」时，「第一份胜」和「按等级择优」都会绿
+#    —— 变异测试实测漏掉（我把「最后一份胜」误改成「第一份胜」，49 条全绿）。
+#    好的在后能杀掉「第一份胜」，好的在前能杀掉「最后一份胜」。
+out=$(AGENT_GATES_DIR="$CAP" mkcase "cur@VERDICT: PASS;;REVIEW_LEVEL: L1" "cur@VERDICT: PASS;;REVIEW_LEVEL: L0")
+assert "⭐ L1 在前、L0 在后 ⇒ 放行（杀「最后一份胜」，rc=$(_rc "$out")）" \
+  "$([[ "$(_rc "$out")" == "0" ]] && echo true || echo false)"
+out=$(AGENT_GATES_DIR="$CAP" mkcase "cur@VERDICT: PASS;;REVIEW_LEVEL: L0" "cur@VERDICT: PASS;;REVIEW_LEVEL: L1")
+assert "⭐ L0 在前、L1 在后 ⇒ 放行（杀「第一份胜」，rc=$(_rc "$out")）" \
+  "$([[ "$(_rc "$out")" == "0" ]] && echo true || echo false)"
+out=$(AGENT_GATES_DIR="$CAP" mkcase "cur@VERDICT: PASS" "cur@VERDICT: PASS;;REVIEW_LEVEL: L1")
+assert "⭐ 无标记在前、L1 在后 ⇒ 放行" \
+  "$([[ "$(_rc "$out")" == "0" ]] && echo true || echo false)"
+assert "⛔ 不是靠跳过 Gate 2b 混过去的（机器仍是 L1）" \
+  "$([[ "$out" != *"no REVIEW_LEVEL marker"* ]] && echo true || echo false)"
+# 反向：两份都是 L0 ⇒ 仍须拦
+out=$(AGENT_GATES_DIR="$CAP" mkcase "cur@VERDICT: PASS;;REVIEW_LEVEL: L0" "cur@VERDICT: PASS;;REVIEW_LEVEL: L0")
+assert "⛔ 全是 L0 时 Gate 2b 照拦" \
+  "$([[ "$(_rc "$out")" != "0" && "$out" == *same-model* ]] && echo true || echo false)"
+
+echo
+echo "--- T16 共享库里的当前 PASS 能取代本地过期 FAIL（round2 中等：缺回归）---"
+# 产物在功能分支 worktree 生成、merge 在主仓发生 ⇒ 共享库是那条路径唯一的载体。
+out=$(mkcase "stale@VERDICT: FAIL" "shared-cur@VERDICT: PASS")
+assert "⭐ 共享库的 PASS 取代得了本地过期 FAIL（rc=$(_rc "$out")）" "$(_allowed "$out")"
+out=$(mkcase "shared-stale@VERDICT: PASS" "cur@VERDICT: FAIL")
+assert "⛔ 反向：共享库的过期 PASS 盖不掉本地当前 FAIL" "$(_blocked "$out")"
 
 cd /
 echo
