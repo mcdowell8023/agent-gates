@@ -42,73 +42,6 @@ else
   exit 1
 fi
 
-# 🔴 结论解析必须复用 lib/hetero/conclusion.sh，⛔ 不要在门禁里再写一份正则。
-# 门禁原来自己写了两条 `^VERDICT:[[:space:]]*(PASS|APPROVED)` / `(ISSUES|FAIL|REJECT)`，
-# **两个方向都错**（异构审 2026-09-11 抓到，规范实现的注释里早就写着）：
-#   ⛔ 前缀匹配 ⇒ `VERDICT: PASS_WITH_ISSUES` / `PASSENGER` / `APPROVED_WITH_CONDITIONS`
-#      被当成干净 PASS —— **把审查结论反了过来**，还能据此取代一份真 FAIL；
-#   ⛔ 不认装饰 ⇒ `**VERDICT: FAIL**` / `## VERDICT: FAIL` / 全角冒号 `VERDICT：FAIL`
-#      门禁**根本看不见**（协议明确允许这些写法），于是「同一份 diff 上 FAIL 与 PASS
-#      并存时 fail-closed」这条保证被击穿；反过来合法的 `**VERDICT: PASS**` 也被误拒。
-_GATE_CONCL_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib/hetero/conclusion.sh"
-if [[ -f "$_GATE_CONCL_LIB" ]]; then
-  # shellcheck disable=SC1090
-  source "$_GATE_CONCL_LIB"
-else
-  echo "❌ GATE: lib/hetero/conclusion.sh not found at $_GATE_CONCL_LIB — cannot read review verdicts, refusing to guess" >&2
-  exit 1
-fi
-
-# 一份产物的结论：PASS / FAIL / NONE。
-# ⛔ 必须扫**每一条** verdict 行并 fail-closed —— 规范实现的 `extract_conclusion_line`
-# 取 `head -1`，直接拿它会让「PASS 在前、FAIL 在后」的文件退化成 PASS，
-# **比门禁原来的行为更松**（原来负面 grep 扫全文，顺序无关）。
-# 输出 `<PASS|FAIL|NONE>|<第一条非法结论行>`（后者可为空）。
-# ⛔ 用一行带分隔符的输出而不是全局变量：调用方是 `$(...)` 命令替换，子 shell 里设的
-#    全局变量出不来（本仓已为这个形状吃过亏）。
-_gate_classify_verdict() {
-  local f="$1" line val mapped has_pass=0 has_fail=0 bad=""
-  while IFS= read -r line; do
-    # ⭐ 整行校验。⛔ 非法行**必须留痕**：第一版只是 `continue`，于是
-    #    「VERDICT: PASS_WITH_ISSUES」+「VERDICT: PASS」同文件仍判干净 PASS
-    #    ⇒ 能取代一份真 FAIL（异构审 round2 抓到）。
-    #    ⚠️ 而当时的注释写着「带限定词的结论落到 NONE」—— 那句话是假的，
-    #    只在文件里没有别的合法 PASS 时才成立。
-    if ! has_valid_conclusion "$line"; then
-      # ⛔ 只有**带取值 token** 的非法行才毒化整份产物。
-      # 危险的是「限定过的正/负结论」（PASS_WITH_ISSUES / FAIL but blockers remain）——
-      # 它们会被前缀匹配误读。而 `> VERDICT: 见上文` / `VERDICT: 待补充` 这类**不含任何
-      # 取值**的行是报告散文，毒化它们就是纯误拦（实测这两种都命中前置 grep）。
-      # ⚠️ 用户最反感的就是误拦，而这条门控的目的是防伪造，不是挑格式。
-      if printf '%s' "$line" | grep -qiE '(PASS|PASSED|FAIL|FAILED|ISSUES|REVISE|REVISED|APPROVE|APPROVED|REJECT|REJECTED)'; then
-        [[ -n "$bad" ]] || bad="$line"
-      fi
-      continue
-    fi
-    val=$(extract_verdict_value "$line") || continue
-    mapped=$(map_verdict_to_verify "$val" 2>/dev/null) || continue
-    case "$mapped" in
-      FAIL) has_fail=1 ;;
-      PASS) has_pass=1 ;;
-    esac
-  done < <(grep -iE '^[[:blank:]]*[#>*_`[:blank:]-]*VERDICT[[:blank:]]*(:|：)' "$f" 2>/dev/null || true)
-  # FAIL 最优先；其次「有非法/限定结论」⇒ ⛔ 不算干净 PASS（fail-closed）；最后才是 PASS。
-  if   [[ "$has_fail" -eq 1 ]]; then printf 'FAIL|%s\n' "$bad"
-  elif [[ -n "$bad" ]];        then printf 'NONE|%s\n' "$bad"
-  elif [[ "$has_pass" -eq 1 ]]; then printf 'PASS|%s\n' "$bad"
-  else                              printf 'NONE|%s\n' "$bad"; fi
-}
-
-# REVIEW_LEVEL 的高低，用来在**多份都命中当前 diff** 的 PASS 之间挑一份。
-# 🔴 原来每份命中的都无条件覆盖 ⇒ 路径排序最后一份胜出；那份若 REVIEW_LEVEL 更低，
-# Gate 2b 就拦 —— 而机器上明明已有一份 L1 的当前证据。**只改文件名就能改变结果**，
-# 是 fail-closed 方向的假失败（异构审 round2）。
-_gate_review_level_rank() {
-  local l
-  l=$(grep -oE 'REVIEW_LEVEL:[[:space:]]*L[0-3]' "$1" 2>/dev/null | grep -oE 'L[0-3]' | head -1)
-  case "$l" in L1|L2|L3) echo 2 ;; L0) echo 1 ;; *) echo 0 ;; esac
-}
-
 # 🔴 一线反馈（2026-09-10）：项目 .gitignore 里有 `.agent/`（wb 的 crm-center / crm-platform
 # 都是），所以 gates.json 从未被 git 跟踪 ⇒ `git worktree add` 出来的目录里根本没有它。
 # gate 找不到项目策略就按 strict 走，在普通业务分支上也强制要求 review + verify 产物，
@@ -553,7 +486,6 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
     PASS_REVIEW_FILE=""
     NEGATIVE_REVIEW_FILE=""
     NEGATIVE_DIFF_MATCH_FILE=""
-    PASS_DIFF_RANK=0
     REVIEW_DIFF_MATCH=0
 
     while IFS= read -r rf; do
@@ -592,25 +524,39 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
       [[ "$review_covers_current" -eq 1 ]] || continue
       COVERING_REVIEW_COUNT=$((COVERING_REVIEW_COUNT + 1))
 
-      rf_cls=$(_gate_classify_verdict "$rf")
-      rf_verdict="${rf_cls%%|*}"; rf_bad="${rf_cls#*|}"
-      if [[ -n "$rf_bad" ]]; then
-        echo "⚠️  CHECK 5: ${rf} 有一条结论行不合协议，已忽略 —— ${rf_bad}"
-        echo "     协议要求整行只有取值（PASS/FAIL/ISSUES/REVISE/APPROVED/REJECT），"
-        echo "     ⛔ 带限定词的 PASS 不算通过。修掉这一行或让审查者给明确结论。"
-      fi
-      if [[ "$rf_verdict" == "FAIL" ]]; then
+      # 结论判定。⚠️ 这里**故意只做一处最小收紧**，不整体换用 lib/hetero/conclusion.sh ——
+      # 那次尝试连着三轮异构审查都 FAIL（代码围栏、前缀形态、token 词边界、聚合层否决
+      # 四个方向各自还有洞），已拆到独立分支单独设计。这里的目标只是：**不要让本次新增的
+      # 「后一轮 PASS 取代前一轮 FAIL」把既有的解析缺陷放大成可利用的绕过**。
+      #
+      # 收紧两点，其余一字不动（即：装饰写法、代码围栏、`1. VERDICT:` 这类前缀
+      # 仍然看不见 —— 那是**既有**行为，不比今天更差）：
+      #   ⭐ PASS 必须**整行只有取值**（行尾锚定）⇒ `VERDICT: PASS_WITH_ISSUES`
+      #      不再被前缀匹配成干净 PASS。⛔ 这一条是必须的：取代逻辑会让它清掉一份真 FAIL。
+      #   ⭐ 干净 PASS 的行数必须等于全部 `^VERDICT:` 行数 ⇒ 「脏结论 + 干净 PASS」
+      #      同文件时不算干净 PASS（两位审查者都指出这个组合）。
+      # ⛔ `grep -c` **打印计数，但计数为 0 时退出码非零**。用「取反补默认值」的写法
+      #    （`|| echo 0` 那一类）会额外追加一行，变量变成两行的 "0\n0"，后面的整数比较
+      #    当场报错、整段判定静默失效 —— 本仓当天第三次踩，`run_gate_reported_bugs.sh`
+      #    BUG 1 就是这个形状。正确做法是把 `|| true` 放进大括号里：输出照常、只吞退出码。
+      rf_nverdict=$( { grep -ciE '^VERDICT:' "$rf" 2>/dev/null || true; } | head -1 )
+      rf_npass=$( { grep -ciE '^VERDICT:[[:space:]]*(PASS|APPROVED)[*`[:blank:].]*$' "$rf" 2>/dev/null || true; } | head -1 )
+      rf_nverdict="${rf_nverdict:-0}"; rf_npass="${rf_npass:-0}"
+      if grep -qiE '^VERDICT:[[:space:]]*(ISSUES|FAIL|REJECT)' "$rf"; then
         NEGATIVE_REVIEW_FILE="$rf"
         # 🔴 FAIL 也要记它锚的是不是**当前**这份 diff。原来只有 PASS 分支查
         # REVIEW_DIFF_SHA256，FAIL 分支一句都不查 ⇒ 一份针对改动前状态的 FAIL
         # 会拦住针对当前状态的 PASS（2026-09-11 一线实测被卡）。
         [[ "$rf_diff_sha256" == "$CURRENT_REVIEW_DIFF_SHA256" ]] && NEGATIVE_DIFF_MATCH_FILE="$rf"
-      elif [[ "$rf_verdict" == "PASS" ]]; then
+      elif [[ "$rf_nverdict" -gt 0 && "$rf_npass" -ne "$rf_nverdict" ]]; then
+        # 有结论行但不是干净 PASS（带限定词、或同文件还有别的 VERDICT 行）。
+        # ⭐ 必须说出来：否则作者只看到「没有审查证据」，而他明明写了 VERDICT。
+        echo "ℹ️  CHECK 5: ${rf} 有 ${rf_nverdict} 条 VERDICT 行、其中干净 PASS ${rf_npass} 条 —— 按「结论不明」跳过"
+        echo "     协议要求结论行**整行只有取值**（VERDICT: PASS / FAIL / ISSUES / REJECT），"
+        echo "     ⛔ 带限定词的（PASS_WITH_ISSUES、PASS but …）不算通过，同一份产物也不要混多条。"
+      elif [[ "$rf_npass" -gt 0 && "$rf_npass" -eq "$rf_nverdict" ]]; then
         if [[ "$rf_diff_sha256" == "$CURRENT_REVIEW_DIFF_SHA256" ]]; then
-          rf_rank=$(_gate_review_level_rank "$rf")
-          if [[ "$REVIEW_DIFF_MATCH" -ne 1 || "$rf_rank" -gt "$PASS_DIFF_RANK" ]]; then
-            PASS_REVIEW_FILE="$rf"; PASS_DIFF_RANK="$rf_rank"
-          fi
+          PASS_REVIEW_FILE="$rf"
           REVIEW_DIFF_MATCH=1
         elif [[ -z "$PASS_REVIEW_FILE" ]]; then
           PASS_REVIEW_FILE="$rf"
@@ -672,6 +618,9 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
         done <<< "$CURRENT_REVIEW_FILES"
       else
         fail "Content-anchored review is missing an explicit PASS/APPROVED verdict"
+        echo "   ⛔ 协议要求结论行**整行只有取值**：VERDICT: PASS / FAIL / ISSUES / REJECT。"
+        echo "      带限定词的（PASS_WITH_ISSUES、PASS but …）不算通过；同一份产物里也不能"
+        echo "      既有干净 PASS 又有别的 VERDICT 行 —— 那种情况按「结论不明」处理。"
       fi
     else
       if [[ "$REVIEW_DIFF_MATCH" -ne 1 ]]; then

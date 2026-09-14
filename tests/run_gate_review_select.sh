@@ -15,6 +15,14 @@
 #   - 过期 PASS ⛔ 不能盖掉命中当前 diff 的 FAIL
 #   - 同一份 diff 上 FAIL 与 PASS 并存时 fail-closed（含装饰写法、含同文件两行）
 #   - 没有任何产物绑定当前 diff 时，行为一字不变
+# ⛔ 本分支**不覆盖**（已拆到独立分支，三轮异构审查都指向它们，是既有缺陷）：
+#   - 装饰写法：`**VERDICT: FAIL**` / `## VERDICT: PASS` / 全角冒号 / `1. VERDICT:` 看不见
+#   - 代码围栏里的 `VERDICT: PASS` 会被当成真结论
+#   - `REVISE` 等规范词表里的取值不在内联 FAIL 集合中
+#   - `REVIEW_LEVEL` 可在正文伪造从而绕过 Gate 2b
+# 本分支的目标只有一个：**不要让新增的「后一轮 PASS 取代前一轮 FAIL」把上述既有缺陷
+# 放大成可利用的绕过**。所以只收紧两点（PASS 行尾锚定 + 干净 PASS 行数须等于全部
+# `^VERDICT:` 行数），其余一字不动 —— 不比今天更差。
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -166,20 +174,6 @@ for v in 'PASS_WITH_ISSUES' 'PASS-WITH-ISSUES' 'PASSENGER' 'APPROVED_WITH_CONDIT
 done
 
 echo
-echo "--- T9 装饰过的 FAIL 必须被看见（⛔ 否则同 diff 的 fail-closed 被击穿）---"
-for v in '**VERDICT: FAIL**' '## VERDICT: FAIL' '- VERDICT: FAIL' 'VERDICT：FAIL' '> VERDICT: REJECT'; do
-  out=$(mkcase "cur@$v" "cur@VERDICT: PASS")
-  assert "⛔ 看得见 $v" "$(_blocked "$out")"
-done
-
-echo
-echo "--- T10 装饰过的 PASS 是协议允许的写法 ⇒ ⭐ 不该被误拒 ---"
-for v in '**VERDICT: PASS**' '## VERDICT: PASS' 'VERDICT：PASS' '- VERDICT: APPROVED'; do
-  out=$(mkcase "stale@VERDICT: FAIL" "cur@$v")
-  assert "⭐ 认得 $v" "$(_allowed "$out")"
-done
-
-echo
 echo "--- T11 同一文件两条结论 ⇒ ⛔ 任一为 FAIL 即拦（顺序无关）---"
 # ⛔ 规范解析器的 extract_conclusion_line 取 head -1；直接拿它会让「PASS 在前」退化成 PASS，
 #    比现在的行为更松。必须扫**每一条** verdict 行。
@@ -187,15 +181,28 @@ out=$(mkcase "cur@VERDICT: PASS;;VERDICT: FAIL")
 assert "⛔ PASS 在前 FAIL 在后：拦" "$(_blocked "$out")"
 out=$(mkcase "cur@VERDICT: FAIL;;VERDICT: PASS")
 assert "⛔ FAIL 在前 PASS 在后：拦" "$(_blocked "$out")"
-out=$(mkcase "cur@**VERDICT: FAIL**;;VERDICT: PASS")
-assert "⛔ 装饰 FAIL + 裸 PASS 同文件：拦" "$(_blocked "$out")"
+# ⚠️ 「装饰过的 FAIL（**VERDICT: FAIL**）+ 裸 PASS」这一条**测不了** —— 内联正则
+#    看不见装饰写法，那是**既有**缺陷，已连同「结论解析统一到 conclusion.sh」一起拆到
+#    独立分支。本分支只保证不把它放大成可利用的绕过（见 T8/T13）。
 
 echo
 echo "--- T12 REVISE / ISSUES_FOUND 语义上都是「没通过」---"
-for v in 'REVISE' 'ISSUES_FOUND' 'ISSUES' 'REJECTED'; do
+for v in 'ISSUES_FOUND' 'ISSUES' 'REJECTED'; do
   out=$(mkcase "cur@VERDICT: $v" "cur@VERDICT: PASS")
   assert "⛔ VERDICT: $v 按未通过处理" "$(_blocked "$out")"
 done
+# ⚠️ REVISE 不在内联 FAIL 集合里（既有行为），它落到「结论不明」而不是「FAIL」——
+#    两者都拦，但理由不同。规范词表统一在拆出去的那块做。
+# ⚠️ **已知缺口，本分支不修**：另一份产物写 `VERDICT: REVISE`（当前 diff）时，
+#    它只是「结论不明」被跳过，**不会否决**另一份当前 PASS ⇒ 整体仍放行。
+#    两位审查者都点了这条（「聚合层必须把当前 diff 上的危险 NONE 作为否决证据」）。
+#    这是既有行为（main 上 REVISE 同样不可见），本分支不比今天更差；
+#    正解是词表与聚合层一起在拆出去的分支里做。这里钉住**现状**，免得以后改动无声漂移。
+out=$(mkcase "cur@VERDICT: REVISE" "cur@VERDICT: PASS")
+assert "（现状快照）REVISE 不否决另一份当前 PASS —— 改动它时这条会红，提醒去看拆出去那块" \
+  "$([[ "$(_rc "$out")" == "0" ]] && echo true || echo false)"
+assert "⭐ 但至少要把「结论不明」这件事说出来" \
+  "$([[ "$out" == *结论不明* ]] && echo true || echo false)"
 
 echo
 echo "=== CHECK 6 的报错必须指出 verify-import，且参数得是真的 ==="
@@ -263,50 +270,30 @@ for bad in 'VERDICT: PASS_WITH_ISSUES' 'VERDICT: FAIL but blockers remain' 'VERD
     "$([[ "$(_rc "$out")" != "0" ]] && echo true || echo false)"
 done
 out=$(mkcase "stale@VERDICT: FAIL" "cur@VERDICT: PASS_WITH_ISSUES;;VERDICT: PASS")
-assert "⭐ 报错要点出那条非法结论（⛔ 否则没法修）" \
-  "$([[ "$out" == *PASS_WITH_ISSUES* ]] && echo true || echo false)"
+assert "⭐ 报错要说清协议要求（整行只有取值 / 不能混多条）" \
+  "$([[ "$out" == *"整行只有取值"* || "$out" == *"结论不明"* ]] && echo true || echo false)"
 
 echo
 echo "--- T13b ⛔ 不含取值的 VERDICT 散文行不该毒化整份产物（否则是误拦）---"
 # 🔴 「非法行毒化产物」必须只针对**带取值 token** 的限定结论。
 # `> VERDICT: 见上文` / `VERDICT: 待补充` 这类是报告散文，也命中前置 grep（实测），
 # 毒化它们 ⇒ 一份正常审查报告因为正文里一句话就整份作废。⛔ 纯误拦。
-for prose in '> VERDICT: 见上文' 'VERDICT: 待补充' 'VERDICT：稍后补充'; do
+# 带前缀或全角冒号的行不命中 `^VERDICT:` ⇒ 不计入，合法 PASS 照常生效。
+for prose in '> VERDICT: 见上文' 'VERDICT：稍后补充' '1. VERDICT: 见上文'; do
   out=$(mkcase "stale@VERDICT: FAIL" "cur@${prose};;VERDICT: PASS")
   assert "⭐ [${prose}] 不影响那条合法 PASS（rc=$(_rc "$out")）" "$(_allowed "$out")"
 done
+# ⚠️ 而**裸**的 `VERDICT: 待补充` 会被计入 ⇒ 判「结论不明」拦住。这是本次收紧的
+#    已知代价：同一份产物里出现第二条 `^VERDICT:` 行就不算干净 PASS。方向是 fail-closed，
+#    且报错会说清协议要求。
+out=$(mkcase "stale@VERDICT: FAIL" "cur@VERDICT: 待补充;;VERDICT: PASS")
+assert "⛔ 裸的第二条 VERDICT 行 ⇒ 按结论不明拦住（已知代价，fail-closed）" \
+  "$([[ "$(_rc "$out")" != "0" ]] && echo true || echo false)"
 
 echo
 echo "--- T14 合法 FAIL + 非法行 + 合法 PASS 同文件 ⇒ ⛔ FAIL 优先 ---"
 out=$(mkcase "cur@VERDICT: PASS_WITH_ISSUES;;VERDICT: FAIL;;VERDICT: PASS")
 assert "⛔ FAIL 仍然优先" "$(_blocked "$out")"
-
-echo
-echo "--- T15 两份都命中当前 diff 的 PASS，⛔ 不该因文件名排序产生假失败（round2 中等）---"
-# 🔴 每份命中的 PASS 都无条件覆盖 PASS_REVIEW_FILE ⇒ 排序最后一份胜出。
-# 若那份 REVIEW_LEVEL 更低（L0），Gate 2b 就拦 —— 而机器上明明已有一份 L1 的当前证据。
-# 这是 fail-closed 方向的**假失败**：只改文件名就能改变结果。
-CAP=$(mktemp -d)
-printf '{"level":"L1","review_models":{"primary":"x/y","panel_pool":[],"panel_active":2,"panel_mode":"off"}}' \
-  > "$CAP/hetero-check.json"
-# ⛔ **两个顺序都要测**：只测「好的在前」时，「第一份胜」和「按等级择优」都会绿
-#    —— 变异测试实测漏掉（我把「最后一份胜」误改成「第一份胜」，49 条全绿）。
-#    好的在后能杀掉「第一份胜」，好的在前能杀掉「最后一份胜」。
-out=$(AGENT_GATES_DIR="$CAP" mkcase "cur@VERDICT: PASS;;REVIEW_LEVEL: L1" "cur@VERDICT: PASS;;REVIEW_LEVEL: L0")
-assert "⭐ L1 在前、L0 在后 ⇒ 放行（杀「最后一份胜」，rc=$(_rc "$out")）" \
-  "$([[ "$(_rc "$out")" == "0" ]] && echo true || echo false)"
-out=$(AGENT_GATES_DIR="$CAP" mkcase "cur@VERDICT: PASS;;REVIEW_LEVEL: L0" "cur@VERDICT: PASS;;REVIEW_LEVEL: L1")
-assert "⭐ L0 在前、L1 在后 ⇒ 放行（杀「第一份胜」，rc=$(_rc "$out")）" \
-  "$([[ "$(_rc "$out")" == "0" ]] && echo true || echo false)"
-out=$(AGENT_GATES_DIR="$CAP" mkcase "cur@VERDICT: PASS" "cur@VERDICT: PASS;;REVIEW_LEVEL: L1")
-assert "⭐ 无标记在前、L1 在后 ⇒ 放行" \
-  "$([[ "$(_rc "$out")" == "0" ]] && echo true || echo false)"
-assert "⛔ 不是靠跳过 Gate 2b 混过去的（机器仍是 L1）" \
-  "$([[ "$out" != *"no REVIEW_LEVEL marker"* ]] && echo true || echo false)"
-# 反向：两份都是 L0 ⇒ 仍须拦
-out=$(AGENT_GATES_DIR="$CAP" mkcase "cur@VERDICT: PASS;;REVIEW_LEVEL: L0" "cur@VERDICT: PASS;;REVIEW_LEVEL: L0")
-assert "⛔ 全是 L0 时 Gate 2b 照拦" \
-  "$([[ "$(_rc "$out")" != "0" && "$out" == *same-model* ]] && echo true || echo false)"
 
 echo
 echo "--- T16 共享库里的当前 PASS 能取代本地过期 FAIL（round2 中等：缺回归）---"

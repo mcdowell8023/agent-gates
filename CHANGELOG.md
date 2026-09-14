@@ -2,7 +2,7 @@
 
 All notable changes to agent-gates will be documented in this file.
 
-## v2.9.10 — 后一轮 PASS 取代前一轮 FAIL；CHECK 6 报错指出导入命令
+## v2.9.10 — 后一轮 PASS 取代前一轮 FAIL；单维 off 真的生效；CHECK 6 报错指路
 
 🔴 一线实测被卡（2026-09-11）：第三轮审查是 PASS 且 `REVIEW_DIFF_SHA256` 与 commit
 **完全匹配**，门禁却选中了第二轮那份 FAIL（锚点早已失效）。
@@ -11,18 +11,10 @@ All notable changes to agent-gates will be documented in this file.
 除非把那份产物删掉 —— 等于在教人删审查记录，门禁自己破坏审查链的完整性。
 而「修完再审一轮」本来就是设计里的正常流程。
 
-### 根因：两个分支不对称
+### 1. 取代逻辑
 
-```bash
-if   grep -qiE '^VERDICT:.*(ISSUES|FAIL|REJECT)' "$rf"; then
-  NEGATIVE_REVIEW_FILE="$rf"                      # ⛔ 一句 diff 锚点判断都没有
-elif grep -qiE '^VERDICT:.*(PASS|APPROVED)' "$rf"; then
-  if [[ "$rf_diff_sha256" == "$CURRENT_REVIEW_DIFF_SHA256" ]]; then   # ← PASS 要查
-```
-
-而决策处又无条件先看 FAIL。⇒ 审查结论只对**它看见的那个状态**成立，FAIL 也必须按这条算。
-
-### 修法：一个前置步骤，既有判断链一字不动
+根因：两个分支不对称 —— PASS 分支查 `REVIEW_DIFF_SHA256`，**FAIL 分支一句都不查**，
+而决策处又无条件先看 FAIL。
 
 后一轮 PASS 精确命中当前 staged diff 时，清掉那份锚在旧状态的 FAIL 并**打印取代说明**。
 
@@ -30,40 +22,44 @@ elif grep -qiE '^VERDICT:.*(PASS|APPROVED)' "$rf"; then
 
 | 场景 | 必须 |
 |---|---|
-| 过期 PASS + 命中当前 diff 的 FAIL | **拦** —— 过期 PASS 不能盖掉当前 FAIL |
-| 同一份 diff 上 FAIL 与 PASS 并存 | **拦** —— 两个审查者对同一份代码分歧时 fail-closed |
-| 过期 FAIL + **过期** PASS | **拦** —— 没有任何产物绑定当前 diff 时行为一字不变 |
+| 过期 PASS + 命中当前 diff 的 FAIL | **拦** |
+| 同一份 diff 上 FAIL 与 PASS 并存 | **拦**（fail-closed） |
+| 过期 FAIL + **过期** PASS | **拦**（没有任何产物绑定当前 diff 时行为一字不变） |
 
-⚠️ 最后那条是**真正的绕过路径**，我第一轮测试没覆盖：拿到 FAIL 后随便改一行
-（锚点即失效），再拿一份更早的过期 PASS 顶上 —— 若取代逻辑不要求「PASS 精确命中
-当前 diff」，就只剩一条警告然后放行。**是变异测试把它逼出来的**：摘掉那个条件后
-16 条断言全绿，说明当时的 T4「只断言还是红的」太松（FAIL 被清掉，倒在「缺 PASS 结论」
-上，仍是红但原因变了）。⇒ 断言要钉**拦的理由**，不是「拦了没有」。
+⚠️ 最后那条是**真正的绕过路径**：拿到 FAIL 后随便改一行（锚点即失效），再拿一份更早的
+过期 PASS 顶上。第一轮测试没覆盖，是**变异测试**逼出来的 —— 当时的断言只写「还是红的」，
+而摘掉条件后 FAIL 被清掉、倒在「缺 PASS 结论」上，仍是红但原因变了。
+⇒ 断言要钉**拦的理由**，不是「拦了没有」。
 
-### 🔴 异构审查（gpt-5.6-sol，round1 FAIL）又抓到两条严重的 —— 都是**结论怎么读**
+### 2. 结论解析：只做两处最小收紧
 
-门禁自己写了两条正则读 `VERDICT:` 行，**两个方向都错**，而 `lib/hetero/conclusion.sh`
-早就把这些处理对了（它的注释里点名警告过第一条）：
+⚠️ 本版**没有**把结论解析整体换成 `lib/hetero/conclusion.sh`。那次尝试连着三轮异构审查
+都 FAIL（代码围栏、`1. VERDICT:` 这类前缀、token 词边界、聚合层否决，四个方向各有洞），
+已整体拆到独立分支单独设计。**这里的目标只有一个：不要让新增的取代逻辑把既有的解析
+缺陷放大成可利用的绕过。**
 
-| 写法 | 门禁原来判 | 规范实现判 | 后果 |
-|---|---|---|---|
-| `VERDICT: PASS` | PASS | PASS | ✓ |
-| `VERDICT: PASS_WITH_ISSUES` | **PASS** | 拒绝 | ⛔⛔ **把结论反了过来**，还能据此取代一份真 FAIL |
-| `VERDICT: PASSENGER` / `PASS-WITH-ISSUES` / `APPROVED_WITH_CONDITIONS` | **PASS** | 拒绝 | 同上（前缀匹配） |
-| `**VERDICT: FAIL**` | **看不见** | FAIL | ⛔⛔ 击穿「同 diff 分歧时 fail-closed」 |
-| `## VERDICT: FAIL` / `- VERDICT: FAIL` / `VERDICT：FAIL`（全角） | **看不见** | FAIL | 同上 |
-| `**VERDICT: PASS**` / `## VERDICT: PASS` / 全角 | **看不见** | PASS | ⛔ 合法写法被误拒（又是卡人） |
-| `VERDICT: REVISE` | 不认 | REVISE→FAIL | 该判未通过的没判上 |
+收紧两点：
 
-⇒ 门禁现在 source `lib/hetero/conclusion.sh`，用
-`has_valid_conclusion` + `extract_verdict_value` + `map_verdict_to_verify`。
+- ⭐ PASS 必须**整行只有取值**（行尾锚定）⇒ `VERDICT: PASS_WITH_ISSUES` /
+  `PASSENGER` / `APPROVED_WITH_CONDITIONS` 不再被前缀匹配成干净 PASS。
+  ⛔ 这条是必须的：取代逻辑会让它清掉一份真 FAIL。
+- ⭐ 干净 PASS 的行数必须等于全部 `^VERDICT:` 行数 ⇒「脏结论 + 干净 PASS」同文件时
+  不算干净 PASS（两位独立审查者都点了这个组合）。
 
-⚠️ **不能直接拿规范实现的 `extract_conclusion_line`** —— 它取 `head -1`，
-于是「`VERDICT: PASS` 在前、`VERDICT: FAIL` 在后」的文件会退化成 PASS，
-**比门禁原来的行为更松**（原来负面 grep 扫全文、顺序无关）。
-新增的 `_gate_classify_verdict` 扫**每一条** verdict 行并 fail-closed。
+被跳过时会**打印原因**（有几条 VERDICT 行、其中干净 PASS 几条），否则作者只看到
+「没有审查证据」，而他明明写了 VERDICT。
 
-### 🔴 第三个 bug：`review.mode` / `verify.mode` = `off` 完全没被认
+**⛔ 本版已知不覆盖**（既有缺陷，不比今天更差，已拆分支）：
+
+- 装饰写法 `**VERDICT: FAIL**` / `## VERDICT: PASS` / 全角冒号 / `1. VERDICT:` 看不见
+- 代码围栏里的 `VERDICT: PASS` 会被当成真结论
+- `REVISE` 等规范词表取值不在内联 FAIL 集合中
+- 当前 diff 上的「结论不明」产物**不会否决**另一份当前 PASS
+- `REVIEW_LEVEL` 可在正文伪造从而绕过 Gate 2b
+
+`run_gate_review_select.sh` 里为其中两条留了**现状快照断言** —— 改动时会变红，提醒去看拆出去那块。
+
+### 3. `review.mode` / `verify.mode` = `off` 此前完全没被认
 
 实测门禁自己打印 `review=off, verify=off`，**然后两个都照样拦**：
 
@@ -73,85 +69,32 @@ elif grep -qiE '^VERDICT:.*(PASS|APPROVED)' "$rf"; then
 ❌ GATE: No verifier evidence (.agent/verify/ missing)
 ```
 
-源码里 `merge-only` 和 `relaxed` 各有处理，**`off` 只在需求矩阵那一处生效**
-（`_V6_MATRIX_REQUIRED=0`），主 enforcement 一路无视。
-
-⚠️ 而 `bin/agent-gates-review --due` 是认 `review.mode=off` 的（判 due=no）⇒ **两边口径分叉**：
+源码里 `merge-only` 和 `relaxed` 各有处理，**`off` 只在需求矩阵那一处生效**。
+⚠️ 而 `bin/agent-gates-review --due` 是认 `review.mode=off` 的 ⇒ **两边口径分叉**：
 CLI 说「现在不用审」，门禁说「没有审查证据，拒绝提交」。这类分叉的失败长得像
-「配置没生效」，没人会去怀疑是两套逻辑。⛔ `off` 的处理排在 `strict_branches`
-override **之后** —— 那里强制 strict，`off` 顶不掉它（`run_gate_dimension_off.sh` T4 锁住）。
+「配置没生效」。⛔ `off` 的处理排在 `strict_branches` override **之后** —— 那里强制
+strict，`off` 顶不掉它（`run_gate_dimension_off.sh` T4 锁住）。
 
-### 🔴 round2（gpt-5.6-sol，又是 FAIL）：我自己的修复开了一个洞
+### 4. CHECK 6 的报错现在指出 `agent-gates-verify-import`
 
-**同一份产物里「非法限定结论 + 合法 PASS」仍被判干净 PASS，可取代真 FAIL。**
-
-```
-new.md（命中当前 diff）
-  VERDICT: PASS_WITH_ISSUES     ← 第一版：非法 ⇒ 直接 continue，⛔ 不留痕
-  VERDICT: PASS                 ← 于是这条把它判成干净 PASS
-```
-
-⚠️ 而我给那段代码写的注释是「带限定词的结论在这里被拒，落到 NONE」——
-**那句话是假的**，只在文件里没有别的合法 PASS 时才成立。
-这是本轮第三次同一形状：**解释性文字与代码不符**（前两次：`--due` 的 fail-open reason
-谎称配置坏了、python3 缺失时谎称 `strict_branches` 类型错）。
-⇒ 修法：非法行必须留痕，优先级改成 **FAIL > 有非法行(NONE) > PASS**，
-并把那条非法行**打印出来**（否则没法修）。
-
-顺带修 round2 的另一条：**多份都命中当前 diff 的 PASS，原来无条件被路径排序最后一份覆盖**。
-那份若 `REVIEW_LEVEL` 更低，Gate 2b 就拦 —— 而机器上明明已有一份 L1 的当前证据，
-**只改文件名就能改变结果**。改成按 `REVIEW_LEVEL` 择优（无标记 < L0 < L1+）。
-
-⚠️ 这条的变异测试也漏过一次：我把「最后一份胜」误改成「第一份胜」，51 条断言全绿 ——
-因为 fixture 只有「好的在前」一种顺序，两种错误实现都会绿。
-⇒ **两个顺序都测**：好的在后杀「第一份胜」，好的在前杀「最后一份胜」。
-
-round2 还指出共享库参与取代的路径没有回归测试（行为本来是对的，测试缺）。已补 T16，
-并且 key 计算是对 `_gate_artifact_store_dir` 的镜像 —— 算错不会静默通过，T16 会直接红。
-
-### ⚠️ 反方向也要防：「非法行毒化产物」最初会误拦正常报告
-
-第一版「有非法结论行就毒化整份产物」会把这类**报告散文**也毒化：
-
-```
-> VERDICT: 见上文
-VERDICT: 待补充
-```
-
-实测这两类都命中前置 grep ⇒ 一份正常审查报告因为正文里一句话就整份作废。**纯误拦。**
-
-⇒ 收紧成：非法行必须**含取值 token**（PASS/FAIL/ISSUES/REVISE/APPROVED/REJECT）才毒化。
-危险的是「限定过的正/负结论」，而不含任何取值的行只是散文。
-`## VERDICT 说明`（无冒号）和 `我要求下一轮给出 VERDICT: PASS`（前面有散文）
-本来就不命中前置 grep，不受影响。
-
-### 测试侧：异构审查指出 5 处空心
-
-- `mkcase` 用 `|| true` 吞掉门禁退出码 ⇒ 「放行」类断言只检查没出现拦截文案，
-  **取代之后再加一条别的 `fail` 也照样全绿**。⇒ 改成交出退出码，
-  「放行」判据是 `rc=0` + 打出 `PASSED` + 没有任何 `❌ GATE:`。
-  ⭐ 这一改当场抓出两条真问题：T1/T5 其实一直是红的（被 `verify=off` 那个 bug 拦着），
-  旧断言看不见。
-- T7 只触发了「`.agent/verify` 不存在」那一处文案，另一处以后改坏也不会红
-  ⇒ 补了「有目录但产物锚点对不上」的 fixture（要带 `staged_diff_hash` 的 dispatch 记录，
-  空目录走不到那个分支）。
-- T7 核对的是**已安装**那份 `verify-import`，不是仓库内待发布版本；且工具缺失时直接记 PASS
-  ⇒ 改成核仓库内那份，缺了就判失败。
-- T4b 第二条断言在第一条成立后恒真 ⇒ 换成钉退出码。
-- fixture 把被测分支放进了 `strict_branches`，触发「strict 分支强制 strict」把
-  `verify.mode=off` 一起顶掉 ⇒ 去掉。
-
-### CHECK 6 的报错现在指出 `agent-gates-verify-import`
-
-同一条会话的第二个卡点：verify 用 `pi -p` 直跑（这本身没错，快且便宜），
-但门禁只说「证据缺失」，两条报错**都没提那个导入工具**，其中一条还说
-「存到 `.agent/verify/<date>-<topic>.md`」—— **照做还是过不去**，因为 CHECK 6 要的是
-`VERIFY_VERDICT` 文档 **加** 一份 `staged_diff_hash` 绑定当前 diff 的 dispatch 记录，
-手写文件产不出锚点。那条会话只能自己 `ls ~/.agent-gates/bin/` 一个个翻。
+verify 用 `pi -p` 直跑本身没错（快且便宜），但门禁只说「证据缺失」，两条报错都没提那个
+导入工具，其中一条还说「存到 `.agent/verify/<date>-<topic>.md`」——**照做还是过不去**，
+因为 CHECK 6 要的是 `VERIFY_VERDICT` 文档 **加** 一份 `staged_diff_hash` 绑定当前 diff 的
+dispatch 记录，手写文件产不出锚点。那条会话只能自己 `ls ~/.agent-gates/bin/` 翻。
 
 ⚠️ 我第一版把提示写成 `--topic <name>` —— **那个参数不存在**，工具只认
-`--imported-model` / `--paseo-agent`。照抄一条跑不通的命令比不给提示更坑。
-⇒ T7 里加了一条断言：把提示里出现的每个 `--xxx` 逐个对照工具真实 usage。
+`--imported-model` / `--paseo-agent`。⇒ 测试里加了一条：把提示里出现的每个 `--xxx`
+逐个对照工具真实 usage。
+
+### ⚠️ 这一版里我自己犯的、值得记下来的
+
+- **`grep -c` 打印计数但计数为 0 时退出码非零** —— 当天第三次踩。
+  `run_gate_reported_bugs.sh` 的 BUG 1 就是这个形状，仓库里早有守卫。
+- **按文本区间回退时误删了无关的 `_gate_artifact_store_dir`** —— 切之前没核对区间里还有什么。
+  症状是全部测试一起红，反而好查。
+- **变异测试连着三次没打中**：一次替换字符串没匹配（脚本没校验命中），
+  两次打在**互为冗余**的条件上（拿掉任一条行为都不变）。⇒ 变异必须 assert 已应用，
+  且要确认打的是**唯一**的那道守卫。
 
 ---
 
