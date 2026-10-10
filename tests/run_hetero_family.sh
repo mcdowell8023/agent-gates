@@ -48,6 +48,9 @@ eq "minimax-m3"         "$(hetero_model_family minimax-m3)"         minimax
 eq "doubao-seed-2.1"    "$(hetero_model_family doubao-seed-2.1)"    bytedance
 eq "grok-4.6"           "$(hetero_model_family grok-4.6)"           xai
 eq "qmodel_38max"       "$(hetero_model_family qmodel_38max)"       alibaba
+# 百炼 token plan 的型号不带连字符（qwen3.8-max）—— 只认 qwen-* 会落到 unknown、被记成 L0。
+eq "bailian-token-plan/qwen3.8-max" "$(hetero_model_family bailian-token-plan/qwen3.8-max)" alibaba
+eq "qwen3.8-flash"       "$(hetero_model_family qwen3.8-flash)"       alibaba
 
 echo "F3: 无匹配 → unknown（不猜）"
 eq "totally-new-model-9" "$(hetero_model_family totally-new-model-9)" unknown
