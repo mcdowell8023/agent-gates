@@ -184,8 +184,31 @@ if [[ -d openspec/changes ]] \
 fi
 
 # === Gate 1: Test file correspondence ===
+# tests.exempt（v2.10.0）：DTO、枚举、模块注册这类没有逻辑的文件，「每个新源文件配一个
+# 测试文件」只会凑出空心测试 —— 测试代码量超过业务代码的推手之一。glob 匹配仓库相对路径，
+# `*` 跨目录。不配置时行为不变；命中的文件⛔不静默放行，循环后打印出来。
+GATE1_EXEMPT_PATTERNS=""
+declare -f _gate_cfg_list >/dev/null 2>&1 && GATE1_EXEMPT_PATTERNS=$(_gate_cfg_list tests.exempt)
+# ⚠️ 不用数组：macOS 自带 bash 3.2 + set -u 下，空数组展开直接报 unbound variable。
+GATE1_EXEMPTED=""
+GATE1_EXEMPT_COUNT=0
+_gate1_is_exempt() {
+  local pat
+  [[ -n "$GATE1_EXEMPT_PATTERNS" ]] || return 1
+  while IFS= read -r pat; do
+    [[ -z "$pat" ]] && continue
+    # Unquoted $pat on purpose — these are globs.
+    [[ "$1" == $pat ]] && return 0
+  done <<< "$GATE1_EXEMPT_PATTERNS"
+  return 1
+}
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
+  if _gate1_is_exempt "$f"; then
+    GATE1_EXEMPT_COUNT=$((GATE1_EXEMPT_COUNT + 1))
+    [[ "$GATE1_EXEMPT_COUNT" -le 5 ]] && GATE1_EXEMPTED="${GATE1_EXEMPTED:+$GATE1_EXEMPTED, }$f"
+    continue
+  fi
   case "$f" in
     *.ts|*.tsx|*.js|*.jsx)
       t1="${f%.*}.test.${f##*.}"; t2="${f%.*}.spec.${f##*.}" ;;
@@ -205,6 +228,10 @@ while IFS= read -r f; do
 done < <(git diff --cached --name-only --diff-filter=ACMR \
   | grep -E '\.(ts|tsx|js|jsx|py|java|kt|go)$' \
   | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.|\.d\.ts$|\.setup\.|config)')
+if [[ "$GATE1_EXEMPT_COUNT" -gt 0 ]]; then
+  _more=""; [[ "$GATE1_EXEMPT_COUNT" -gt 5 ]] && _more=", …"
+  echo "ℹ️  Gate 1: ${GATE1_EXEMPT_COUNT} file(s) exempt via tests.exempt: ${GATE1_EXEMPTED}${_more}"
+fi
 
 # === CHECK 1: OpenSpec active change (Path A only) ===
 if [[ "$IS_PATH_A" -eq 1 && -d openspec/changes ]]; then

@@ -2,6 +2,50 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.10.0 — 审查预算：每批最多 2 轮、先验收后审查、阻断才算 ISSUES
+
+🔴 实况（2026-09-24）：一次合并 6 轮审查、4 个审查 agent，输出约 7 万 token，cached 读约
+2334 万 token，合计约 $32。大头是长会话反复重读上下文；轮数也没有上限。「迭代期别审」的规则
+早就写着，09-10 照样派出 11 个 agent —— 只写规则拦不住。
+
+### ⚠️ Behavior change：每批审查默认最多 2 轮
+
+- `agent-gates-review` 按批次计轮：批次 = 目标分支 | 源分支 | merge-base(HEAD, MERGE_HEAD)；
+  共享库里同批次产物按 `REVIEW_DIFF_SHA256` 去重计数（同一份暂存状态重复审只算一轮）。
+- 超过 `review.max_rounds`（默认 2）⇒ **exit 73**。直跑、`--route paseo` 派发（被拒时不签发 token）、
+  `--import-result` 三条路径都拦。
+- 出路：`--escalated "<诊断结论>"`（理由写进产物 `REVIEW_ESCALATED`），或 `review.max_rounds: 0` /
+  `AGENT_GATES_REVIEW_MAX_ROUNDS` 调整上限。
+- 产物新增 `REVIEW_BATCH` / `REVIEW_ROUND` 标记；无标记的历史产物不计数。
+- `--due` 契约不变（exit 0/79），追加 `rounds_used=` / `rounds_max=` 两行（恒为数字），给自己直接派
+  Paseo 的派发侧在花钱前判断。`--due --escalated` 互斥。
+- 实例用 merge-base 而不是只看分支名：否则同一对分支第二次合并开局就超限（计划审查抓到的阻断项）。
+- ⚠️ 预算护栏不是安全边界：分支改名、detached merge、功能分支把 master 合进来都会让计数重置。
+
+### Gate 1：`tests.exempt`
+
+- `.agent/gates.json` 的 `tests.exempt`（glob 列表，`*` 跨目录）豁免 DTO、枚举这类没有逻辑的文件；
+  命中的文件会打印出来，不静默放行。不配置时行为不变。
+- 项目配置整份优先于用户配置；不是列表 ⇒ 告警并当作没配（⛔ 标量读取器会把列表读成 Python repr，
+  glob 永远不命中）。
+- Path A 的 CHECK 2（`.feature`）与 CHECK 6 需求矩阵不受影响。
+
+### skill 文本
+
+- `agent-review-protocol`：合并点默认**单个异构审查员**（三 Agent 流水线只在用户明确要求时用）；
+  跑法用一次性 CLI、只喂 diff 与需求文档；阻断项必须写失败场景并关联验收标准，`VERDICT: ISSUES`
+  当且仅当有阻断项；「补边界测试」默认是建议；合 master 标准顺序（验收 → R1 → 修 → test 定向回归 →
+  R2 闭合轮 → verify）；R2 闭合轮模板（§9.5）；不收敛诊断表与上报模板（§4、§9.6）。
+- `agent-workflow-rules`：§2.6 补「合 test 审不审由 strict_branches 决定（推荐不含 test，内置默认仍含）」与轮数上限；§7 计划审查最多 2 轮。
+
+### 内部
+
+- `sha256_stream` / `review_staged_*` / `artifact_store_dir` 上移到 `--due` 退出点之前（`--due` 要用它们算
+  rounds，原位置在退出点之后，计划审查抓到的阻断项）。
+- 新测试 `tests/run_review_rounds.sh`（52 条）、`tests/run_gate_test_exempt.sh`（14 条）。
+- `lib/hetero/family.sh` 认 `qwen3.8-max` 这类不带连字符的型号（原来只认 `qwen-*`，百炼 token plan 的审查会被记成 L0）。
+- `--route paseo` 派发时的 `--escalated` 理由存进 `record.json`，导入时据此放行同一轮（代码审查抓到：否则花了钱的第 3 轮登记不进去）。
+
 ## v2.9.10 — 后一轮 PASS 取代前一轮 FAIL；单维 off 真的生效；CHECK 6 报错指路
 
 🔴 一线实测被卡（2026-09-11）：第三轮审查是 PASS 且 `REVIEW_DIFF_SHA256` 与 commit

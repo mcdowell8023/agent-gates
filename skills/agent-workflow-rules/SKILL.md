@@ -93,8 +93,13 @@ bash "${AGENT_GATES_DIR:-$HOME/.agent-gates}/bin/agent-gates-review" --due -C <�
   一律当「该审」放行 —— 问不出来不该把审查掐死。
 - `due=no` ⇒ 别派审查 agent。先把这一批改完，合并进集成分支，那时审**一次整批**。
 - 真要提前审：`--early`（会被打出来，且不替代合并点那一次）。
+- **合 test 审不审由 `strict_branches` 决定**：推荐配置不含 `test` —— 先在 test 上冒烟 + 验收，验收通过、准备合 master 时审一次整批。
+  ⚠️ 仓库没写 `strict_branches` 时回落内置默认 `test/master/main`，合 test 仍要审；要先验收后审查就在配置里显式去掉 `test`。
+- **每批最多 2 轮**（R1 整批 + R2 闭合轮，v2.10.0 代码强制，第 3 轮 exit 73）。`--due` 输出的
+  `rounds_used` / `rounds_max` 在派发前看一眼：`rounds_max > 0` 且 `rounds_used >= rounds_max` ⇒ ⛔ 别派，
+  先按 `agent-review-protocol` §4 做不收敛诊断。
 
-颗粒度、反模式、完整判据表见 `agent-review-protocol` skill §2.5。
+颗粒度、合 master 标准顺序、反模式、完整判据表见 `agent-review-protocol` skill §2.5；阻断 / 建议的判定见 §4。
 
 ### Scope Escalation
 
@@ -372,8 +377,9 @@ This is a SHOULD (recommended), not a MUST. Omitting it does not block the commi
    - **BDD alignment (Path A)**: `.feature` reasonably covers core scenarios?
 
 2. PASS → proceed to implementation.
-3. Suggestions/issues → revise plan → resubmit.
-4. **Never bypass review and start coding.**
+3. 有阻断项 → 修订计划 → **R2 闭合轮**：只核上一轮阻断项是否解决、修订本身有没有引入新阻断（模板同 `agent-review-protocol` §9.5）。只有建议 ⇒ 视为 PASS，建议按需采纳，不再送审。
+4. **最多 2 轮**。R2 仍有阻断 ⇒ 按 `agent-review-protocol` §4 做不收敛诊断（多半是方向问题或过度设计），⛔ 不自动发第 3 轮。
+5. **Never bypass review and start coding.**
 
 ### 7.3 Exemptions
 
@@ -391,7 +397,8 @@ Review this implementation plan. Evaluate:
 5. TDD phase annotations correctness
 6. BDD .feature coverage of core scenarios (Path A only)
 
-Return PASS or specific revision suggestions.
+先列「阻断项」（每条写具体失败场景），再列「建议」。
+最后一行：有阻断项写 VERDICT: ISSUES；只有建议或没有意见写 VERDICT: PASS。
 
 ---
 [plan content]

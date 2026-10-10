@@ -395,23 +395,23 @@ The Three-Agent Pipeline alone does NOT satisfy the Cross-Check requirement unle
 
 ---
 
-## 2. When to Use Three-Agent Review vs Simplified Review
+## 2. 审查形态：默认单个异构审查员（v2.10.0）
 
-### Three-Agent Review (Full Pipeline) — REQUIRED when:
+合并点的代码审查**默认派一个异构审查员**，一份清单同时覆盖需求核对与代码质量（§9.3 模板）。
+需求遗漏由 CHECK 6 verify 专门负责，不再让 Spec Reviewer 重复做一遍。
 
-- Changes span ≥3 files
-- Involves security, authentication, payment, or data migration
-- User explicitly requests review
-- Plan Review Gate (🔴) marked the task as critical
-- Introduces new architecture patterns or external interfaces
+| 形态 | 什么时候用 |
+|---|---|
+| ⭐ 单个异构审查员（默认） | 合并进集成分支时的整批审查，包括 ≥3 文件、安全 / 认证 / 支付 / 数据迁移 |
+| 三 Agent 流水线（§3） | **只在用户明确要求时**用。2026-09-24 实测：一次合并 4 个审查 agent、6 轮、约 $32，每多一个角色就多一份上下文重读 |
+| 不派审查 | 单文件 ≤20 行的简单修改、纯配置、纯文档 / 注释 |
 
-### Simplified Review (Self-assessment + Single Oracle Check) — ALLOWED when:
+**跑法**：一次性 CLI 调用（`codex exec --sandbox read-only` / `pi -p --tools read,grep,find,ls`），
+只喂 diff 与需求文档，⛔ 不开 Paseo 长会话让审查员自己翻仓库 —— 09-24 那 $32 里，
+输出约 7 万 token，cached 读约 2334 万 token，大头就是长会话反复重读上下文。
 
-- Single file, ≤20 lines of simple modification
-- Pure configuration change (no business logic)
-- Documentation / comment changes only
-
-**When in doubt, use Full Pipeline.**
+**审查单元**：一个仓一个单元；diff 超过约 1500 行才按模块拆（大 diff 审不收敛，见 §2.5 判据一）。
+每轮每个单元只派 1 个审查员。
 
 ---
 
@@ -463,13 +463,43 @@ git diff main..HEAD
 |---|---|---|
 | 模块分支上小步迭代 | ⛔ **不审** | 锚点下一次改动就作废 |
 | 一小步做完但还要接着改同一批 | ⛔ **不审** | 同上 |
-| 这一批改完、准备合进集成分支 | ⭐ **审一次，审整批** | 此刻的代码就是最终代码 |
+| 合进 test 做验收 | ⛔ **不审**（推荐配置：`strict_branches` 不含 `test`；⚠️ 没写 `strict_branches` 时内置默认含 `test`，要显式去掉） | 验收（真实数据、联调）还会改代码；而且合 test 那份审查锚在 test 的 HEAD 上，到合 master 时必然作废 |
+| 验收通过、准备合进 master | ⭐ **审一次，审整批** | 此刻的代码就是最终代码 |
 | 已审过且**此后没有新改动** | ⛔ **不重审** | 锚点还对得上，重审只是重付一次钱 |
-| 审完又改了代码 | ⭐ **重跑** | 那份审查已作废（门禁锚点比对会发现） |
+| 审完又改了代码 | ⭐ **R2 闭合轮**（§9.5） | 只核阻断项与修复 diff，不整批重审 |
 
-这不是新政策 —— 门禁配置本来就这么写着：`review.mode=merge-only` +
-`strict_branches` 只含 `test/master/main`。⛔ 但那句话**只在 commit 时才打印**，
-写代码阶段没有任何东西拦你。所以要主动问。
+⚠️ 例外：会在测试环境留下难撤回副作用的部分 —— 共用测试库的破坏性 migration、数据回填脚本、
+会真实外发短信 / 邮件的逻辑 —— **部署 test 之前**单独审这一部分，不审整批。
+
+⛔ 这些判据**只在 commit 时才打印**，写代码阶段没有任何东西拦你。所以要主动问（下一节）。
+
+### 合进 master 的标准顺序
+
+```
+test 上冒烟 + 验收通过
+  → R1：整批审查（每个审查单元 1 个审查员，§9.3）
+  → 修阻断项
+  → 部署 test，定向回归（只回归修复影响到的验收项 + 冒烟）
+  → R2：闭合轮（只发给 R1 有阻断项的单元，§9.5）
+  → verify（CHECK 6，整批 1 次，放最后 —— 它按精确 diff 锚定）
+  → 合 master
+```
+
+- **为什么回归放在 R2 之前**：回归没过就先修，修好再发 R2，不额外多花一轮审查；R2 看的是回归通过后的最终代码。
+- **定向回归的范围**：不改变行为的修复（命名、日志、类型、删死代码）自动化测试通过即可，随这次部署带上；改变行为的修复（逻辑分支、接口契约、SQL、权限）部署 test 后回归它影响的验收项。审查员给阻断项时必须标注关联的验收标准，回归范围据此确定。
+- **master 在修复期间被别人前进**：不必整批重审 —— R2 在最新 master 上做，把解决冲突的 diff 一并纳入审查范围。
+
+### 判据三：最多审几轮（v2.10.0，代码强制）
+
+**每批自动审查最多 2 轮**（R1 整批 + R2 闭合轮）。批次 = 目标分支 | 源分支 | merge-base；
+同一份暂存状态重复审只算一轮。第 3 轮 `agent-gates-review` 直接 **exit 73**，
+派发（`--route paseo`）、直跑、导入（`--import-result`）三条路径都拦。
+
+- 两轮还不收敛 ⇒ 先做 §4 的不收敛诊断，⛔ 不要直接再发一轮
+- 诊断后确需再审：`--escalated "<诊断结论>"`，理由写进产物（`REVIEW_ESCALATED`）
+- 调整上限：`.agent/gates.json` 的 `review.max_rounds`（`0` = 不限）或 `AGENT_GATES_REVIEW_MAX_ROUNDS`
+- 计划审查同样最多 2 轮（R1 全量 + R2 闭合轮），见 `agent-workflow-rules` §7
+- ⚠️ 这是预算护栏，不是安全边界：分支改名、detached merge、功能分支把 master 合进来都会让计数重置
 
 ### 派发审查之前先问一句（零成本）
 
@@ -488,6 +518,9 @@ when=test master main
 - `exit 0` = 该审 / `exit 79` = 轮不到；stdout 恒为 key=value 行，可直接脚本解析
 - ⛔ 不需要 prompt 文件、不调任何模型、不写任何产物 —— 问它不花钱
 - 判不出来时 fail-open（`due=yes` + `review_mode=undetermined`），⛔ 它不会变成新的堵路
+- v2.10.0 追加 `rounds_used=` / `rounds_max=` 两行（恒为数字）。**先暂存 merge 再问**，
+  批次才算得对。⛔ `rounds_max > 0` 且 `rounds_used >= rounds_max` 时**不要派审查 agent** ——
+  自己用 Paseo 直接派的审查不经过本命令，这两行是唯一能在花钱前拦住它的信号
 
 `due=no` 时**不要派审查 agent**。先把这一批改完，合并进集成分支，那时审一次。
 真要提前审：`agent-gates-review --early`（会被打出来，且**不替代**合并点那一次）。
@@ -496,6 +529,9 @@ when=test master main
 
 - 一小步没做完就派全量审查 → 停，那份结论在下一次改动后作废
 - 每个 sub-task 各派一个审查 agent → 停，合并点审一次整批
+- R1 修完后整批重审 → 停，R2 只核阻断项与修复 diff（§9.5）
+- 撞到 exit 73 就换个分支名 / 换个入口再审 → 停，先做 §4 不收敛诊断
+- 合 test 之前就审整批 → 停，验收还会改代码（破坏性 migration / 外发消息类例外）
 - 同一批代码没有新改动却审第二次 → 停，先看上一份审查的锚点还对不对
 - 审完又改了代码但不重跑，拿旧审查去过门禁 → 停，这是**伪造产物**
 - 「为了保险起见先审一遍」 → 停，保险的做法是等这批改完
@@ -503,6 +539,8 @@ when=test master main
 ---
 
 ## 3. Three-Agent Review Pipeline
+
+> v2.10.0 起**只在用户明确要求时使用**；默认形态是 §2 的单个异构审查员。
 
 Strict sequential execution. No skipping or merging roles.
 
@@ -602,20 +640,35 @@ The agent that wrote the code produces a self-assessment report:
 
 ---
 
-## 4. Issue Severity & Handling
+## 4. Issue Severity & Handling（v2.10.0）
 
-| Severity | Definition | Required Action |
+只有两档。**`VERDICT: ISSUES` 当且仅当至少有一个阻断项**；只有建议时写 `VERDICT: PASS`。
+
+| 档 | 定义 | 处理 |
 | --- | --- | --- |
-| ❌ Critical | Functional error, security vulnerability, data loss risk | Must fix → **restart full Three-Agent Pipeline** |
-| ⚠️ Important | Poor maintainability, insufficient tests, performance risk | Must fix → **re-run Quality Reviewer only** |
-| 💡 Suggestion | Style preference, optional optimization | Record but don't block delivery |
+| 🚫 阻断 | 必须同时写出：① 具体失败场景（什么输入 / 状态 → 什么错误结果）② 关联的验收标准，或属于安全漏洞 / 数据丢失 / 生产事故风险 | 修 → 部署 test 定向回归 → R2 闭合轮 |
+| 💡 建议 | 其余一切：风格、可维护性、可选优化、补边界测试 | 记入后续待办，**不改代码、不触发新一轮** |
 
-### Anti-Loop Rule
+**测试相关的判定**（测试代码量超过业务代码的主要推手之一，单独写明）：
+- 某条验收标准**完全没有**测试覆盖 ⇒ 阻断
+- 补边界用例、补异常分支、提高覆盖率 ⇒ 建议（除非能写出对应的真实失败场景）
+- ⛔ 不因「测试不够充分」这类无失败场景的意见判 ISSUES
 
-- Same issue: max **2 rounds** of fix-and-re-review
-- After 2 rounds still unresolved → escalate to user for decision
-- Re-review only covers modified code, not unchanged sections
-- **Cascading new issues**: if a fix introduces >2 NEW issues (not the original), escalate to user instead of continuing fix cycles indefinitely
+说不出失败场景的「阻断项」，主会话直接降为建议并写明理由，不必再问审查员、也不找用户。
+
+### 不收敛诊断（替代原 Anti-Loop Rule）
+
+R2 之后仍有阻断项，或修复引入了新的阻断项 ⇒ **不再自动发第 3 轮**（门禁 exit 73，见 §2.5 判据三）。
+不收敛本身就是信号。由主会话先诊断、带建议，⛔ 不要把一堆 findings 原样丢给用户裁决：
+
+| 诊断 | 判据 | 主会话直接做什么 |
+|---|---|---|
+| 审查员越界 / 挑刺 | 阻断项说不出具体失败场景，或关联不到任何验收标准 | 降为建议，写明理由，**不找用户** |
+| 过度设计 | 阻断项落在验收范围外的代码上（多余抽象、可配置项、没人要的兜底分支） | 删掉这部分代码，而不是修它 |
+| 方向错了 | 阻断项集中在同一层；或修复又引入新阻断；或触及数据模型、接口契约等设计前提 | 停止打补丁，回到方案层：重写这一块或换做法（必要时重走计划审查） |
+| 真缺陷且修复成本高 | 问题成立，修它要动大范围 | **只有这一类找用户**，用 §9.6 模板：影响、概率、回滚方式、建议，用户只答「带已知问题上线」还是「延期」 |
+
+诊断后确需第 3 轮：`agent-gates-review ... --escalated "<诊断结论>"`，理由写进产物。
 
 ---
 
@@ -740,8 +793,8 @@ Return: PASS or specific issues with file:line references.
 ### When in the Development Cycle
 
 ```
-Plan → Plan Review (agent-workflow-rules §3) → Implement (TDD) → Self-Assessment → 
-Three-Agent Review (this skill) → Fix issues → Re-review → Deliver
+Plan → Plan Review（≤2 轮）→ Implement (TDD) → 合 test 验收 →
+R1 整批审查（单个异构审查员）→ 修阻断项 → 部署 test 定向回归 → R2 闭合轮 → verify → 合 master
 ```
 
 ### Relationship to Other Gates
@@ -760,10 +813,10 @@ Three-Agent Review (this skill) → Fix issues → Re-review → Deliver
 
 A review is NOT complete without:
 
-- [ ] Reviewer output with per-item verdicts
-- [ ] All ❌ items resolved (with fix evidence)
-- [ ] Final reviewer output showing all ✅
-- [ ] Tests passing after any review-prompted fixes
+- [ ] Reviewer output with 阻断项 / 建议 分列
+- [ ] All 🚫 阻断项 resolved (with fix evidence)，或按 §4 不收敛诊断降级 / 上报
+- [ ] Final verdict `VERDICT: PASS`（建议已记入后续待办）
+- [ ] Tests passing after any review-prompted fixes，改变行为的修复已在 test 定向回归
 
 **Forbidden:** Claiming "reviewed" without reviewer output artifact.
 
@@ -971,14 +1024,14 @@ Pre-written prompt templates for each review role. These solve the "sub-agent do
 | # | 维度 | 判定 | 说明 |
 |---|------|------|------|
 | 1 | 可维护性 | ✅/⚠️/❌ | 命名、结构、复杂度 |
-| 2 | 测试质量 | ✅/⚠️/❌ | 有意义、覆盖边界 |
+| 2 | 测试质量 | ✅/⚠️/❌ | 有意义；每条验收标准至少有一个测试（补边界只算建议） |
 | 3 | 代码风格 | ✅/⚠️/❌ | 项目约定一致 |
 | 4 | 安全 | ✅/⚠️/❌ | secrets、注入、权限 |
 | 5 | 性能 | ✅/⚠️/❌ | N+1、无界循环、内存泄露 |
 | 6 | 依赖合理性 | ✅/⚠️/❌ | 无多余依赖 |
 
-如有 ❌/⚠️,给出 file:line 引用。
-最后一行: VERDICT: PASS 或 VERDICT: ISSUES
+如有 ❌,必须写具体失败场景 + file:line,否则只能记 ⚠️(建议)。
+最后一行: 有 ❌ 写 VERDICT: ISSUES;只有 ⚠️ 或全 ✅ 写 VERDICT: PASS
 ```
 
 ### 9.3 Cross-Check Prompt (Heterogeneous Review)
@@ -992,16 +1045,21 @@ Pre-written prompt templates for each review role. These solve the "sub-agent do
 ## 待审查文件
 [列出文件路径]
 
+## 需求 / 验收标准
+[粘贴或给出路径；阻断项要关联到这里的编号]
+
 ## 检查重点
-1. 逻辑正确性 + 边界条件
-2. 测试覆盖充分性
-3. 安全 (hardcoded secrets, injection, permission)
-4. 代码风格与项目约定一致性
+1. 逻辑正确性：会不会在真实输入下得出错误结果
+2. 需求核对：每条验收标准是否实现、是否至少有一个测试覆盖（只问有没有，不要求补边界）
+3. 安全（hardcoded secrets, injection, permission）、数据丢失、生产事故风险
+4. 与项目既有约定是否冲突
 
 ## 输出要求
+- 先列「阻断项」：每条必须写 ① 具体失败场景（什么输入 / 状态 → 什么错误结果）② 关联的验收标准编号，或注明属于安全 / 数据丢失 / 生产事故；③ file:line
+- 再列「建议」：风格、可维护性、补边界测试等，不需要失败场景
+- 写不出失败场景的意见一律放进「建议」
 - 500 字以内
-- 每个问题引用 file:line
-- 最后一行: VERDICT: PASS 或 VERDICT: ISSUES
+- 最后一行只写结论：有阻断项写 VERDICT: ISSUES；没有阻断项写 VERDICT: PASS（只有建议也写 PASS）
 ```
 
 ### 9.4 Usage
@@ -1012,3 +1070,36 @@ When performing a review, the agent:
 2. Fills in all `[placeholder]` fields with actual content (file paths, requirements, self-assessment).
 3. Sends the completed prompt through the route selected by §8 (Cross-Check Platform Routing).
 4. Parses the response for `VERDICT:` line to determine pass/fail.
+
+### 9.5 R2 闭合轮 Prompt（v2.10.0）
+
+R1 修完之后用。⛔ 不整批重审：只给 R1 的阻断项原文 + 修复 diff。
+
+```markdown
+你是闭合轮审查员，只读，不得修改文件。上一轮你给出了下面这些阻断项：
+[逐条粘贴 R1 阻断项原文，带编号]
+
+修复 diff：
+[git diff <R1 时的提交>..HEAD -- <修复涉及的文件>，master 前进过则附上解决冲突的 diff]
+
+只做两件事：
+1. 逐条判定上述阻断项是否已解决（已解决 / 未解决 + 理由）
+2. 检查修复 diff 本身是否引入新的阻断问题（同样必须写失败场景 + file:line）
+不要重审其他部分，不要提新的建议。
+300 字以内。最后一行：仍有阻断写 VERDICT: ISSUES，否则 VERDICT: PASS。
+```
+
+### 9.6 不收敛上报模板（只用于「真缺陷且修复成本高」）
+
+§4 诊断表前三类主会话自己处理，不用这个模板。
+
+```markdown
+## 需要你决定：带已知问题上线，还是延期
+
+- 问题：[一句话，含 file:line]
+- 影响：[哪些场景 / 用户 / 数据会受影响]
+- 概率：[什么条件下触发，有无数据支撑]
+- 为什么现在不修：[修复范围 / 风险]
+- 带问题上线的兜底：[监控、开关、回滚方式]
+- 我的建议：[上线并登记待办 / 延期]，理由：[…]
+```

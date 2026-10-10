@@ -20,6 +20,7 @@
 #   76  prompt too long for opencode and no codex fallback
 #   78  L0 machine — no heterogeneous tool available
 #   79  现在轮不到审查（`--due` 的 due=no，或时机门控拦下了一次提前审）
+#   73  这一批的审查轮数已达 review.max_rounds（默认 2）—— 先做不收敛诊断，确需再审加 --escalated "<理由>"
 #
 # Env:
 #   AGENT_GATES_DIR       override ~/.agent-gates
@@ -40,6 +41,8 @@
 #   AG_REVIEW_PI          path to the pi binary (default: pi on PATH).
 #   HETERO_CHAN_PI        1/0 — overrides channels.pi.enabled. Default enabled.
 #   AGENT_GATES_REVIEW_EARLY  1 = 等同 --early，绕过审查时机门控（会被打出来）
+#   AGENT_GATES_REVIEW_MAX_ROUNDS  每批审查轮数上限，覆盖 review.max_rounds（默认 2，0 = 不限）。
+#                         超限 exit 73；--escalated "<理由>" 显式放行，理由写进产物。
 #   AGENT_GATES_REVIEW_MODE   strict|relaxed|merge-only|off — 覆盖 review.mode，
 #                         优先级高于项目/用户配置文件。时机门控与 --due 都读它。
 #   HETERO_CHAN_OPENCODE  1/0 — overrides channels.opencode.enabled. ⛔ Default DISABLED
@@ -89,6 +92,8 @@ DUE_ONLY=0
 DUE_REPO=""
 DUE_REPO_SET=0
 EARLY_EXPLICIT=0
+ESCALATED_REASON=""
+ESCALATED_SET=0
 
 _need_val() { [[ $2 -ge 2 ]] || { echo "agent-gates-review: $1 requires a value" >&2; exit 1; }; }
 
@@ -102,6 +107,7 @@ while [[ $# -gt 0 ]]; do
     --paseo-agent)    _need_val "$1" $#; PASEO_AGENT="$2";   shift 2 ;;
     --imported-model) _need_val "$1" $#; IMPORTED_MODEL="$2"; shift 2 ;;
     --early)          REVIEW_EARLY=1; EARLY_EXPLICIT=1;        shift ;;
+    --escalated)      _need_val "$1" $#; ESCALATED_REASON="$2"; ESCALATED_SET=1; shift 2 ;;
     --due)            DUE_ONLY=1;                              shift ;;
     -C)               _need_val "$1" $#
                       [[ "$DUE_REPO_SET" -eq 0 ]] || { echo "agent-gates-review: -C given more than once (${DUE_REPO} then $2) — refusing to silently take the last one" >&2; exit 1; }
@@ -154,70 +160,13 @@ _review_due_report() {
   printf 'branch=%s\n'       "${_TIM_BRANCH:-}"
   printf 'review_mode=%s\n'  "${_TIM_MODE:-}"
   printf 'when=%s\n'         "${_TIM_WHEN:-}"
+  _review_rounds_report
   [[ "${_TIM_DUE:-yes}" == "yes" ]] && exit 0
   exit 79
 }
 
-# 🔴 `--due` 必须和正常审查参数互斥。混用时它先退出 ⇒ **不跑 reviewer、不写 --result，
-# 却返回 exit 0** —— 把 0 当成「审查成功」的调用方会拿着一个不存在的产物往下走
-# （异构审 finding 1）。⛔ 静默忽略比报错危险得多。
-if [[ "$DUE_ONLY" == "1" ]]; then
-  _due_conflict=""
-  [[ -z "$PROMPT_FILE" ]]        || _due_conflict="${_due_conflict} <prompt-file>"
-  [[ -z "$RESULT_FILE" ]]        || _due_conflict="${_due_conflict} --result"
-  [[ -z "$ROUTE" ]]              || _due_conflict="${_due_conflict} --route"
-  [[ -z "$DISPATCH_OUT" ]]       || _due_conflict="${_due_conflict} --dispatch-out"
-  [[ -z "$IMPORT_RESULT" ]]      || _due_conflict="${_due_conflict} --import-result"
-  [[ -z "$IMPORT_TOKEN" ]]       || _due_conflict="${_due_conflict} --token"
-  [[ -z "$PASEO_AGENT" ]]        || _due_conflict="${_due_conflict} --paseo-agent"
-  [[ -z "$IMPORTED_MODEL" ]]     || _due_conflict="${_due_conflict} --imported-model"
-  # ⚠️ 只看**显式** --early。AGENT_GATES_REVIEW_EARLY 可能是全局 export 的，
-  #    那种情况下把 --due 判成冲突纯属添乱。
-  [[ "$EARLY_EXPLICIT" -eq 0 ]]  || _due_conflict="${_due_conflict} --early"
-  if [[ -n "$_due_conflict" ]]; then
-    echo "agent-gates-review: --due 不能和这些参数混用（它只判时机、不跑审查）:${_due_conflict}" >&2
-    echo "  ⛔ 混用会静默降级成「只查询」：不跑 reviewer、不写产物，却返回 exit 0。" >&2
-    echo "  判时机: agent-gates-review --due [-C <dir>]" >&2
-    echo "  真跑审查: agent-gates-review <prompt-file> --result <file>" >&2
-    exit 1
-  fi
-fi
-
-if [[ -n "$DUE_REPO" ]]; then
-  # ⛔ -C 目前只服务 --due：别的路径上 prompt / --result 都可能是相对路径，
-  #    悄悄换工作目录会让它们指向别处。
-  [[ "$DUE_ONLY" == "1" ]] || { echo "agent-gates-review: -C is only valid with --due" >&2; exit 1; }
-  cd "$DUE_REPO" 2>/dev/null || { echo "agent-gates-review: -C: cannot enter directory: $DUE_REPO" >&2; exit 1; }
-fi
-[[ "$DUE_ONLY" == "1" ]] && _review_due_report
-
-if [[ "$_WT_OK" != "1" ]]; then
-  echo "agent-gates-review: timeout wrapper unavailable ($_WT, node required) — refusing to run reviewers unbounded (fail-closed)" >&2
-  exit 75
-fi
-
-# Import mode takes no prompt file: the prompt was snapshotted at dispatch time and the
-# snapshot — not whatever the path holds now — is what gets verified.
-if [[ -z "$IMPORT_RESULT" ]] && [[ -z "$PROMPT_FILE" || ! -f "$PROMPT_FILE" ]]; then
-  echo "Usage: agent-gates-review <prompt-file> [--result <file>] [--route paseo --dispatch-out <file>]" >&2
-  echo "       agent-gates-review --import-result <review.md> --token <token> --paseo-agent <id> [--result <file>]" >&2
-  exit 1
-fi
-
-if [[ ! -f "$CAP_FILE" ]]; then
-  echo "agent-gates-review: review-capability.json not found at $CAP_FILE — run install.sh or doctor.sh first" >&2
-  exit 69
-fi
-if [[ -n "$IMPORT_RESULT" ]]; then
-  PROMPT_CONTENT=""
-else
-  PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
-fi
-PROMPT_LEN=${#PROMPT_CONTENT}
-
-LEVEL=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['level'])" "$CAP_FILE" 2>/dev/null || echo "L0")
-
-# --- Helpers ---
+# --- 纯函数：`--due` 也要用（算 rounds_used），必须定义在 `--due` 退出点之前 ---
+# ⛔ 这里只放无副作用的函数：`--due` 不读 capability、不写产物、不调模型。
 
 sha256_stream() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -243,6 +192,207 @@ review_staged_diff_sha256() {
     ':(exclude).agent/plans/**' \
     | sha256_stream
 }
+
+# 产物同时写进按**仓库**（不是按 worktree）分键的共享库。
+#
+# 🔴 为什么需要它：`.gitignore` 排除 `.agent/reviews/` 与 `.agent/verify/`（wb 的项目
+# 整个 `.agent/` 都 ignore），而 `merge-only` 把审查/验收推迟到「合并进 strict 分支」
+# 那一刻。产物在**功能分支的 worktree** 里生成、merge 在**主仓 worktree** 发生 ——
+# 既不进 git 又不跨 worktree ⇒ **永远到不了那个检查点**。
+#
+# repo-key 取自 `git rev-parse --git-common-dir`：同一仓库的所有 worktree 同键，
+# 不同仓库不同键（⛔ 不能跨仓串）。⛔ 不动任何项目的 .gitignore —— 那要各项目分别改，
+# 而且会把审查正文推进 git 历史。
+artifact_store_dir() {   # artifact_store_dir <reviews|verify>
+  local kind="$1" common key
+  common=$(git rev-parse --git-common-dir 2>/dev/null) || return 1
+  [[ -n "$common" ]] || return 1
+  # 相对值（主 worktree 里就是 `.git`）先转成绝对，否则不同仓库会撞同一个键。
+  # ⛔ 必须解析软链后再算 key。macOS 上 worktree 里 `git rev-parse --git-common-dir`
+  # 返回 `/private/var/...`，而主 worktree 返回相对的 `.git`；把相对值转绝对会得到
+  # `/var/...` —— `/var` 是 `/private/var` 的软链 ⇒ **同一个仓库在两个 worktree 里算出
+  # 不同的 key**，共享库当场失效（2026-09-10 实测）。用 `pwd -P` 统一到物理路径。
+  local pdir base
+  pdir=$(cd -P "$(dirname "$common")" 2>/dev/null && pwd -P) || return 1
+  base=$(basename "$common")
+  common="$pdir/$base"
+  key=$(printf '%s' "$common" | sha256_stream | cut -c1-16)
+  printf '%s/artifacts/%s/%s' "${AGENT_GATES_DIR:-$HOME/.agent-gates}" "$key" "$kind"
+}
+
+# ============================================================
+# 审查轮数上限（v2.10.0）
+# ============================================================
+# 🔴 实况（2026-09-24）：一次合并 6 轮审查、4 个审查 agent，约 $32，大头是长会话反复重读
+# 上下文。「迭代期别审」的规则早就写着，09-10 照样派出 11 个 agent —— 只写规则拦不住，
+# 要在产物登记这一步卡：门禁只认经过本命令的产物。
+#
+#   批次 = 目标分支 | 源分支 | 实例
+#     实例 = merge-base(HEAD, MERGE_HEAD)：同一批内功能分支追加修复、master 被别人前进，
+#     它都不变；上一批合进去之后同一对分支再合，它前移 ⇒ 自动是新批次。
+#     ⛔ 不能省掉实例：否则同一对分支第二次合并开局就超限，护栏变永久锁（计划审查阻断项）。
+#     ⛔ 也不能只靠实例：两个从同一提交切出的功能分支 merge-base 相同，会串批。
+#   轮次 = 共享库里同批次产物按 REVIEW_DIFF_SHA256 去重的个数。同一份暂存状态重复审
+#     （含按模块拆开的多份）只算一轮；改了代码再审算新一轮。
+#
+# ⚠️ 这是预算护栏，不是安全边界：分支改名、detached merge、功能分支把 master 合进来，
+#    都会让计数重置。设计目标与时机门控相同 —— 无法**静默**多审，不是无法多审。
+
+_review_max_rounds() {   # stdout: 整数；0 = 不限
+  local raw="" src="" f
+  if [[ -n "${AGENT_GATES_REVIEW_MAX_ROUNDS:-}" ]]; then
+    raw="$AGENT_GATES_REVIEW_MAX_ROUNDS"; src="env AGENT_GATES_REVIEW_MAX_ROUNDS"
+  elif declare -f _gate_cfg_get >/dev/null 2>&1; then
+    for f in "${_GATE_CFG_PROJECT:-}" "${_GATE_CFG_USER:-}"; do
+      [[ -n "$f" ]] || continue
+      if raw=$(_gate_cfg_get "$f" review.max_rounds); then src="$f"; break; fi
+      raw=""
+    done
+  fi
+  if [[ -z "$raw" ]]; then echo 2; return 0; fi
+  if [[ "$raw" =~ ^[0-9]+$ ]]; then echo $((10#$raw)); return 0; fi
+  echo "agent-gates-review: ⚠️  review.max_rounds='${raw}' (${src}) is not a non-negative integer — using 2" >&2
+  echo 2
+}
+
+_review_batch_key() {   # stdout: "<目标>|<源>|<实例>"；判不出 return 1
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  local target source="" inst mh msg
+  target=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || return 1
+  mh=$(git rev-parse --git-path MERGE_HEAD 2>/dev/null)
+  # ⚠️ --git-path 恒 exit 0、只拼路径 ⇒ 判「在 merge 中」必须 -f 测文件存在。
+  if [[ -n "$mh" && -f "$mh" ]]; then
+    msg=$(git rev-parse --git-path MERGE_MSG 2>/dev/null)
+    if [[ -n "$msg" && -f "$msg" ]]; then
+      source=$(head -1 "$msg" | sed -n "s/^Merge \(remote-tracking \)\{0,1\}branch '\([^']*\)'.*/\2/p")
+    fi
+    if [[ -z "$source" ]]; then
+      source=$(git name-rev --name-only --refs='refs/heads/*' MERGE_HEAD 2>/dev/null | sed 's/[~^].*$//')
+      [[ "$source" == "undefined" ]] && source=""
+    fi
+    [[ -n "$source" ]] || source="MERGE_HEAD@$(git rev-parse --short=12 MERGE_HEAD 2>/dev/null)"
+    # criss-cross 时 merge-base 可能多行 ⇒ 收敛成单值，否则批次标记跨行、计数静默归零。
+    inst=$(git merge-base HEAD MERGE_HEAD 2>/dev/null | head -1 | cut -c1-12)
+  else
+    source="$target"
+    inst=$(git rev-parse HEAD 2>/dev/null | cut -c1-12)
+  fi
+  [[ -n "$inst" ]] || inst="none"
+  printf '%s|%s|%s' "$target" "$source" "$inst" | tr -d '\n'
+}
+
+# stdout: "<同批次其它 diff 的个数> <当前 diff 是否已登记过 0|1>"
+# 取**最后一个**标记：标记追加在正文之后，正文里抄来的同名行不能冒充。
+_review_rounds_scan() {   # <batch> <current-diff-sha>
+  local dir
+  dir=$(artifact_store_dir reviews 2>/dev/null) || { echo "0 0"; return 0; }
+  [[ -d "$dir" ]] || { echo "0 0"; return 0; }
+  python3 - "$dir" "$1" "$2" <<'PY' 2>/dev/null || echo "0 0"
+import os, re, sys
+d, batch, cur = sys.argv[1], sys.argv[2], sys.argv[3].lower()
+seen = set()
+for name in os.listdir(d):
+    if not name.endswith(".md"):
+        continue
+    try:
+        text = open(os.path.join(d, name), encoding="utf-8", errors="replace").read()
+    except OSError:
+        continue
+    b = re.findall(r"^<!-- REVIEW_BATCH: (.*) -->$", text, re.M)
+    if not b or b[-1] != batch:
+        continue
+    s = re.findall(r"^<!-- REVIEW_DIFF_SHA256: ([0-9a-fA-F]+)[\s-]*-->$", text, re.M)
+    if s:
+        seen.add(s[-1].lower())
+print(len(seen - {cur}), 1 if cur in seen else 0)
+PY
+}
+
+# `--due` 追加的两行。⛔ 永远输出数字：派发侧拿它做 `-ge` 比较，空串会让判断报错。
+_review_rounds_report() {
+  local used=0 max batch cur scan
+  max=$(_review_max_rounds) || max=2
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+     && [[ -n "$(review_staged_files 2>/dev/null)" ]] \
+     && batch=$(_review_batch_key); then
+    cur=$(review_staged_diff_sha256)
+    scan=$(_review_rounds_scan "$batch" "$cur")
+    used=${scan% *}
+    [[ "${scan#* }" == "1" ]] && used=$((used + 1))
+  fi
+  [[ "$used" =~ ^[0-9]+$ ]] || used=0
+  [[ "$max" =~ ^[0-9]+$ ]] || max=2
+  printf 'rounds_used=%s\n' "$used"
+  printf 'rounds_max=%s\n'  "$max"
+}
+
+# 🔴 `--due` 必须和正常审查参数互斥。混用时它先退出 ⇒ **不跑 reviewer、不写 --result，
+# 却返回 exit 0** —— 把 0 当成「审查成功」的调用方会拿着一个不存在的产物往下走
+# （异构审 finding 1）。⛔ 静默忽略比报错危险得多。
+if [[ "$DUE_ONLY" == "1" ]]; then
+  _due_conflict=""
+  [[ -z "$PROMPT_FILE" ]]        || _due_conflict="${_due_conflict} <prompt-file>"
+  [[ -z "$RESULT_FILE" ]]        || _due_conflict="${_due_conflict} --result"
+  [[ -z "$ROUTE" ]]              || _due_conflict="${_due_conflict} --route"
+  [[ -z "$DISPATCH_OUT" ]]       || _due_conflict="${_due_conflict} --dispatch-out"
+  [[ -z "$IMPORT_RESULT" ]]      || _due_conflict="${_due_conflict} --import-result"
+  [[ -z "$IMPORT_TOKEN" ]]       || _due_conflict="${_due_conflict} --token"
+  [[ -z "$PASEO_AGENT" ]]        || _due_conflict="${_due_conflict} --paseo-agent"
+  [[ -z "$IMPORTED_MODEL" ]]     || _due_conflict="${_due_conflict} --imported-model"
+  # ⚠️ 只看**显式** --early。AGENT_GATES_REVIEW_EARLY 可能是全局 export 的，
+  #    那种情况下把 --due 判成冲突纯属添乱。
+  [[ "$EARLY_EXPLICIT" -eq 0 ]]  || _due_conflict="${_due_conflict} --early"
+  [[ "$ESCALATED_SET" -eq 0 ]]   || _due_conflict="${_due_conflict} --escalated"
+  if [[ -n "$_due_conflict" ]]; then
+    echo "agent-gates-review: --due 不能和这些参数混用（它只判时机、不跑审查）:${_due_conflict}" >&2
+    echo "  ⛔ 混用会静默降级成「只查询」：不跑 reviewer、不写产物，却返回 exit 0。" >&2
+    echo "  判时机: agent-gates-review --due [-C <dir>]" >&2
+    echo "  真跑审查: agent-gates-review <prompt-file> --result <file>" >&2
+    exit 1
+  fi
+fi
+
+if [[ -n "$DUE_REPO" ]]; then
+  # ⛔ -C 目前只服务 --due：别的路径上 prompt / --result 都可能是相对路径，
+  #    悄悄换工作目录会让它们指向别处。
+  [[ "$DUE_ONLY" == "1" ]] || { echo "agent-gates-review: -C is only valid with --due" >&2; exit 1; }
+  cd "$DUE_REPO" 2>/dev/null || { echo "agent-gates-review: -C: cannot enter directory: $DUE_REPO" >&2; exit 1; }
+fi
+[[ "$DUE_ONLY" == "1" ]] && _review_due_report
+
+# --escalated 是超出轮数上限时的显式放行，理由会写进产物。⛔ 空理由等于静默绕过。
+if [[ "$ESCALATED_SET" -eq 1 && -z "$(printf '%s' "$ESCALATED_REASON" | tr -d '[:space:]')" ]]; then
+  echo "agent-gates-review: --escalated requires a non-empty reason (it is written into the review artifact)" >&2
+  exit 1
+fi
+
+if [[ "$_WT_OK" != "1" ]]; then
+  echo "agent-gates-review: timeout wrapper unavailable ($_WT, node required) — refusing to run reviewers unbounded (fail-closed)" >&2
+  exit 75
+fi
+
+# Import mode takes no prompt file: the prompt was snapshotted at dispatch time and the
+# snapshot — not whatever the path holds now — is what gets verified.
+if [[ -z "$IMPORT_RESULT" ]] && [[ -z "$PROMPT_FILE" || ! -f "$PROMPT_FILE" ]]; then
+  echo "Usage: agent-gates-review <prompt-file> [--result <file>] [--route paseo --dispatch-out <file>] [--escalated \"<reason>\"]" >&2
+  echo "       agent-gates-review --import-result <review.md> --token <token> --paseo-agent <id> [--result <file>]" >&2
+  exit 1
+fi
+
+if [[ ! -f "$CAP_FILE" ]]; then
+  echo "agent-gates-review: review-capability.json not found at $CAP_FILE — run install.sh or doctor.sh first" >&2
+  exit 69
+fi
+if [[ -n "$IMPORT_RESULT" ]]; then
+  PROMPT_CONTENT=""
+else
+  PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
+fi
+PROMPT_LEN=${#PROMPT_CONTENT}
+
+LEVEL=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['level'])" "$CAP_FILE" 2>/dev/null || echo "L0")
+
+# --- Helpers ---
 
 REVIEW_ANCHOR_ENABLED=0
 REVIEW_ANCHOR_HEAD=""
@@ -293,34 +443,12 @@ append_marker() {
     done <<< "$REVIEW_ANCHOR_FILES"
     printf '<!-- REVIEW_FILES_SHA256: %s -->\n' "$REVIEW_ANCHOR_FILES_SHA256"
     printf '<!-- REVIEW_DIFF_SHA256: %s -->\n' "$REVIEW_ANCHOR_DIFF_SHA256"
+    if [[ -n "${REVIEW_BATCH:-}" ]]; then
+      printf '<!-- REVIEW_BATCH: %s -->\n' "$REVIEW_BATCH"
+      printf '<!-- REVIEW_ROUND: %s -->\n' "$REVIEW_ROUND"
+    fi
+    [[ -z "${REVIEW_ESCALATED_NOTE:-}" ]] || printf '<!-- REVIEW_ESCALATED: %s -->\n' "$REVIEW_ESCALATED_NOTE"
   fi
-}
-
-# 产物同时写进按**仓库**（不是按 worktree）分键的共享库。
-#
-# 🔴 为什么需要它：`.gitignore` 排除 `.agent/reviews/` 与 `.agent/verify/`（wb 的项目
-# 整个 `.agent/` 都 ignore），而 `merge-only` 把审查/验收推迟到「合并进 strict 分支」
-# 那一刻。产物在**功能分支的 worktree** 里生成、merge 在**主仓 worktree** 发生 ——
-# 既不进 git 又不跨 worktree ⇒ **永远到不了那个检查点**。
-#
-# repo-key 取自 `git rev-parse --git-common-dir`：同一仓库的所有 worktree 同键，
-# 不同仓库不同键（⛔ 不能跨仓串）。⛔ 不动任何项目的 .gitignore —— 那要各项目分别改，
-# 而且会把审查正文推进 git 历史。
-artifact_store_dir() {   # artifact_store_dir <reviews|verify>
-  local kind="$1" common key
-  common=$(git rev-parse --git-common-dir 2>/dev/null) || return 1
-  [[ -n "$common" ]] || return 1
-  # 相对值（主 worktree 里就是 `.git`）先转成绝对，否则不同仓库会撞同一个键。
-  # ⛔ 必须解析软链后再算 key。macOS 上 worktree 里 `git rev-parse --git-common-dir`
-  # 返回 `/private/var/...`，而主 worktree 返回相对的 `.git`；把相对值转绝对会得到
-  # `/var/...` —— `/var` 是 `/private/var` 的软链 ⇒ **同一个仓库在两个 worktree 里算出
-  # 不同的 key**，共享库当场失效（2026-09-10 实测）。用 `pwd -P` 统一到物理路径。
-  local pdir base
-  pdir=$(cd -P "$(dirname "$common")" 2>/dev/null && pwd -P) || return 1
-  base=$(basename "$common")
-  common="$pdir/$base"
-  key=$(printf '%s' "$common" | sha256_stream | cut -c1-16)
-  printf '%s/artifacts/%s/%s' "${AGENT_GATES_DIR:-$HOME/.agent-gates}" "$key" "$kind"
 }
 
 artifact_store_put() {   # artifact_store_put <reviews|verify> <content>
@@ -677,14 +805,19 @@ print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=i
 " "$PASEO_TTL")
 
   python3 - "$dir/record.json" "$token" "$psha" "$created" "$expires" "$PWD" \
-    "$REVIEW_ANCHOR_ENABLED" "$REVIEW_ANCHOR_HEAD" "$REVIEW_ANCHOR_FILES_SHA256" "$REVIEW_ANCHOR_DIFF_SHA256" <<'PY'
+    "$REVIEW_ANCHOR_ENABLED" "$REVIEW_ANCHOR_HEAD" "$REVIEW_ANCHOR_FILES_SHA256" "$REVIEW_ANCHOR_DIFF_SHA256" \
+    "${REVIEW_ESCALATED_NOTE:-}" <<'PY'
 import json, sys
-p, token, psha, created, expires, cwd, en, head, fsha, dsha = sys.argv[1:11]
-json.dump({
+p, token, psha, created, expires, cwd, en, head, fsha, dsha, esc = sys.argv[1:12]
+rec = {
     "token": token, "prompt_sha256": psha, "created_at": created, "expires_at": expires,
     "cwd": cwd,
     "anchor": {"enabled": int(en), "head": head, "files_sha256": fsha, "diff_sha256": dsha},
-}, open(p, "w"), indent=2)
+}
+# 超出轮数上限、经 --escalated 放行的派发：导入时据此放行同一轮（v2.10.0）
+if esc:
+    rec["escalated"] = esc
+json.dump(rec, open(p, "w"), indent=2)
 PY
 
   # Write the request last: if it fails there must be no dangling token left behind.
@@ -992,6 +1125,59 @@ _review_due_check() {
 }
 
 _review_due_check
+
+# 轮数上限：放在时机门控之后、任何路由之前 ⇒ 直跑、`--route paseo` 派发、`--import-result`
+# 三条路径都过这里。派发被拒时还没签发 token，不会有 agent 白跑。
+REVIEW_BATCH=""
+REVIEW_ROUND=""
+REVIEW_ESCALATED_NOTE=""
+_review_round_check() {
+  if [[ "$REVIEW_ANCHOR_ENABLED" -ne 1 ]]; then
+    echo "agent-gates-review: ℹ️  nothing staged — no anchor, round budget not enforced" >&2
+    return 0
+  fi
+  local batch max scan used counted rec_note
+  # paseo 两阶段：派发时已经带 --escalated 放行过这一轮，理由存在 record.json 里。
+  # ⛔ 导入时不读它的话，花了钱的那一轮会在登记这一步被 exit 73 挡掉（审查 R1 阻断项）。
+  if [[ "$ESCALATED_SET" -eq 0 && -n "$IMPORT_TOKEN" && -f "$PASEO_PENDING_DIR/$IMPORT_TOKEN/record.json" ]]; then
+    rec_note=$(python3 -c 'import json,sys
+try: print(json.load(open(sys.argv[1])).get("escalated") or "")
+except Exception: pass' "$PASEO_PENDING_DIR/$IMPORT_TOKEN/record.json" 2>/dev/null)
+    if [[ -n "$rec_note" ]]; then ESCALATED_SET=1; ESCALATED_REASON="$rec_note"; fi
+  fi
+  if ! batch=$(_review_batch_key); then
+    echo "agent-gates-review: ℹ️  cannot determine the review batch — round budget not enforced" >&2
+    return 0
+  fi
+  _review_load_gate_mode >/dev/null 2>&1 || true
+  max=$(_review_max_rounds)
+  scan=$(_review_rounds_scan "$batch" "$REVIEW_ANCHOR_DIFF_SHA256")
+  used=${scan% *}; counted=${scan#* }
+  [[ "$used" =~ ^[0-9]+$ ]] || used=0
+  REVIEW_BATCH="$batch"
+  REVIEW_ROUND=$((used + 1))
+  # 当前 diff 已经登记过 ⇒ 不是新一轮（重复登记同一状态，或按模块拆开的多份）。
+  [[ "$counted" == "1" ]] && return 0
+  [[ "$max" -eq 0 || "$used" -lt "$max" ]] && return 0
+
+  if [[ "$ESCALATED_SET" -eq 1 ]]; then
+    REVIEW_ESCALATED_NOTE=$(printf '%s' "$ESCALATED_REASON" | tr '\r\n' '  ' | sed 's/--*>/>/g; s/  */ /g; s/^ //; s/ $//')
+    echo "agent-gates-review: ⚠️  escalated: round ${REVIEW_ROUND} exceeds review.max_rounds=${max} for batch '${batch}' — reason recorded in the artifact: ${REVIEW_ESCALATED_NOTE}" >&2
+    return 0
+  fi
+
+  echo "agent-gates-review: 这一批已经审了 ${used} 轮，达到上限 review.max_rounds=${max}（exit 73）—— 批次 ${batch}" >&2
+  echo "  ⛔ 两轮还不收敛，本身就是信号：再审一轮大概率还是新 findings。先停下来做不收敛诊断" >&2
+  echo "     （agent-review-protocol skill §4）：" >&2
+  echo "     · 审查员越界 / 挑刺（说不出失败场景、关联不到验收标准）⇒ 降为建议，写明理由" >&2
+  echo "     · 过度设计（阻断项落在验收范围外的代码）⇒ 删掉那部分，而不是修它" >&2
+  echo "     · 方向错了（集中在同一层 / 修复引入新阻断 / 触及数据模型或契约）⇒ 回方案层" >&2
+  echo "     · 真缺陷且修复成本高 ⇒ 带风险说明找用户，只问「带已知问题上线还是延期」" >&2
+  echo "  诊断后确需再审：加 --escalated \"<诊断结论>\"，理由会写进产物、报告里可见。" >&2
+  echo "  调整上限：.agent/gates.json 的 review.max_rounds（0 = 不限），或 AGENT_GATES_REVIEW_MAX_ROUNDS。" >&2
+  exit 73
+}
+_review_round_check
 
 # --- Main routing ---
 
