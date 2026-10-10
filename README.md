@@ -146,6 +146,24 @@ While the agent works inside a session, agent-gates automatically:
 
 ## What's New
 
+### v2.10.0 — review budget: at most 2 rounds per batch, acceptance on test before review
+
+- **Round cap**: `agent-gates-review` counts rounds per batch (target branch | source branch | merge-base);
+  re-reviewing the same staged state does not count. Beyond `review.max_rounds` (default 2) it exits 73.
+  `--escalated "<diagnosis>"` lets one more round through and records the reason in the artifact.
+  `--due` now also prints `rounds_used` / `rounds_max`.
+- **Standard order before merging into master**: acceptance on test → R1 full-batch review → fix blockers →
+  targeted regression on test → R2 closure round (blockers + fix diff only) → verify → merge. Whether merging
+  into test is reviewed is decided by `strict_branches`: the recommended config leaves `test` out, but the
+  built-in default (used when a repo sets no `strict_branches`) still contains `test/master/main`.
+- **ISSUES only for blockers**: a blocker must name a concrete failure scenario and the acceptance criterion it
+  breaks; suggestions alone mean PASS; "add more edge-case tests" is a suggestion by default.
+- **Review level: heterogeneous > same-family > none**: no specific model is required. A same-family review (L0)
+  passes with a warning; imported reviews are graded by the model that actually produced them; `SKIP_REVIEW=1`
+  is the "none" tier and is printed loudly.
+- **Gate 1 `tests.exempt`**: a glob list that exempts logic-free files from the one-test-file-per-source rule;
+  exempted files are printed, never silently passed.
+
 ### v2.6.0 — the missing link between dispatch and CHECK 6
 
 `hetero_dispatch` wrote only `evidence.json` + `dispatch.json`, while CHECK 6 reads

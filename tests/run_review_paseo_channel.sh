@@ -179,8 +179,11 @@ import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get('requirements
 " "$DISPATCH_JSON" 2>/dev/null)
   assert "verdict_line mentions a bare line" \
     "$(printf '%s' "$req" | grep -q 'VERDICT' && echo true || echo false)"
-  assert "heterogeneous rule excludes claude" \
-    "$(printf '%s' "$req" | grep -qi 'claude' && echo true || echo false)"
+  # v2.10.0「异构 > 同构 > 不查」：规则写优先异构、同族兜底记 L0，⛔ 不再写「不能是 claude」
+  assert "heterogeneous rule prefers heterogeneous, allows same-family fallback as L0" \
+    "$(printf '%s' "$req" | grep -q '异构' && printf '%s' "$req" | grep -q 'L0' && echo true || echo false)"
+  assert "heterogeneous rule no longer forbids claude outright" \
+    "$(printf '%s' "$req" | grep -q '不能是 claude' && echo false || echo true)"
   teardown
 }
 
@@ -247,14 +250,15 @@ test_import_rejects_unknown_agent() {
 }
 
 test_import_rejects_same_model_agent() {
-  echo "T8: agent provider is claude (same model) → rejected (75)"
+  echo "T8: agent provider is claude (same family) → accepted, recorded L0 (v2.10.0)"
   arrange_dispatched
   write_agents_json "claude" "2099-01-01T00:00:00Z" "agent-claude"
   make_review "VERDICT: PASS"
   import_result "$TOKEN" "agent-claude"
-  assert "exit 75" "$([[ $RC2 -eq 75 ]] && echo true || echo false)"
-  assert "error mentions heterogeneous/same-model" \
-    "$(printf '%s' "$ERRTXT" | grep -qiE 'heterogen|same.model|claude' && echo true || echo false)"
+  assert "exit 0" "$([[ $RC2 -eq 0 ]] && echo true || echo false)"
+  assert "recorded REVIEW_LEVEL: L0" "$(grep -q 'REVIEW_LEVEL: L0' "$OUT_FILE" 2>/dev/null && echo true || echo false)"
+  assert "stderr says it is a same-family review" \
+    "$(printf '%s' "$ERRTXT" | grep -qiE 'same-family' && echo true || echo false)"
   teardown
 }
 

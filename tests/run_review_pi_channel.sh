@@ -254,8 +254,9 @@ DOUT=$(mktemp); DGD=$(mktemp -d)
 cp "$SCRIPT_DIR/../$(basename "$(dirname "$LIB")")/../../.version" "$DGD/.version" 2>/dev/null || echo "2.9.3" > "$DGD/.version"
 python3 - "$DGD/hetero-check.json" <<'PY2'
 import json, sys
+# v2.10.0 起建议读配置（不写死型号）⇒ 第二型号来自 panel_pool。
 json.dump({'level': 'L3', 'review_models': {'primary': 'github-copilot/gpt-5.6-sol',
-          'panel_pool': [], 'panel_active': 2, 'panel_mode': 'off'}}, open(sys.argv[1], 'w'))
+          'panel_pool': ['github-copilot/grok-4.5'], 'panel_active': 2, 'panel_mode': 'off'}}, open(sys.argv[1], 'w'))
 PY2
 PMT=$(mktemp); echo "审一下" > "$PMT"
 ( cd "$SCRIPT_DIR/.." && AGENT_GATES_DIR="$DGD" bash bin/agent-gates-review "$PMT" \
@@ -273,7 +274,7 @@ assert "⭐ opencode 不是首选" "$([[ "$SUG" != opencode/* ]] && echo true ||
 # 这份 fixture 没有 channels 键 ⇒ opencode 按默认**关**，所以它不该出现在建议里。
 # 推荐一个操作者已关掉的通道，正是「⛔ 不许用 opencode」被破两次的机制。
 assert "⭐ opencode 关着时不出现在 alternatives 里" \
-  "$([[ "$SUG" != *"opencode/"* ]] && echo true || echo false)"
+  "$([[ "$SUG" != *opencode* ]] && echo true || echo false)"
 # 显式打开时又要出现，且带警告 —— 否则上一条可能只是「永远不列 opencode」而空过。
 DGD2=$(mktemp -d); DOUT2=$(mktemp)
 python3 - "$DGD2/hetero-check.json" <<'PY3'
@@ -292,7 +293,7 @@ s=d.get('suggested',{})
 print(s.get('provider',''), '|', ','.join(s.get('alternatives',[])))
 " "$DOUT2" 2>/dev/null)
 assert "⭐ 显式打开时 opencode 带警告出现在末尾" \
-  "$([[ "$SUG2" == *"opencode/github-copilot/gpt-5.5 (⛔"* ]] && echo true || echo false)"
+  "$([[ "$SUG2" == *"opencode run --pure（⛔"* ]] && echo true || echo false)"
 assert "打开 opencode 也不改首选（仍是 pi）" "$([[ "$SUG2" == pi/* ]] && echo true || echo false)"
 assert "⭐ 给出了无 Paseo agent 的登记命令" "$([[ "$SUG" == *HAS_NOAGENT* ]] && echo true || echo false)"
 

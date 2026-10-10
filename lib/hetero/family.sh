@@ -121,7 +121,8 @@ hetero_model_family() {
     minimax-*|mimo-*)                           echo minimax ;;
     doubao-*|ark-*)                             echo bytedance ;;
     grok-*)                                     echo xai ;;
-    qwen-*|qmodel*)                             echo alibaba ;;
+    # qwen[0-9]*：百炼 token plan 的型号不带连字符（qwen3.8-max）。
+    qwen-*|qwen[0-9]*|qmodel*)                  echo alibaba ;;
     nemotron-*)                                 echo nvidia ;;
     llama-*)                                    echo meta ;;
     mistral-*|mixtral-*)                        echo mistral ;;

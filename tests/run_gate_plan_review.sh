@@ -101,12 +101,14 @@ echo "C3: ⭐ 计划审查结论是 FAIL → 拦住（原先只看标记存不�
   assert "点明审查结论不是 PASS" "$([[ "$out" == *"计划审查的结论是 FAIL"* ]] && echo true || echo false)"
   teardown )
 
-echo "C4: ⭐ L3 机器上的同族(L0)计划审查 → 拦住（自审不算审）"
+echo "C4: ⭐ L3 机器上的同族(L0)计划审查 → 告警放行（v2.10.0：异构 > 同构 > 不查）"
 ( setup
   bash "$PR" .agent/plans/p.md --result review.md --model github-copilot/claude-opus-5 >/dev/null 2>&1
-  out=$(run_gate); rc=$?
-  assert "拦住 (rc=$rc)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
-  assert "点明是同族审查" "$([[ "$out" == *L0* ]] && echo true || echo false)"
+  # 只隔离 CHECK 3：这个夹具暂存了 161 行，没有代码审查产物，CHECK 5 必然要审查证据 ——
+  # 以前 CHECK 3 先拦住，把这一点掩盖了。SKIP_REVIEW=1 让结果只反映 CHECK 3。
+  out=$(SKIP_REVIEW=1 run_gate); rc=$?
+  assert "放行 (rc=$rc)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+  assert "点明是同族审查（告警）" "$([[ "$out" == *L0* && "$out" == *同族* ]] && echo true || echo false)"
   teardown )
 
 echo "C5: ⛔ 向后兼容——旧标记（无哈希无结论）仍然通过，只告警"

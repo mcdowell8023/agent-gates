@@ -146,6 +146,29 @@ agent 在 session 内开发时，agent-gates 自动：
 
 ## 新特性
 
+### v2.10.0 — 审查预算：每批最多 2 轮、先验收后审查
+
+- **轮数上限**：`agent-gates-review` 按「目标分支 | 源分支 | merge-base」计轮，同一份暂存状态重复审只算一轮；
+  超过 `review.max_rounds`（默认 2）exit 73。确需再审加 `--escalated "<诊断结论>"`，理由写进产物。
+  `--due` 追加 `rounds_used` / `rounds_max` 两行。
+- **合进 master 的标准顺序**：test 上验收通过 → R1 整批审查 → 修阻断项 → 部署 test 定向回归 →
+  R2 闭合轮（只核阻断项与修复 diff）→ verify → 合 master。合 test 审不审由 `strict_branches` 决定：推荐配置不含 `test`（见下方示例）；⚠️ 仓库没写 `strict_branches` 时
+  回落到内置默认 `test/master/main`，合 test 仍要审。
+- **阻断才算 ISSUES**：阻断项必须写失败场景并关联验收标准；只有建议写 PASS；补边界测试默认是建议。
+- **审查级别：异构 > 同构 > 不查**：不强制具体模型。同族审查（L0）告警放行；导入的审查按实际模型定级；`SKIP_REVIEW=1` 是「不查」档的出口（醒目打印）。
+- **Gate 1 `tests.exempt`**：glob 列表豁免没有逻辑的文件，命中会打印出来。
+
+```json
+{
+  "mode": "merge-only",
+  "strict_branches": ["master", "main", "prod-*", "release/*"],
+  "review": { "max_rounds": 2 },
+  "tests": { "exempt": ["*.dto.ts", "*.enum.ts"] }
+}
+```
+
+`tests.exempt` 用 bash 模式匹配仓库相对路径，`*` 跨目录（`*.dto.ts` 覆盖任意层级）；⚠️ 不是 gitignore 语义，`src/**/x.ts` 要求中间至少一层目录。
+
 ### v2.6.0 — 补上 dispatch 与 CHECK 6 之间的断链
 
 `hetero_dispatch` 只写 `evidence.json` + `dispatch.json`，而 CHECK 6 读

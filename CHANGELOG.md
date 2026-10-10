@@ -2,6 +2,158 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.10.0 — 审查预算：每批最多 2 轮、先验收后审查、阻断才算 ISSUES
+
+🔴 实况（2026-09-24）：一次合并 6 轮审查、4 个审查 agent，输出约 7 万 token，cached 读约
+2334 万 token，合计约 $32。大头是长会话反复重读上下文；轮数也没有上限。「迭代期别审」的规则
+早就写着，09-10 照样派出 11 个 agent —— 只写规则拦不住。
+
+### ⚠️ Behavior change：每批审查默认最多 2 轮
+
+- `agent-gates-review` 按批次计轮：批次 = 目标分支 | 源分支 | merge-base(HEAD, MERGE_HEAD)；
+  共享库里同批次产物按 `REVIEW_DIFF_SHA256` 去重计数（同一份暂存状态重复审只算一轮）。
+- 超过 `review.max_rounds`（默认 2）⇒ **exit 73**。直跑、`--route paseo` 派发（被拒时不签发 token）、
+  `--import-result` 三条路径都拦。
+- 出路：`--escalated "<诊断结论>"`（理由写进产物 `REVIEW_ESCALATED`），或 `review.max_rounds: 0` /
+  `AGENT_GATES_REVIEW_MAX_ROUNDS` 调整上限。
+- 产物新增 `REVIEW_BATCH` / `REVIEW_ROUND` 标记；无标记的历史产物不计数。
+- `--due` 契约不变（exit 0/79），追加 `rounds_used=` / `rounds_max=` 两行（恒为数字），给自己直接派
+  Paseo 的派发侧在花钱前判断。`--due --escalated` 互斥。
+- 实例用 merge-base 而不是只看分支名：否则同一对分支第二次合并开局就超限（计划审查抓到的阻断项）。
+- ⚠️ 预算护栏不是安全边界：分支改名、detached merge、功能分支把 master 合进来都会让计数重置。
+
+### 审查级别：异构 > 同构 > 不查（用户 2026-10-11 定，不强制具体模型）
+
+- CHECK 3、CHECK 5（Gate 2b）遇到同族审查（L0）改为**告警放行**，不再阻断；缺 `REVIEW_LEVEL` 标记仍阻断
+  （那是产物完整性问题）。
+- `SKIP_REVIEW=1` 真的生效了：skill 与 README 一直写着它，hook 从没读过。只跳 CHECK 5，醒目打印。
+- 导入的审查按**实际模型**定级（审查者族 ≠ 实现者族 ⇒ 本机级别，否则 L0），三条导入路径共用一个函数；
+  Paseo 已验证 agent 不再因 provider 是 claude 就 exit 75，先看 Model 的族、认不出再看 Provider。
+- CHECK 5 同一 diff 有多份 PASS 时优先选异构那份，免得已有异构审查却打同族告警。
+- 派发建议改读 `hetero-check.json` 的审查模型配置（`hetero_models` 优先），不再写死已移除的
+  github-copilot 型号；`requirements.heterogeneous` 改为「优先异构，同族兜底记 L0」。
+- 顺带修了测试夹具：`write_anchored_review` 用 `${3:-L0}` 把空串也换成 L0，T11「缺标记」实际测的一直是 L0。
+
+### Gate 1：`tests.exempt`
+
+- `.agent/gates.json` 的 `tests.exempt`（glob 列表，`*` 跨目录）豁免 DTO、枚举这类没有逻辑的文件；
+  命中的文件会打印出来，不静默放行。不配置时行为不变。
+- 项目配置整份优先于用户配置；不是列表 ⇒ 告警并当作没配（⛔ 标量读取器会把列表读成 Python repr，
+  glob 永远不命中）。
+- Path A 的 CHECK 2（`.feature`）与 CHECK 6 需求矩阵不受影响。
+
+### skill 文本
+
+- `agent-review-protocol`：合并点默认**单个异构审查员**（三 Agent 流水线只在用户明确要求时用）；
+  跑法用一次性 CLI、只喂 diff 与需求文档；阻断项必须写失败场景并关联验收标准，`VERDICT: ISSUES`
+  当且仅当有阻断项；「补边界测试」默认是建议；合 master 标准顺序（验收 → R1 → 修 → test 定向回归 →
+  R2 闭合轮 → verify）；R2 闭合轮模板（§9.5）；不收敛诊断表与上报模板（§4、§9.6）。
+- `agent-workflow-rules`：§2.6 补「合 test 审不审由 strict_branches 决定（推荐不含 test，内置默认仍含）」与轮数上限；§7 计划审查最多 2 轮。
+
+### 内部
+
+- `sha256_stream` / `review_staged_*` / `artifact_store_dir` 上移到 `--due` 退出点之前（`--due` 要用它们算
+  rounds，原位置在退出点之后，计划审查抓到的阻断项）。
+- 新测试 `tests/run_review_rounds.sh`（52 条）、`tests/run_gate_test_exempt.sh`（14 条）、`tests/run_review_level_policy.sh`（23 条）、`tests/run_gate_skip_review.sh`（8 条）。
+- `lib/hetero/family.sh` 认 `qwen3.8-max` 这类不带连字符的型号（原来只认 `qwen-*`，百炼 token plan 的审查会被记成 L0）。
+- `--route paseo` 派发时的 `--escalated` 理由存进 `record.json`，导入时据此放行同一轮（代码审查抓到：否则花了钱的第 3 轮登记不进去）。
+
+## v2.9.10 — 后一轮 PASS 取代前一轮 FAIL；单维 off 真的生效；CHECK 6 报错指路
+
+🔴 一线实测被卡（2026-09-11）：第三轮审查是 PASS 且 `REVIEW_DIFF_SHA256` 与 commit
+**完全匹配**，门禁却选中了第二轮那份 FAIL（锚点早已失效）。
+
+后果不只是卡一次：**只要同一个 HEAD 上存在过一份 FAIL，CHECK 5 就永远过不去**，
+除非把那份产物删掉 —— 等于在教人删审查记录，门禁自己破坏审查链的完整性。
+而「修完再审一轮」本来就是设计里的正常流程。
+
+### 1. 取代逻辑
+
+根因：两个分支不对称 —— PASS 分支查 `REVIEW_DIFF_SHA256`，**FAIL 分支一句都不查**，
+而决策处又无条件先看 FAIL。
+
+后一轮 PASS 精确命中当前 staged diff 时，清掉那份锚在旧状态的 FAIL 并**打印取代说明**。
+
+⛔ 三条不能放松（`tests/run_gate_review_select.sh` T2/T3/T4/T4b 锁住）：
+
+| 场景 | 必须 |
+|---|---|
+| 过期 PASS + 命中当前 diff 的 FAIL | **拦** |
+| 同一份 diff 上 FAIL 与 PASS 并存 | **拦**（fail-closed） |
+| 过期 FAIL + **过期** PASS | **拦**（没有任何产物绑定当前 diff 时行为一字不变） |
+
+⚠️ 最后那条是**真正的绕过路径**：拿到 FAIL 后随便改一行（锚点即失效），再拿一份更早的
+过期 PASS 顶上。第一轮测试没覆盖，是**变异测试**逼出来的 —— 当时的断言只写「还是红的」，
+而摘掉条件后 FAIL 被清掉、倒在「缺 PASS 结论」上，仍是红但原因变了。
+⇒ 断言要钉**拦的理由**，不是「拦了没有」。
+
+### 2. 结论解析：只做两处最小收紧
+
+⚠️ 本版**没有**把结论解析整体换成 `lib/hetero/conclusion.sh`。那次尝试连着三轮异构审查
+都 FAIL（代码围栏、`1. VERDICT:` 这类前缀、token 词边界、聚合层否决，四个方向各有洞），
+已整体拆到独立分支单独设计。**这里的目标只有一个：不要让新增的取代逻辑把既有的解析
+缺陷放大成可利用的绕过。**
+
+收紧两点：
+
+- ⭐ PASS 必须**整行只有取值**（行尾锚定）⇒ `VERDICT: PASS_WITH_ISSUES` /
+  `PASSENGER` / `APPROVED_WITH_CONDITIONS` 不再被前缀匹配成干净 PASS。
+  ⛔ 这条是必须的：取代逻辑会让它清掉一份真 FAIL。
+- ⭐ 干净 PASS 的行数必须等于全部 `^VERDICT:` 行数 ⇒「脏结论 + 干净 PASS」同文件时
+  不算干净 PASS（两位独立审查者都点了这个组合）。
+
+被跳过时会**打印原因**（有几条 VERDICT 行、其中干净 PASS 几条），否则作者只看到
+「没有审查证据」，而他明明写了 VERDICT。
+
+**⛔ 本版已知不覆盖**（既有缺陷，不比今天更差，已拆分支）：
+
+- 装饰写法 `**VERDICT: FAIL**` / `## VERDICT: PASS` / 全角冒号 / `1. VERDICT:` 看不见
+- 代码围栏里的 `VERDICT: PASS` 会被当成真结论
+- `REVISE` 等规范词表取值不在内联 FAIL 集合中
+- 当前 diff 上的「结论不明」产物**不会否决**另一份当前 PASS
+- `REVIEW_LEVEL` 可在正文伪造从而绕过 Gate 2b
+
+`run_gate_review_select.sh` 里为其中两条留了**现状快照断言** —— 改动时会变红，提醒去看拆出去那块。
+
+### 3. `review.mode` / `verify.mode` = `off` 此前完全没被认
+
+实测门禁自己打印 `review=off, verify=off`，**然后两个都照样拦**：
+
+```
+ℹ️  Agent Quality Gate mode: strict (…) — review=off, verify=off
+❌ GATE: No content-anchored review evidence covers the staged change
+❌ GATE: No verifier evidence (.agent/verify/ missing)
+```
+
+源码里 `merge-only` 和 `relaxed` 各有处理，**`off` 只在需求矩阵那一处生效**。
+⚠️ 而 `bin/agent-gates-review --due` 是认 `review.mode=off` 的 ⇒ **两边口径分叉**：
+CLI 说「现在不用审」，门禁说「没有审查证据，拒绝提交」。这类分叉的失败长得像
+「配置没生效」。⛔ `off` 的处理排在 `strict_branches` override **之后** —— 那里强制
+strict，`off` 顶不掉它（`run_gate_dimension_off.sh` T4 锁住）。
+
+### 4. CHECK 6 的报错现在指出 `agent-gates-verify-import`
+
+verify 用 `pi -p` 直跑本身没错（快且便宜），但门禁只说「证据缺失」，两条报错都没提那个
+导入工具，其中一条还说「存到 `.agent/verify/<date>-<topic>.md`」——**照做还是过不去**，
+因为 CHECK 6 要的是 `VERIFY_VERDICT` 文档 **加** 一份 `staged_diff_hash` 绑定当前 diff 的
+dispatch 记录，手写文件产不出锚点。那条会话只能自己 `ls ~/.agent-gates/bin/` 翻。
+
+⚠️ 我第一版把提示写成 `--topic <name>` —— **那个参数不存在**，工具只认
+`--imported-model` / `--paseo-agent`。⇒ 测试里加了一条：把提示里出现的每个 `--xxx`
+逐个对照工具真实 usage。
+
+### ⚠️ 这一版里我自己犯的、值得记下来的
+
+- **`grep -c` 打印计数但计数为 0 时退出码非零** —— 当天第三次踩。
+  `run_gate_reported_bugs.sh` 的 BUG 1 就是这个形状，仓库里早有守卫。
+- **按文本区间回退时误删了无关的 `_gate_artifact_store_dir`** —— 切之前没核对区间里还有什么。
+  症状是全部测试一起红，反而好查。
+- **变异测试连着三次没打中**：一次替换字符串没匹配（脚本没校验命中），
+  两次打在**互为冗余**的条件上（拿掉任一条行为都不变）。⇒ 变异必须 assert 已应用，
+  且要确认打的是**唯一**的那道守卫。
+
+---
+
 ## v2.9.9 — 审查的**时机**：轮不到就别审
 
 🔴 实况（2026-09-10，另一条会话自己算的账）：任务拆成小块并行开发，它**每修一小条就派

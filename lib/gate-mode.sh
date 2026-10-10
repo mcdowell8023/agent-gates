@@ -86,6 +86,39 @@ _gate_branch_is_strict() {
   return 1
 }
 
+# 读一个**列表**配置项，每行一个元素；项目配置整份优先于用户配置（项目里有这个列表就不看用户级）。
+# ⛔ 不能用 _gate_cfg_get：它对列表打印 Python repr（`['src/dto/*']`），glob 永远不命中，
+#    配置静默失效 —— 本仓反复吃过的「配置没生效」。不是列表 ⇒ 告警并当作没配。
+_gate_cfg_list() {   # <dotted.path>
+  local f out
+  for f in "$_GATE_CFG_PROJECT" "$_GATE_CFG_USER"; do
+    [[ -f "$f" ]] || continue
+    out=$(python3 -c '
+import json,sys
+try:
+    cur = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+for k in sys.argv[2].split("."):
+    if not isinstance(cur, dict): sys.exit(0)
+    cur = cur.get(k)
+    if cur is None: sys.exit(0)
+if not isinstance(cur, list):
+    sys.stderr.write("⚠️  %s in %s must be a list — ignored\n" % (sys.argv[2], sys.argv[1]))
+    sys.exit(0)
+print("@found")
+for x in cur:
+    if isinstance(x, str) and x.strip(): print(x.strip())
+' "$f" "$1")
+    # 找到列表就停（哪怕是空列表）：项目显式写 [] 表示「不豁免」，⛔ 不能回落去继承用户级。
+    if [[ "$out" == "@found"* ]]; then
+      out="${out#@found}"; out="${out#$'\n'}"
+      printf '%s' "$out"; return 0
+    fi
+  done
+  return 0
+}
+
 _gate_resolve_project_cfg() {
   local rel=".agent/gates.json"
   [[ -f "$rel" ]] && { printf '%s' "$rel"; return 0; }
