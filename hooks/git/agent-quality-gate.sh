@@ -379,13 +379,12 @@ if [[ "${SKIP_PLAN_CHECK:-0}" != "1" ]] && [[ -d .agent/plans ]]; then
           esac
         fi
 
-        # Same-model plan review on a machine that can do better. Mirrors CHECK 5's
-        # REVIEW_LEVEL check: the implementer has a blind spot about its own plan, so a
-        # review by its own family is not a review.
+        # Same-family plan review on a machine that can do better. v2.10.0：用户规则
+        # 「异构 > 同构 > 不查」—— 同族审查是合法的兜底档，告警放行、记录在案，不再阻断。
+        # 异构优先靠工具路由与 skill 规则保证；不审计划的出口是 SKIP_PLAN_CHECK=1。
         if [[ "$_pr_level" == "L0" && "$PLAN_CAP_LEVEL_EARLY" != "L0" ]]; then
-          _this_problem="${_this_problem:+$_this_problem
-}计划审查是同族的 (PLAN_REVIEW: L0) 而本机支持异构 (${PLAN_CAP_LEVEL_EARLY}) —— 换一个不同族的模型重审
-   审查者: ${_pr_model:-<未记录>}"
+          _this_warn="${_this_warn:+$_this_warn
+   }计划审查是同族的 (PLAN_REVIEW: L0)，本机支持异构 (${PLAN_CAP_LEVEL_EARLY}) —— 按「异构 > 同构 > 不查」放行，记录在案（审查者: ${_pr_model:-<未记录>}）"
         fi
 
         PLAN_REVIEWED=1
@@ -456,6 +455,12 @@ if [[ "${SKIP_PLAN_CHECK:-0}" != "1" ]] && [[ -d .agent/plans ]]; then
   fi
 fi
 
+# 产物是否异构（REVIEW_LEVEL 为 L1-L3）。取最后一个标记：标记追加在正文之后。
+_gate_rf_is_hetero() {
+  [[ -n "${1:-}" && -f "$1" ]] || return 1
+  grep -oE 'REVIEW_LEVEL:[[:space:]]*L[0-3]' "$1" 2>/dev/null | tail -1 | grep -qE 'L[1-3]'
+}
+
 # === Gate 2: Cross-review evidence ===
 # (LOGIC_FILES / MAX_SINGLE_FILE_LINES already computed above for CHECK 3)
 # Trigger: (multi-file AND substantial change) OR single-file massive change
@@ -478,6 +483,14 @@ fi
 
 if [[ "$NEEDS_REVIEW" -eq 1 && "$GATE_REVIEW_MODE" == "merge-only" ]]; then
   echo "ℹ️  CHECK 5 skipped: review mode is merge-only — deferred until this work merges into a strict branch (${_GATE_BRANCH:-?} is not one)"
+  NEEDS_REVIEW=0
+fi
+
+# SKIP_REVIEW=1（v2.10.0）：「异构 > 同构 > 不查」的最后一档。skill 与 README 一直写着这个
+# 出口，hook 却从没读过它 —— 同构也跑不了时只能卡死。⛔ 只跳 CHECK 5，CHECK 6 照旧
+# （它有自己的 SKIP_VERIFY）；⛔ 必须醒目打印，报告里也要写明。
+if [[ "$NEEDS_REVIEW" -eq 1 && "${SKIP_REVIEW:-0}" == "1" ]]; then
+  echo "⚠️  CHECK 5 skipped: SKIP_REVIEW=1 —— 「不查」档（异构 > 同构 > 不查 的最后一档）。只在同构审查也跑不了时用，报告里必须写明"
   NEEDS_REVIEW=0
 fi
 
@@ -583,7 +596,14 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
         echo "     ⛔ 带限定词的（PASS_WITH_ISSUES、PASS but …）不算通过，同一份产物也不要混多条。"
       elif [[ "$rf_npass" -gt 0 && "$rf_npass" -eq "$rf_nverdict" ]]; then
         if [[ "$rf_diff_sha256" == "$CURRENT_REVIEW_DIFF_SHA256" ]]; then
-          PASS_REVIEW_FILE="$rf"
+          # 同一 diff 有多份 PASS：已选中的是异构（L1+）而这份不是 ⇒ 保留已选的，
+          # 免得已有异构审查却打出同族告警（v2.10.0）。
+          if [[ "$REVIEW_DIFF_MATCH" -eq 1 ]] \
+             && _gate_rf_is_hetero "$PASS_REVIEW_FILE" && ! _gate_rf_is_hetero "$rf"; then
+            :
+          else
+            PASS_REVIEW_FILE="$rf"
+          fi
           REVIEW_DIFF_MATCH=1
         elif [[ -z "$PASS_REVIEW_FILE" ]]; then
           PASS_REVIEW_FILE="$rf"
@@ -680,8 +700,10 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
               if grep -q '<!-- HETERO_EXHAUSTED:' "$REVIEW_FILE" 2>/dev/null; then
                 echo "⚠️  Gate 2b: HETERO_EXHAUSTED — all heterogeneous review models failed; degrading to warn"
               else
-                fail "Review is same-model (REVIEW_LEVEL: L0) but machine supports heterogeneous ($CAP_LEVEL)"
-                echo "   Fix: re-run cross-review via a different model."
+                # v2.10.0：「异构 > 同构 > 不查」—— 同族审查告警放行、记录在案，不再阻断。
+                # ⚠️ 缺 REVIEW_LEVEL 标记（上一个分支）仍然阻断：那说明产物不是工具产出的，
+                #    是产物完整性问题，与选什么模型无关。
+                echo "⚠️  Gate 2b: review is same-family (REVIEW_LEVEL: L0) although this machine supports heterogeneous ($CAP_LEVEL) — allowed under 异构 > 同构 > 不查, recorded: $REVIEW_FILE"
               fi
             fi
           fi

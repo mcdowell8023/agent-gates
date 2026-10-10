@@ -22,6 +22,18 @@ All notable changes to agent-gates will be documented in this file.
 - 实例用 merge-base 而不是只看分支名：否则同一对分支第二次合并开局就超限（计划审查抓到的阻断项）。
 - ⚠️ 预算护栏不是安全边界：分支改名、detached merge、功能分支把 master 合进来都会让计数重置。
 
+### 审查级别：异构 > 同构 > 不查（用户 2026-10-11 定，不强制具体模型）
+
+- CHECK 3、CHECK 5（Gate 2b）遇到同族审查（L0）改为**告警放行**，不再阻断；缺 `REVIEW_LEVEL` 标记仍阻断
+  （那是产物完整性问题）。
+- `SKIP_REVIEW=1` 真的生效了：skill 与 README 一直写着它，hook 从没读过。只跳 CHECK 5，醒目打印。
+- 导入的审查按**实际模型**定级（审查者族 ≠ 实现者族 ⇒ 本机级别，否则 L0），三条导入路径共用一个函数；
+  Paseo 已验证 agent 不再因 provider 是 claude 就 exit 75，先看 Model 的族、认不出再看 Provider。
+- CHECK 5 同一 diff 有多份 PASS 时优先选异构那份，免得已有异构审查却打同族告警。
+- 派发建议改读 `hetero-check.json` 的审查模型配置（`hetero_models` 优先），不再写死已移除的
+  github-copilot 型号；`requirements.heterogeneous` 改为「优先异构，同族兜底记 L0」。
+- 顺带修了测试夹具：`write_anchored_review` 用 `${3:-L0}` 把空串也换成 L0，T11「缺标记」实际测的一直是 L0。
+
 ### Gate 1：`tests.exempt`
 
 - `.agent/gates.json` 的 `tests.exempt`（glob 列表，`*` 跨目录）豁免 DTO、枚举这类没有逻辑的文件；
@@ -42,7 +54,7 @@ All notable changes to agent-gates will be documented in this file.
 
 - `sha256_stream` / `review_staged_*` / `artifact_store_dir` 上移到 `--due` 退出点之前（`--due` 要用它们算
   rounds，原位置在退出点之后，计划审查抓到的阻断项）。
-- 新测试 `tests/run_review_rounds.sh`（52 条）、`tests/run_gate_test_exempt.sh`（14 条）。
+- 新测试 `tests/run_review_rounds.sh`（52 条）、`tests/run_gate_test_exempt.sh`（14 条）、`tests/run_review_level_policy.sh`（23 条）、`tests/run_gate_skip_review.sh`（8 条）。
 - `lib/hetero/family.sh` 认 `qwen3.8-max` 这类不带连字符的型号（原来只认 `qwen-*`，百炼 token plan 的审查会被记成 L0）。
 - `--route paseo` 派发时的 `--escalated` 理由存进 `record.json`，导入时据此放行同一轮（代码审查抓到：否则花了钱的第 3 轮登记不进去）。
 

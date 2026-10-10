@@ -158,6 +158,9 @@ While the agent works inside a session, agent-gates automatically:
   built-in default (used when a repo sets no `strict_branches`) still contains `test/master/main`.
 - **ISSUES only for blockers**: a blocker must name a concrete failure scenario and the acceptance criterion it
   breaks; suggestions alone mean PASS; "add more edge-case tests" is a suggestion by default.
+- **Review level: heterogeneous > same-family > none**: no specific model is required. A same-family review (L0)
+  passes with a warning; imported reviews are graded by the model that actually produced them; `SKIP_REVIEW=1`
+  is the "none" tier and is printed loudly.
 - **Gate 1 `tests.exempt`**: a glob list that exempts logic-free files from the one-test-file-per-source rule;
   exempted files are printed, never silently passed.
 

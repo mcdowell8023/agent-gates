@@ -35,7 +35,7 @@ Instead of manually choosing a review tool, use the unified review command:
 
 It reads `~/.agent-gates/review-capability.json`, routes to the best available heterogeneous tool (pi first since v2.4.0; opencode is disabled by default — see the priority table in §8), and auto-appends `REVIEW_TOOL` / `REVIEW_MODEL` / `REVIEW_LEVEL` markers to the output. On L0 machines (no heterogeneous tool) it exits 78 — caller falls back to same-model agent-tool.
 
-**Use this command instead of spawning a Claude subagent for review.** On L1+ machines, using a same-model subagent violates the heterogeneous-review requirement (红线 #8).
+**Use this command instead of spawning a Claude subagent for review.** 审查级别按「异构 > 同构 > 不查」选（§8）：异构通道可用时就别用同模型子 agent；异构都不可用时，同模型独立会话审查是合法兜底，会记 L0、门禁告警放行。
 
 #### ⛔ 审查失败时：先读 `review-fail[<模型>]:` 那一行
 
@@ -58,7 +58,7 @@ v2.0.2 起每种失败单独报一行。`HETERO_EXHAUSTED` 只是汇总，**本�
 
 ```bash
 SKIP_VERIFY=1 git commit ...      # 跳过 CHECK 6
-SKIP_REVIEW=1 git commit ...      # 跳过 CHECK 5
+SKIP_REVIEW=1 git commit ...      # 跳过 CHECK 5（v2.10.0 起 hook 才真的读它；也是「不查」档的出口）
 agent-gates-verify-ack <run-id>   # 给 INCOMPLETE 的 verify 记录用户放行（⚠️ 4 小时时效）
 ```
 
@@ -231,7 +231,7 @@ Cross-check MUST use a different model/vendor. Priority order:
 > 审查者只读是硬规则：它的产出是判断，不是补丁。
 | 2. **codex CLI + GPT-5 series** (备选) | Two sub-commands (see below) | pi 不可用，或 prompt 过长 |
 | 3. 🔻 **opencode CLI**（降级，需显式启用） | `opencode run --pure -m <provider/model> --dir <workdir> --format json "<prompt>"` | ⛔ **默认不要用**——见下方红字。仅在 pi 与 codex 都不可用时 |
-| 4. **code-reviewer / critic agent** (兜底) | Same Claude model, different agent role | **Only when 1–3 are genuinely unavailable** (true L0 machine). NOT a shortcut when a heterogeneous tool is installed — see §8 "L0 Fallback is a VIOLATION When L1+ is Available". |
+| 4. **code-reviewer / critic agent**（同构兜底） | Same Claude model, different agent role | **只在 1–3 的异构通道都用不了时**（额度用完、未登录、真 L0 机器）。产物记 L0、门禁告警放行；⛔ 不是异构可用时图省事的捷径 —— 见 §8「异构 > 同构 > 不查」。 |
 
 ### ⛔ 为什么 opencode 从首选降到第 3（2026-08-26）
 
@@ -381,9 +381,9 @@ If Priority #1 (opencode CLI) times out or errors:
 ### Non-Negotiable
 
 - Cross-check failure → fix → re-verify. Never skip.
-- Self-review by the same agent/model that wrote the code does NOT count.
+- 实现会话自己的自评不算审查；另开会话的同族审查是合法兜底（记 L0、告警放行），见 §8「异构 > 同构 > 不查」。
 - Evidence of cross-check must be available (reviewer output, pass/fail).
-- Same-model same-agent self-review violates 红线 #8.
+- 同一会话的自评违反红线 #8（「不同模型/agent」）；同族模型的独立会话属于「不同 agent」。
 
 ### Relationship to Three-Agent Pipeline
 
@@ -940,28 +940,25 @@ Each route has a default timeout. When exceeded, the agent automatically falls t
 | Paseo (L1) | 5 minutes | Async; agent polls for completion |
 | Agent tool (L0) | No timeout | Runs in-process |
 
-### L0 Fallback is a VIOLATION When L1+ is Available (⛔)
+### 审查级别：异构 > 同构 > 不查（v2.10.0，用户 2026-10-11 定）
 
-The Agent-tool / same-model fallback (L0) is **only** acceptable on a genuine L0 machine — one where `review-capability.json` reports `level: L0` because no opencode/codex/OMC-plugin is installed. 
+⛔ **不强制具体模型**。只按这个顺序选，能用前一档就不用后一档：
 
-**If the machine's capability is L1 or higher, using the L0 same-model fallback is a VIOLATION of the different-model requirement (红线 #8), not an acceptable degradation.** "opencode hung once before" / "it's faster to just spawn a sub-agent" are NOT valid reasons to skip heterogeneous review when a heterogeneous tool is installed. Spawning `general-purpose` / `oracle` with no model override on an Opus session = Opus reviewing Opus = same model = does not count.
+| 档 | 是什么 | 门禁怎么对待 |
+|---|---|---|
+| 1. 异构（L1+） | 审查者与实现者不同族（按 `lib/hetero/family.sh` 判，实现者族默认 `implementer_family`，可用 `HETERO_IMPLEMENTER_FAMILY` 覆盖） | 放行 |
+| 2. 同构（L0） | 同族模型、但在**独立会话 / agent** 里审；异构通道都不可用（额度用完、未登录）时用 | **告警放行**，产物记 `REVIEW_LEVEL: L0`，报告里写明为什么没用异构 |
+| 3. 不查 | 同构也跑不了 | `SKIP_REVIEW=1`（CHECK 5）、`SKIP_PLAN_CHECK=1`（CHECK 3）；门禁醒目打印，报告里写明 |
 
-Real-world finding (2026-06-02 transcript mining): ~90% of cross-review sessions on L2/L3 machines silently fell back to same-model. That is why this is now physically enforced (below), not just convention.
-
-### Physical Enforcement (v1.7.0)
-
-The CLI pre-commit gate (`agent-quality-gate.sh`) reads `review-capability.json` and **blocks the commit** when:
-- machine capability is `L1`/`L2`/`L3`, AND
-- the latest review file has `REVIEW_LEVEL: L0` **or no `REVIEW_LEVEL` marker at all**.
-
-So on any machine with opencode/codex installed, a review file MUST carry a `<!-- REVIEW_LEVEL: L1 -->` (or higher) header proving a different model was used. A true L0 machine is exempt (no alternative exists).
-
-- Escape hatch (genuine exceptions only — stale config, emergency): `SKIP_HETERO_CHECK=1`.
-- `REQUIRE_HETEROGENEOUS=1` is the agent-side equivalent for the in-session review flow (treat L0 as fail, not degraded pass).
-
-**How to fix L0**: Install at least one external review tool to reach L1+:
-- Fastest: `npm install -g @openai/codex` (L1 — GPT cross-review)
-- Best: install opencode CLI from https://opencode.ai (L2 — multi-provider)
+- 实现会话**自己的自评不是审查**，任何一档都不算 —— 同构指的是另开一个会话审。
+- 导入的审查按 `--imported-model` / 已验证 agent 的**实际模型**定级，不再按本机能力级别；
+  Paseo 已验证 agent 先看 Model 的族、认不出再看 Provider。⛔ 不按 provider 名字一刀切：
+  实现者是 OpenAI 族时，Claude 审查恰恰是异构。
+- 缺 `REVIEW_LEVEL` 标记仍然阻断：工具产出的产物都带这个标记，缺它说明产物不是工具产出的，
+  是完整性问题，与选什么模型无关。
+- 选型时先探测再选：撞到 429 / 未登录就换下一个异构通道，都不行才降到同构。
+  ⛔ 不要因为「上次某通道卡过」「派个同模型子 agent 更快」就跳过异构 ——
+  2026-06 的会话统计里，L2/L3 机器上约 90% 的交叉审查悄悄退回了同模型，这是要避免的。
 
 ### hetero-check Dispatch (v2.0.0 — Verifier / CHECK 6)
 
