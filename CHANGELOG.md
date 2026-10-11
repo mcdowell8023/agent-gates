@@ -24,6 +24,7 @@ All notable changes to agent-gates will be documented in this file.
 
 ### 审查级别：异构 > 同构 > 不查（用户 2026-10-11 定，不强制具体模型）
 
+- 交叉审查改为**推荐、不强制**（`agent-review-protocol` §1 原写 MUST / Never skip）：用户明确从一开始就是推荐异构审查，token 有限按实际取舍；测试与编译验证照常必须跑。
 - CHECK 3、CHECK 5（Gate 2b）遇到同族审查（L0）改为**告警放行**，不再阻断；缺 `REVIEW_LEVEL` 标记仍阻断
   （那是产物完整性问题）。
 - `SKIP_REVIEW=1` 真的生效了：skill 与 README 一直写着它，hook 从没读过。只跳 CHECK 5，醒目打印。

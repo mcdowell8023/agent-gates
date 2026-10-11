@@ -16,14 +16,17 @@ Code review quality enforcement for AI-assisted development. This skill defines 
 
 ---
 
-## 1. Cross-Check Rule (⛔ Hard Constraint)
+## 1. Cross-Check Rule（推荐，不强制）
 
-All completed development and documentation MUST be independently verified by a different model/agent before delivery.
+完成的开发与文档**推荐**交给另一个模型 / agent 独立复核后再交付。用户 2026-10-11 明确：从一开始就是推荐异构审查，
+不是强制；token 有限，按实际取舍。选档顺序见 §8「异构 > 同构 > 不查」。测试、编译等验证不在此列，照常必须跑。
 
-| Work type | Required cross-check |
+| Work type | Recommended cross-check |
 | --- | --- |
-| Code (feature / bugfix / refactor) | Different model/agent does code review + runs tests |
+| Code (feature / bugfix / refactor) | Different model/agent does code review（测试照常由实现者跑） |
 | Documentation | Different model/agent checks accuracy, completeness, actionability |
+
+⚠️ 门禁层面：合进 strict 分支时 CHECK 5 默认要一份审查产物；决定不查时用 `SKIP_REVIEW=1`，门禁会醒目打印。
 
 ### Recommended: `agent-gates-review` (v1.10.0+)
 
@@ -378,9 +381,10 @@ If Priority #1 (opencode CLI) times out or errors:
 3. If codex also unavailable → fall through to Priority #3 (code-reviewer agent).
 4. Document which tool was actually used in the review evidence.
 
-### Non-Negotiable
+### 做了审查时必须守住的
 
-- Cross-check failure → fix → re-verify. Never skip.
+- 审查给出阻断项 → 修 → 按 §2.5 走 R2 闭合轮；⛔ 不能拿着 ISSUES 结论当没审过
+- 没做审查（不查档）时报告里写明原因，⛔ 不要声称「已审查」
 - 实现会话自己的自评不算审查；另开会话的同族审查是合法兜底（记 L0、告警放行），见 §8「异构 > 同构 > 不查」。
 - Evidence of cross-check must be available (reviewer output, pass/fail).
 - 同一会话的自评违反红线 #8（「不同模型/agent」）；同族模型的独立会话属于「不同 agent」。
