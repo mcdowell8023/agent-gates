@@ -107,7 +107,7 @@ echo "M8: ⭐ status 与门禁对同一份配置判定一致（防解析逻辑�
     sout=$(run_status)
     for m in relaxed merge-only; do
       if [[ "$gout" == *"$m"* ]]; then
-        assert "配置 $cfg: 门禁提到 $m，status 也提到" "$([[ "$sout" == *"$m"* ]] && echo true || echo false)"
+        assert "配置 $cfg: 门禁提到 ${m}，status 也提到" "$([[ "$sout" == *"$m"* ]] && echo true || echo false)"
       fi
     done
     git reset -q; rm -f migration/002.sql

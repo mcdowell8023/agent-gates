@@ -2,6 +2,17 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.10.2 — `$变量` 紧跟中文逗号：门禁 CHECK 6 会崩、M8 测试从没跑过
+
+实测（macOS `/bin/bash` 3.2，`LC_ALL=C.UTF-8` / `en_US.UTF-8` / `zh_CN.UTF-8`）：`"申报 $X，"` 里
+bash 把中文逗号的首字节吃进变量名，`set -u` 下报 `X�: unbound variable` 当场退出；`LC_ALL=C` 下正常。
+
+- 🔴 `hooks/git/agent-quality-gate.sh` CHECK 6「申报结论与矩阵推导不一致」那行告警：一旦走到，
+  门禁（`set -euo pipefail`）直接崩掉，告警打不出来。改成 `${VERIFY_VERDICT}`。
+- `tests/run_status_modes.sh:110`：M8 段因此从没跑过，脚本照样报全绿（修前 12 条、修后 16 条）。
+- `tests/run_gate_reported_bugs.sh` 新增 BUG 3：扫描全部受管脚本，不许 `$变量` 后紧跟非 ASCII；
+  不给任何文件开豁免。这条检查原本在已删除的 `fix/status-asks-reaper` 分支里。
+
 ## v2.10.1 — Gate 1 接受 `<name>.<suffix>.spec.<ext>`
 
 > 9 月 7 日完成于 `fix/gate-accept-suffixed-spec`，当时按 v2.9.1 写；2026-10-12 合入时 main 已到 2.10.0，改记 2.10.1。

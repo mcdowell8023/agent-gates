@@ -75,6 +75,18 @@ assert "⭐ 不再误判成 strict" \
 cd - >/dev/null
 
 echo
+echo "--- BUG 3: \$变量 后紧跟中文 ⇒ UTF-8 下 unbound variable ---"
+# 实测（2026-10-12，macOS /bin/bash 3.2，LC_ALL=C.UTF-8 / en_US.UTF-8 / zh_CN.UTF-8）：
+# bash 把紧跟在变量名后的多字节字符的首字节吃进变量名，`set -u` 下当场退出。
+#   · tests/run_status_modes.sh 的 M8 段因此从没跑过，脚本照样报全绿
+#   · 门禁 CHECK 6 那行告警一旦走到，门禁直接崩掉（它开着 set -euo pipefail）
+# 修法是写成 ${VAR}。这里扫全部受管脚本，⛔ 不给任何文件开豁免 ——
+# 给自己开豁免正是同类 bug 溜进来的方式。（正则里没有可执行的坏写法，本文件自己也在扫描范围内。）
+_cjk_hits=$(cd "$SCRIPT_DIR/.." && git ls-files '*.sh' 'bin/*' 'hooks/*' 2>/dev/null \
+  | xargs perl -ne 'print "$ARGV:$.\n" if /(?<!\\)\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]/; close ARGV if eof' 2>/dev/null)
+assert "没有 \$变量 紧跟非 ASCII 的写法${_cjk_hits:+（命中: $(printf '%s' "$_cjk_hits" | tr '\n' ' ')）}" \
+  "$([[ -z "$_cjk_hits" ]] && echo true || echo false)"
+echo
 read -r P F < "$RESULTS_FILE"
 echo "PASS=$P FAIL=$F"
 rm -f "$RESULTS_FILE"

@@ -1171,7 +1171,7 @@ except Exception:
                     _v6_derived=$(reqmatrix_reconcile_verdict "$VERIFY_FILE" 2>/dev/null || true)
                     if [[ -n "$_v6_derived" && "$_v6_derived" != "$VERIFY_VERDICT" ]]; then
                       if [[ "$(_reqmatrix_rank "$_v6_derived")" -gt "$(_reqmatrix_rank "$VERIFY_VERDICT")" ]]; then
-                        echo "⚠️  CHECK 6: 申报 $VERIFY_VERDICT，按矩阵推导为 $_v6_derived — 采用推导结果"
+                        echo "⚠️  CHECK 6: 申报 ${VERIFY_VERDICT}，按矩阵推导为 ${_v6_derived} — 采用推导结果"
                         VERIFY_VERDICT="$_v6_derived"
                       fi
                     fi
