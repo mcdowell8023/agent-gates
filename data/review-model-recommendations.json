@@ -2,10 +2,13 @@
   "version": "1.13.0",
   "vendors": {
     "gpt": ["github-copilot/gpt-5.5"],
-    "gemini": ["github-copilot/gemini-3.1-pro-preview"],
+    "grok": ["github-copilot/grok-4.5"],
     "deepseek": ["bailian/deepseek-v4-pro"],
     "kimi": ["bailian/kimi-k2.6"],
     "qwen": ["bailian/qwen3.7-max"]
   },
-  "excluded_patterns": ["flash", "glm"]
+  "excluded_patterns": ["flash", "glm"],
+  "_note_excluded_patterns": "⚠️ 这个字段目前 lib/ 里零引用 —— 声明了但没人读。flash 的剔除来自 build_review_models 与 filter_panel_pool 里两句硬编码 `[[ \"$name\" == *flash* ]]`；glm 则完全没有拦，写在这里也照样进池。tests/run_review_vendor_grok.sh §4 有两条特征测试钉住这个现状（一条证实 glm 进得去，一条证实 excluded_patterns 为空也剔 flash），真去实现这个字段时那两条会变红。",
+  "_note_gemini_removed": "gemini 于 2026-09-08 移出推荐：github-copilot/gemini-3.1-pro-preview 在 `opencode models` 和 pi 的 catalog 里都已不存在，剩下的 gemini 型号全是 gemini-*-flash，而硬编码那句正好剔 flash —— 这个格子事实上早就是空的。审查质量也是用户直接反馈的问题。接位的是 grok-4.5（xai，500K 上下文，与 anthropic/openai 都异构）。",
+  "_note_bailian_unverified": "⚠️ 三个 bailian/* 是 v1.13.0 写下的，2026-09-08 复查时 `opencode models` 里没有 bailian provider（只有 github-copilot / opencode / openrouter-free / volcengine-*），pi 侧也没有。也就是说它们和下架前的 gemini 是同一种状态：写在推荐里但选不出来。没有直接删是因为别的机器上可能配了 bailian —— 但在本机它们不生效，别把它们当可用候选。"
 }

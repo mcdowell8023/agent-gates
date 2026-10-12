@@ -30,56 +30,57 @@ set -euo pipefail
 # strict_branches: on these branches, and on merges INTO them, strict is forced regardless
 # of configuration. That is where "one full review before it reaches test/master" lands.
 # ---------------------------------------------------------------------------
-_GATE_CFG_PROJECT=".agent/gates.json"
+# 档位/strict 分支判定抽到 lib/gate-mode.sh —— bin/agent-gates-review 要用同一份来判
+# 「现在轮不到审查」。⛔ 缺库就 fail-closed：判不出档位时按 strict 走，
+# ⛔ 绝不能因为找不到库就静默放行。
+_GATE_MODE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib/gate-mode.sh"
+if [[ -f "$_GATE_MODE_LIB" ]]; then
+  # shellcheck disable=SC1090
+  source "$_GATE_MODE_LIB"
+else
+  echo "❌ GATE: lib/gate-mode.sh not found at $_GATE_MODE_LIB — cannot resolve the gate mode, refusing to run in an unknown configuration" >&2
+  exit 1
+fi
+
+# 🔴 一线反馈（2026-09-10）：项目 .gitignore 里有 `.agent/`（wb 的 crm-center / crm-platform
+# 都是），所以 gates.json 从未被 git 跟踪 ⇒ `git worktree add` 出来的目录里根本没有它。
+# gate 找不到项目策略就按 strict 走，在普通业务分支上也强制要求 review + verify 产物，
+# 每建一个 worktree 都得手工 cp 一份。
+#
+# 采纳反馈里的第二个建议：**回退到主 worktree 去找**。`git rev-parse --git-common-dir`
+# 在 worktree 里返回主仓的 .git，其父目录就是主 worktree 根。一处改动覆盖所有项目，
+# ⛔ 不动任何项目的 .gitignore（那要各项目分别改，且会把策略文件推进 git）。
+_GATE_CFG_PROJECT=$(_gate_resolve_project_cfg)
+
+# 与 bin/agent-gates-review 的 artifact_store_dir 必须同口径（同一个 repo-key 算法），
+# ⛔ 两边分叉的话门禁就找不到刚写进去的产物 —— 而那种失败长得像「审查根本没做」。
+_gate_artifact_store_dir() {   # _gate_artifact_store_dir <reviews|verify>
+  local kind="$1" common key
+  common=$(git rev-parse --git-common-dir 2>/dev/null) || return 1
+  [[ -n "$common" ]] || return 1
+  # ⛔ 必须解析软链后再算 key。macOS 上 worktree 里 `git rev-parse --git-common-dir`
+  # 返回 `/private/var/...`，而主 worktree 返回相对的 `.git`；把相对值转绝对会得到
+  # `/var/...` —— `/var` 是 `/private/var` 的软链 ⇒ **同一个仓库在两个 worktree 里算出
+  # 不同的 key**，共享库当场失效（2026-09-10 实测）。用 `pwd -P` 统一到物理路径。
+  local pdir base
+  pdir=$(cd -P "$(dirname "$common")" 2>/dev/null && pwd -P) || return 1
+  base=$(basename "$common")
+  common="$pdir/$base"
+  key=$(printf '%s' "$common" | { command -v sha256sum >/dev/null 2>&1 && sha256sum || shasum -a 256; } 2>/dev/null | awk '{print $1}' | cut -c1-16)
+  [[ -n "$key" ]] || return 1
+  printf '%s/artifacts/%s/%s' "${AGENT_GATES_DIR:-$HOME/.agent-gates}" "$key" "$kind"
+}
 _GATE_CFG_USER="${AGENT_GATES_DIR:-$HOME/.agent-gates}/gates.json"
+
 GATE_MODE_SOURCE=""
 
 # Read a dotted path out of a config file. python3 rather than sed because review.mode /
 # verify.mode are nested, and a regex over nested JSON is how you get a value from the wrong
 # object.
-_gate_cfg_get() {
-  [[ -f "$1" ]] || return 1
-  local v
-  v=$(python3 -c '
-import json,sys
-try:
-    cur = json.load(open(sys.argv[1]))
-except Exception:
-    sys.exit(0)
-for k in sys.argv[2].split("."):
-    if not isinstance(cur, dict): sys.exit(0)
-    cur = cur.get(k)
-    if cur is None: sys.exit(0)
-print(cur)
-' "$1" "$2" 2>/dev/null)
-  [[ -n "$v" ]] || return 1
-  printf '%s' "$v"
-}
 
-_gate_norm_mode() {
-  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
-    strict|relaxed|merge-only|off) printf '%s' "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"; return 0 ;;
-  esac
-  return 1
-}
 
 # env > project config > user config > fallback. Used for the overall mode and for the
 # per-check overrides, so all three resolve the same way.
-_gate_resolve_mode() {   # <env-var-name> <cfg.path> <fallback> -> "<mode>|<source>"
-  local envvar="$1" path="$2" fb="$3" raw m
-  raw="$(eval "printf '%s' \"\${${envvar}:-}\"")"
-  if [[ -n "$raw" ]]; then
-    if m=$(_gate_norm_mode "$raw"); then printf '%s|env %s' "$m" "$envvar"; return 0; fi
-    echo "⚠️  ${envvar}='${raw}' is not one of strict|relaxed|merge-only|off — ignored" >&2
-  fi
-  local f
-  for f in "$_GATE_CFG_PROJECT" "$_GATE_CFG_USER"; do
-    if raw=$(_gate_cfg_get "$f" "$path") && m=$(_gate_norm_mode "$raw"); then
-      printf '%s|%s' "$m" "$f"; return 0
-    fi
-  done
-  printf '%s|%s' "$fb" "inherited"
-}
 
 _gm=$(_gate_resolve_mode AGENT_GATES_MODE mode strict)
 GATE_MODE="${_gm%%|*}"; GATE_MODE_SOURCE="${_gm##*|}"
@@ -94,40 +95,8 @@ GATE_VERIFY_MODE="${_gvm%%|*}"; GATE_VERIFY_SOURCE="${_gvm##*|}"
 
 # strict_branches: project config wins over user config; fall back to the usual integration
 # branch names. Patterns are globs, so release/* works.
-_gate_strict_branches() {
-  local f
-  for f in "$_GATE_CFG_PROJECT" "$_GATE_CFG_USER"; do
-    [[ -f "$f" ]] || continue
-    local out
-    out=$(python3 -c '
-import json,sys
-try:
-    d = json.load(open(sys.argv[1]))
-except Exception:
-    sys.exit(0)
-b = d.get("strict_branches")
-if isinstance(b, list):
-    for x in b:
-        if x: print(x)
-' "$f" 2>/dev/null)
-    [[ -n "$out" ]] && { printf '%s' "$out"; return 0; }
-  done
-  printf '%s' 'test
-master
-main'
-}
 
 _GATE_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
-_gate_branch_is_strict() {
-  local b="${1:-}" pat
-  [[ -z "$b" || "$b" == "HEAD" ]] && return 1
-  while IFS= read -r pat; do
-    [[ -z "$pat" ]] && continue
-    # Unquoted $pat on purpose — these are globs (release/*).
-    [[ "$b" == $pat ]] && return 0
-  done <<< "$(_gate_strict_branches)"
-  return 1
-}
 
 _GATE_ON_STRICT_BRANCH=0
 if _gate_branch_is_strict "$_GATE_BRANCH"; then
@@ -268,8 +237,31 @@ _gate_has_suffixed_test() {
 }
 
 # === Gate 1: Test file correspondence ===
+# tests.exempt（v2.10.0）：DTO、枚举、模块注册这类没有逻辑的文件，「每个新源文件配一个
+# 测试文件」只会凑出空心测试 —— 测试代码量超过业务代码的推手之一。glob 匹配仓库相对路径，
+# `*` 跨目录。不配置时行为不变；命中的文件⛔不静默放行，循环后打印出来。
+GATE1_EXEMPT_PATTERNS=""
+declare -f _gate_cfg_list >/dev/null 2>&1 && GATE1_EXEMPT_PATTERNS=$(_gate_cfg_list tests.exempt)
+# ⚠️ 不用数组：macOS 自带 bash 3.2 + set -u 下，空数组展开直接报 unbound variable。
+GATE1_EXEMPTED=""
+GATE1_EXEMPT_COUNT=0
+_gate1_is_exempt() {
+  local pat
+  [[ -n "$GATE1_EXEMPT_PATTERNS" ]] || return 1
+  while IFS= read -r pat; do
+    [[ -z "$pat" ]] && continue
+    # Unquoted $pat on purpose — these are globs.
+    [[ "$1" == $pat ]] && return 0
+  done <<< "$GATE1_EXEMPT_PATTERNS"
+  return 1
+}
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
+  if _gate1_is_exempt "$f"; then
+    GATE1_EXEMPT_COUNT=$((GATE1_EXEMPT_COUNT + 1))
+    [[ "$GATE1_EXEMPT_COUNT" -le 5 ]] && GATE1_EXEMPTED="${GATE1_EXEMPTED:+$GATE1_EXEMPTED, }$f"
+    continue
+  fi
   case "$f" in
     *.ts|*.tsx|*.js|*.jsx)
       t1="${f%.*}.test.${f##*.}"; t2="${f%.*}.spec.${f##*.}" ;;
@@ -289,6 +281,10 @@ while IFS= read -r f; do
 done < <(git diff --cached --name-only --diff-filter=ACMR \
   | grep -E '\.(ts|tsx|js|jsx|py|java|kt|go)$' \
   | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.|\.d\.ts$|\.setup\.|config)')
+if [[ "$GATE1_EXEMPT_COUNT" -gt 0 ]]; then
+  _more=""; [[ "$GATE1_EXEMPT_COUNT" -gt 5 ]] && _more=", …"
+  echo "ℹ️  Gate 1: ${GATE1_EXEMPT_COUNT} file(s) exempt via tests.exempt: ${GATE1_EXEMPTED}${_more}"
+fi
 
 # === CHECK 1: OpenSpec active change (Path A only) ===
 if [[ "$IS_PATH_A" -eq 1 && -d openspec/changes ]]; then
@@ -323,7 +319,12 @@ done < <(git diff --cached --name-only --diff-filter=ACMR \
 MAX_SINGLE_FILE_LINES=0
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
-  flines=$(git diff --cached -- "$f" | grep -c '^+[^+]' 2>/dev/null || echo "0")
+  # ⛔ 不要写 `|| echo "0"`。`grep -c` 无匹配时**打印 0 并且退出码 1** ⇒ 那个 `||`
+  # 会再补一个 0，变量变成两行 `0\n0`，随后 `[[ "$flines" -gt N ]]` 抛算术语法错。
+  # `&&` 短路让循环继续，所以**不报错、不中断** —— MAX_SINGLE_FILE_LINES 从此不再更新，
+  # 单文件行数上限检查静默失效。触发条件只需 diff 里有一个纯删除文件（新增行数 0）。
+  # 一线实测反馈（2026-09-10），追到 6fffbf9（2026-06-27）—— 存在两个半月没人发现。
+  flines=$(git diff --cached -- "$f" | { grep -c '^+[^+]' 2>/dev/null || true; })
   [[ "$flines" -gt "$MAX_SINGLE_FILE_LINES" ]] && MAX_SINGLE_FILE_LINES="$flines"
 done < <(git diff --cached --name-only --diff-filter=ACMR \
   | grep -vE '(\.(lock|md|json|yaml|yml)$|generated/|migrations/|\.d\.ts$)' \
@@ -431,13 +432,12 @@ if [[ "${SKIP_PLAN_CHECK:-0}" != "1" ]] && [[ -d .agent/plans ]]; then
           esac
         fi
 
-        # Same-model plan review on a machine that can do better. Mirrors CHECK 5's
-        # REVIEW_LEVEL check: the implementer has a blind spot about its own plan, so a
-        # review by its own family is not a review.
+        # Same-family plan review on a machine that can do better. v2.10.0：用户规则
+        # 「异构 > 同构 > 不查」—— 同族审查是合法的兜底档，告警放行、记录在案，不再阻断。
+        # 异构优先靠工具路由与 skill 规则保证；不审计划的出口是 SKIP_PLAN_CHECK=1。
         if [[ "$_pr_level" == "L0" && "$PLAN_CAP_LEVEL_EARLY" != "L0" ]]; then
-          _this_problem="${_this_problem:+$_this_problem
-}计划审查是同族的 (PLAN_REVIEW: L0) 而本机支持异构 (${PLAN_CAP_LEVEL_EARLY}) —— 换一个不同族的模型重审
-   审查者: ${_pr_model:-<未记录>}"
+          _this_warn="${_this_warn:+$_this_warn
+   }计划审查是同族的 (PLAN_REVIEW: L0)，本机支持异构 (${PLAN_CAP_LEVEL_EARLY}) —— 按「异构 > 同构 > 不查」放行，记录在案（审查者: ${_pr_model:-<未记录>}）"
         fi
 
         PLAN_REVIEWED=1
@@ -508,6 +508,12 @@ if [[ "${SKIP_PLAN_CHECK:-0}" != "1" ]] && [[ -d .agent/plans ]]; then
   fi
 fi
 
+# 产物是否异构（REVIEW_LEVEL 为 L1-L3）。取最后一个标记：标记追加在正文之后。
+_gate_rf_is_hetero() {
+  [[ -n "${1:-}" && -f "$1" ]] || return 1
+  grep -oE 'REVIEW_LEVEL:[[:space:]]*L[0-3]' "$1" 2>/dev/null | tail -1 | grep -qE 'L[1-3]'
+}
+
 # === Gate 2: Cross-review evidence ===
 # (LOGIC_FILES / MAX_SINGLE_FILE_LINES already computed above for CHECK 3)
 # Trigger: (multi-file AND substantial change) OR single-file massive change
@@ -518,8 +524,26 @@ NEEDS_REVIEW=0
 # merge-only defers review entirely to the moment work enters an integration branch.
 # ⚠️ It relaxes review only — Gate 1 (a test file must exist) and CHECK 3 (a plan) are
 # discipline at the time code is written, unrelated to when it gets reviewed.
+# 🔴 `off` 此前**完全没被认**：门禁打印 `review=off` 然后照样报「没有审查证据」并拒绝提交
+# （2026-09-11 实测）。源码里 merge-only / relaxed 各有处理，off 只在需求矩阵那一处生效。
+# ⚠️ 而 `bin/agent-gates-review --due` 是认 review.mode=off 的（判 due=no）⇒ 两边口径分叉：
+#    CLI 说「现在不用审」，门禁说「没有审查证据，拒绝」。这类分叉的失败长得像「配置没生效」。
+# ⛔ 放在 strict_branches override 之后 —— 那里强制 strict，off 顶不掉它。
+if [[ "$NEEDS_REVIEW" -eq 1 && "$GATE_REVIEW_MODE" == "off" ]]; then
+  echo "ℹ️  CHECK 5 skipped: review mode is off (from ${GATE_REVIEW_SOURCE})"
+  NEEDS_REVIEW=0
+fi
+
 if [[ "$NEEDS_REVIEW" -eq 1 && "$GATE_REVIEW_MODE" == "merge-only" ]]; then
   echo "ℹ️  CHECK 5 skipped: review mode is merge-only — deferred until this work merges into a strict branch (${_GATE_BRANCH:-?} is not one)"
+  NEEDS_REVIEW=0
+fi
+
+# SKIP_REVIEW=1（v2.10.0）：「异构 > 同构 > 不查」的最后一档。skill 与 README 一直写着这个
+# 出口，hook 却从没读过它 —— 同构也跑不了时只能卡死。⛔ 只跳 CHECK 5，CHECK 6 照旧
+# （它有自己的 SKIP_VERIFY）；⛔ 必须醒目打印，报告里也要写明。
+if [[ "$NEEDS_REVIEW" -eq 1 && "${SKIP_REVIEW:-0}" == "1" ]]; then
+  echo "⚠️  CHECK 5 skipped: SKIP_REVIEW=1 —— 「不查」档（异构 > 同构 > 不查 的最后一档）。只在同构审查也跑不了时用，报告里必须写明"
   NEEDS_REVIEW=0
 fi
 
@@ -554,6 +578,7 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
     COVERING_REVIEW_COUNT=0
     PASS_REVIEW_FILE=""
     NEGATIVE_REVIEW_FILE=""
+    NEGATIVE_DIFF_MATCH_FILE=""
     REVIEW_DIFF_MATCH=0
 
     while IFS= read -r rf; do
@@ -592,25 +617,90 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
       [[ "$review_covers_current" -eq 1 ]] || continue
       COVERING_REVIEW_COUNT=$((COVERING_REVIEW_COUNT + 1))
 
+      # 结论判定。⚠️ 这里**故意只做一处最小收紧**，不整体换用 lib/hetero/conclusion.sh ——
+      # 那次尝试连着三轮异构审查都 FAIL（代码围栏、前缀形态、token 词边界、聚合层否决
+      # 四个方向各自还有洞），已拆到独立分支单独设计。这里的目标只是：**不要让本次新增的
+      # 「后一轮 PASS 取代前一轮 FAIL」把既有的解析缺陷放大成可利用的绕过**。
+      #
+      # 收紧两点，其余一字不动（即：装饰写法、代码围栏、`1. VERDICT:` 这类前缀
+      # 仍然看不见 —— 那是**既有**行为，不比今天更差）：
+      #   ⭐ PASS 必须**整行只有取值**（行尾锚定）⇒ `VERDICT: PASS_WITH_ISSUES`
+      #      不再被前缀匹配成干净 PASS。⛔ 这一条是必须的：取代逻辑会让它清掉一份真 FAIL。
+      #   ⭐ 干净 PASS 的行数必须等于全部 `^VERDICT:` 行数 ⇒ 「脏结论 + 干净 PASS」
+      #      同文件时不算干净 PASS（两位审查者都指出这个组合）。
+      # ⛔ `grep -c` **打印计数，但计数为 0 时退出码非零**。用「取反补默认值」的写法
+      #    （`|| echo 0` 那一类）会额外追加一行，变量变成两行的 "0\n0"，后面的整数比较
+      #    当场报错、整段判定静默失效 —— 本仓当天第三次踩，`run_gate_reported_bugs.sh`
+      #    BUG 1 就是这个形状。正确做法是把 `|| true` 放进大括号里：输出照常、只吞退出码。
+      rf_nverdict=$( { grep -ciE '^VERDICT:' "$rf" 2>/dev/null || true; } | head -1 )
+      rf_npass=$( { grep -ciE '^VERDICT:[[:space:]]*(PASS|APPROVED)[*`[:blank:].]*$' "$rf" 2>/dev/null || true; } | head -1 )
+      rf_nverdict="${rf_nverdict:-0}"; rf_npass="${rf_npass:-0}"
       if grep -qiE '^VERDICT:[[:space:]]*(ISSUES|FAIL|REJECT)' "$rf"; then
         NEGATIVE_REVIEW_FILE="$rf"
-      elif grep -qiE '^VERDICT:[[:space:]]*(PASS|APPROVED)' "$rf"; then
+        # 🔴 FAIL 也要记它锚的是不是**当前**这份 diff。原来只有 PASS 分支查
+        # REVIEW_DIFF_SHA256，FAIL 分支一句都不查 ⇒ 一份针对改动前状态的 FAIL
+        # 会拦住针对当前状态的 PASS（2026-09-11 一线实测被卡）。
+        [[ "$rf_diff_sha256" == "$CURRENT_REVIEW_DIFF_SHA256" ]] && NEGATIVE_DIFF_MATCH_FILE="$rf"
+      elif [[ "$rf_nverdict" -gt 0 && "$rf_npass" -ne "$rf_nverdict" ]]; then
+        # 有结论行但不是干净 PASS（带限定词、或同文件还有别的 VERDICT 行）。
+        # ⭐ 必须说出来：否则作者只看到「没有审查证据」，而他明明写了 VERDICT。
+        echo "ℹ️  CHECK 5: ${rf} 有 ${rf_nverdict} 条 VERDICT 行、其中干净 PASS ${rf_npass} 条 —— 按「结论不明」跳过"
+        echo "     协议要求结论行**整行只有取值**（VERDICT: PASS / FAIL / ISSUES / REJECT），"
+        echo "     ⛔ 带限定词的（PASS_WITH_ISSUES、PASS but …）不算通过，同一份产物也不要混多条。"
+      elif [[ "$rf_npass" -gt 0 && "$rf_npass" -eq "$rf_nverdict" ]]; then
         if [[ "$rf_diff_sha256" == "$CURRENT_REVIEW_DIFF_SHA256" ]]; then
-          PASS_REVIEW_FILE="$rf"
+          # 同一 diff 有多份 PASS：已选中的是异构（L1+）而这份不是 ⇒ 保留已选的，
+          # 免得已有异构审查却打出同族告警（v2.10.0）。
+          if [[ "$REVIEW_DIFF_MATCH" -eq 1 ]] \
+             && _gate_rf_is_hetero "$PASS_REVIEW_FILE" && ! _gate_rf_is_hetero "$rf"; then
+            :
+          else
+            PASS_REVIEW_FILE="$rf"
+          fi
           REVIEW_DIFF_MATCH=1
         elif [[ -z "$PASS_REVIEW_FILE" ]]; then
           PASS_REVIEW_FILE="$rf"
         fi
       fi
-    done < <(find .agent/reviews/ -type f -name "*.md" -print 2>/dev/null | sort)
+    # 除项目内的 `.agent/reviews/`，还要扫按仓库分键的共享库 ——
+    # 那两个目录都被 .gitignore 排除，产物在功能分支 worktree 里生成、merge 在主仓发生，
+    # 不扫共享库就**永远看不到自己刚生成的产物**（2026-09-10 实测，当时只能手工 cp）。
+    # repo-key 取自 git-common-dir ⇒ 同仓库所有 worktree 同键，⛔ 不跨仓。
+    done < <( {
+      find .agent/reviews/ -type f -name "*.md" -print 2>/dev/null || true
+      _gate_store=$(_gate_artifact_store_dir reviews) || true
+      [[ -n "${_gate_store:-}" && -d "$_gate_store" ]] && \
+        { find "$_gate_store" -type f -name "*.md" -print 2>/dev/null || true; }
+    } | sort )
 
     REVIEW_FILE="$PASS_REVIEW_FILE"
+
+    # 🔴 审查结论只对**它看见的那个状态**成立。修完再审一轮是设计里的正常流程 ——
+    # 后一轮 PASS 若精确命中当前 staged diff，前一轮锚在旧状态的 FAIL 就已被取代。
+    # 不这么算的后果不只是卡一次：只要同一个 HEAD 上存在过一份 FAIL，CHECK 5 就
+    # **永远过不去**，除非把那份产物删掉 —— 等于在教人删审查记录。
+    #
+    # ⛔ 三条不能放松（tests/run_gate_review_select.sh T2/T3/T4 锁住）：
+    #   - 过期 PASS ⛔ 不能盖掉命中当前 diff 的 FAIL（REVIEW_DIFF_MATCH 必须为 1）
+    #   - 同一份 diff 上 FAIL 与 PASS 并存时 fail-closed（NEGATIVE_DIFF_MATCH_FILE 非空即拦）
+    #   - 没有任何 PASS 命中当前 diff 时，行为一字不变（FAIL 照拦）
+    if [[ -n "$NEGATIVE_REVIEW_FILE" && "$REVIEW_DIFF_MATCH" -eq 1 && -z "$NEGATIVE_DIFF_MATCH_FILE" ]]; then
+      echo "ℹ️  CHECK 5: ${NEGATIVE_REVIEW_FILE} 的 ISSUES/FAIL 已被 ${PASS_REVIEW_FILE} 取代"
+      echo "   后者的 REVIEW_DIFF_SHA256 精确命中当前 staged diff；前者锚的是改动前的状态，结论不再适用。"
+      NEGATIVE_REVIEW_FILE=""
+    fi
+
     if [[ -n "$NEGATIVE_REVIEW_FILE" ]]; then
       if relaxed_waive "review verdict is ISSUES/FAIL ($NEGATIVE_REVIEW_FILE)" review; then
         :
       else
       fail "Applicable review verdict is ISSUES/FAIL — resolve before committing"
-      echo "   Review: $NEGATIVE_REVIEW_FILE"
+      echo "   Review: ${NEGATIVE_DIFF_MATCH_FILE:-$NEGATIVE_REVIEW_FILE}"
+      if [[ -n "$NEGATIVE_DIFF_MATCH_FILE" ]]; then
+        echo "   ⛔ 这份 FAIL 锚的就是当前 staged diff —— 改代码再审一轮，不要删产物。"
+      else
+        echo "   ℹ️  它锚的不是当前 diff；修完后重跑审查，新的 PASS 会取代它。"
+      fi
       fi
     elif [[ -z "$PASS_REVIEW_FILE" ]]; then
       if [[ "$ANCHORED_REVIEW_COUNT" -eq 0 ]]; then
@@ -628,6 +718,9 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
         done <<< "$CURRENT_REVIEW_FILES"
       else
         fail "Content-anchored review is missing an explicit PASS/APPROVED verdict"
+        echo "   ⛔ 协议要求结论行**整行只有取值**：VERDICT: PASS / FAIL / ISSUES / REJECT。"
+        echo "      带限定词的（PASS_WITH_ISSUES、PASS but …）不算通过；同一份产物里也不能"
+        echo "      既有干净 PASS 又有别的 VERDICT 行 —— 那种情况按「结论不明」处理。"
       fi
     else
       if [[ "$REVIEW_DIFF_MATCH" -ne 1 ]]; then
@@ -660,8 +753,10 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
               if grep -q '<!-- HETERO_EXHAUSTED:' "$REVIEW_FILE" 2>/dev/null; then
                 echo "⚠️  Gate 2b: HETERO_EXHAUSTED — all heterogeneous review models failed; degrading to warn"
               else
-                fail "Review is same-model (REVIEW_LEVEL: L0) but machine supports heterogeneous ($CAP_LEVEL)"
-                echo "   Fix: re-run cross-review via a different model."
+                # v2.10.0：「异构 > 同构 > 不查」—— 同族审查告警放行、记录在案，不再阻断。
+                # ⚠️ 缺 REVIEW_LEVEL 标记（上一个分支）仍然阻断：那说明产物不是工具产出的，
+                #    是产物完整性问题，与选什么模型无关。
+                echo "⚠️  Gate 2b: review is same-family (REVIEW_LEVEL: L0) although this machine supports heterogeneous ($CAP_LEVEL) — allowed under 异构 > 同构 > 不查, recorded: $REVIEW_FILE"
               fi
             fi
           fi
@@ -725,6 +820,12 @@ if [[ "${SKIP_VERIFY:-0}" != "1" ]]; then
     fi
   fi
 
+  # 🔴 同 CHECK 5：`off` 此前没被认，门禁打印 `verify=off` 然后照样拦。
+  if [[ "$NEEDS_VERIFY" -eq 1 && "$GATE_VERIFY_MODE" == "off" ]]; then
+    echo "ℹ️  CHECK 6 skipped: verify mode is off (from ${GATE_VERIFY_SOURCE})"
+    NEEDS_VERIFY=0
+  fi
+
   if [[ "$NEEDS_VERIFY" -eq 1 && "$GATE_VERIFY_MODE" == "merge-only" ]]; then
     echo "ℹ️  CHECK 6 skipped: verify mode is merge-only — deferred until this work merges into a strict branch (${_GATE_BRANCH:-?} is not one)"
     NEEDS_VERIFY=0
@@ -733,7 +834,14 @@ if [[ "${SKIP_VERIFY:-0}" != "1" ]]; then
   if [[ "$NEEDS_VERIFY" -eq 1 ]]; then
     if [[ -d .agent && ! -d .agent/verify ]]; then
       fail "No verifier evidence (.agent/verify/ missing)"
-      echo "   Fix: Run verifier agent, save output to .agent/verify/<date>-<topic>.md"
+      # ⛔ 原来这里只说「存到 .agent/verify/<date>-<topic>.md」—— **照做还是过不去**：
+      # CHECK 6 要的是 VERIFY_VERDICT 文档 + 一份 staged_diff_hash 绑定当前 diff 的
+      # dispatch 记录，手写文件产不出锚点。一线会话因此只能自己 ls bin/ 翻工具
+      # （2026-09-11 实测）。⇒ 直接把那条命令写出来。
+      echo "   Fix: 已经用别的方式（如 pi -p）跑完 verify 了 → 导进来："
+      echo "        ~/.agent-gates/bin/agent-gates-verify-import <verify正文>.md --imported-model <provider/model>"
+      echo "        （走 Paseo 派的用 --paseo-agent <agent-id> 代替 --imported-model）"
+      echo "        锚点由它自己计算，⛔ 不接受外部传入 —— 手写的哈希什么都不能证明。"
     elif [[ -d .agent/verify ]]; then
       # Prefer the verify doc whose dispatch record binds the CURRENT staged diff; fall
       # back to newest-by-mtime only when nothing is anchored.
@@ -794,6 +902,9 @@ if [[ "${SKIP_VERIFY:-0}" != "1" ]]; then
         # "Cannot prove a verify exists for this diff" must not read as "you changed too much".
         _v6_distinct=$(printf '%s' "$_V6_MTIME_SET" | wc -w | tr -d ' ')
         fail "No verifier evidence anchored to the current staged diff — verify this change"
+        echo "   Fix: 外部跑完的 verify 用这条导入（它自己算锚点，绑定当前 staged diff）："
+        echo "        ~/.agent-gates/bin/agent-gates-verify-import <verify正文>.md --imported-model <provider/model>"
+        echo "        （走 Paseo 派的用 --paseo-agent <agent-id>）"
         echo "   Looked at $_V6_CAND verify doc(s) in .agent/verify/ within the 4h window;"
         echo "   $_V6_DECIDABLE carry a dispatch record and none binds the current staged diff."
         if [[ "$_V6_CAND" -gt 1 && "$_v6_distinct" -le 1 ]]; then
@@ -1097,7 +1208,8 @@ except Exception:
                 [[ -z "$sf" || ! -f "$sf" ]] && continue
                 SF_MTIME=$(stat -f %m "$sf" 2>/dev/null || stat -c %Y "$sf" 2>/dev/null || echo "0")
                 if [[ "$SF_MTIME" -gt "$VERIFY_MTIME" ]]; then
-                  sf_lines=$(git diff --cached -- "$sf" | grep -c '^+[^+]' 2>/dev/null || echo "0")
+                  # 同款（见上）：这处会让 POST_VERIFY_LINES 的累加中断。
+                  sf_lines=$(git diff --cached -- "$sf" | { grep -c '^+[^+]' 2>/dev/null || true; })
                   POST_VERIFY_LINES=$((POST_VERIFY_LINES + sf_lines))
                 fi
               done < <(git diff --cached --name-only --diff-filter=ACMR \

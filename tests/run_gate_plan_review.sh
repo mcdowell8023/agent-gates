@@ -13,6 +13,15 @@
 # warn, they do not block — otherwise this change breaks every deployed repo at once.
 set -uo pipefail
 
+# ⛔ FAIL-SAFE: 真的 `pi` 在 PATH 上，而 pi 通道排在 opencode 之前。本文件只 fake 了
+# opencode，不显式把 pi 指向不存在的路径就会发真实 API 调用（踩过，挂到 120s）。
+# ⚠️ opencode 二进制已于 2026-09-10 卸载，但这些用例走的是 OC_REVIEW_OPENCODE 指定的
+# **fake**，与真机是否装了 opencode 无关 ⇒ 照常有效。
+export AG_REVIEW_PI="${AG_REVIEW_PI:-/nonexistent/pi-must-not-run-in-tests}"
+# v2.9.4: opencode 现在默认**关**（与 lib/hetero/config.sh 同口径）。本文件测的就是
+# opencode 路径，所以显式打开 —— 否则通道被跳过，断言看起来像"审查功能坏了"。
+export HETERO_CHAN_OPENCODE="${HETERO_CHAN_OPENCODE:-1}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GATE="$SCRIPT_DIR/../hooks/git/agent-quality-gate.sh"
 PR="$SCRIPT_DIR/../bin/agent-gates-plan-review"
@@ -92,12 +101,14 @@ echo "C3: ⭐ 计划审查结论是 FAIL → 拦住（原先只看标记存不�
   assert "点明审查结论不是 PASS" "$([[ "$out" == *"计划审查的结论是 FAIL"* ]] && echo true || echo false)"
   teardown )
 
-echo "C4: ⭐ L3 机器上的同族(L0)计划审查 → 拦住（自审不算审）"
+echo "C4: ⭐ L3 机器上的同族(L0)计划审查 → 告警放行（v2.10.0：异构 > 同构 > 不查）"
 ( setup
   bash "$PR" .agent/plans/p.md --result review.md --model github-copilot/claude-opus-5 >/dev/null 2>&1
-  out=$(run_gate); rc=$?
-  assert "拦住 (rc=$rc)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
-  assert "点明是同族审查" "$([[ "$out" == *L0* ]] && echo true || echo false)"
+  # 只隔离 CHECK 3：这个夹具暂存了 161 行，没有代码审查产物，CHECK 5 必然要审查证据 ——
+  # 以前 CHECK 3 先拦住，把这一点掩盖了。SKIP_REVIEW=1 让结果只反映 CHECK 3。
+  out=$(SKIP_REVIEW=1 run_gate); rc=$?
+  assert "放行 (rc=$rc)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+  assert "点明是同族审查（告警）" "$([[ "$out" == *L0* && "$out" == *同族* ]] && echo true || echo false)"
   teardown )
 
 echo "C5: ⛔ 向后兼容——旧标记（无哈希无结论）仍然通过，只告警"

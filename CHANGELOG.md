@@ -2,7 +2,10 @@
 
 All notable changes to agent-gates will be documented in this file.
 
-## v2.9.1 — Gate 1 接受 `<name>.<suffix>.spec.<ext>`
+## v2.10.1 — Gate 1 接受 `<name>.<suffix>.spec.<ext>`
+
+> 9 月 7 日完成于 `fix/gate-accept-suffixed-spec`，当时按 v2.9.1 写；2026-10-12 合入时 main 已到 2.10.0，改记 2.10.1。
+> 与 v2.10.0 的 `tests.exempt` 改的是 Gate 1 同一个循环：先判豁免，再判精确同名与后缀 spec。
 
 ### 问题
 
@@ -63,6 +66,690 @@ Gate 1 只认 `<name>.spec.<ext>` 与 `<name>.test.<ext>`。真实项目里大�
 | T10 | `{ts,tsx,js,jsx}` × `{spec,test}` 八种组合矩阵 |
 
 14 pass / 0 fail；全量 45 个测试脚本 45 PASS / 0 FAIL。
+
+## v2.10.0 — 审查预算：每批最多 2 轮、先验收后审查、阻断才算 ISSUES
+
+🔴 实况（2026-09-24）：一次合并 6 轮审查、4 个审查 agent，输出约 7 万 token，cached 读约
+2334 万 token，合计约 $32。大头是长会话反复重读上下文；轮数也没有上限。「迭代期别审」的规则
+早就写着，09-10 照样派出 11 个 agent —— 只写规则拦不住。
+
+### ⚠️ Behavior change：每批审查默认最多 2 轮
+
+- `agent-gates-review` 按批次计轮：批次 = 目标分支 | 源分支 | merge-base(HEAD, MERGE_HEAD)；
+  共享库里同批次产物按 `REVIEW_DIFF_SHA256` 去重计数（同一份暂存状态重复审只算一轮）。
+- 超过 `review.max_rounds`（默认 2）⇒ **exit 73**。直跑、`--route paseo` 派发（被拒时不签发 token）、
+  `--import-result` 三条路径都拦。
+- 出路：`--escalated "<诊断结论>"`（理由写进产物 `REVIEW_ESCALATED`），或 `review.max_rounds: 0` /
+  `AGENT_GATES_REVIEW_MAX_ROUNDS` 调整上限。
+- 产物新增 `REVIEW_BATCH` / `REVIEW_ROUND` 标记；无标记的历史产物不计数。
+- `--due` 契约不变（exit 0/79），追加 `rounds_used=` / `rounds_max=` 两行（恒为数字），给自己直接派
+  Paseo 的派发侧在花钱前判断。`--due --escalated` 互斥。
+- 实例用 merge-base 而不是只看分支名：否则同一对分支第二次合并开局就超限（计划审查抓到的阻断项）。
+- ⚠️ 预算护栏不是安全边界：分支改名、detached merge、功能分支把 master 合进来都会让计数重置。
+
+### 审查级别：异构 > 同构 > 不查（用户 2026-10-11 定，不强制具体模型）
+
+- 交叉审查改为**推荐、不强制**（`agent-review-protocol` §1 原写 MUST / Never skip）：用户明确从一开始就是推荐异构审查，token 有限按实际取舍；测试与编译验证照常必须跑。
+- CHECK 3、CHECK 5（Gate 2b）遇到同族审查（L0）改为**告警放行**，不再阻断；缺 `REVIEW_LEVEL` 标记仍阻断
+  （那是产物完整性问题）。
+- `SKIP_REVIEW=1` 真的生效了：skill 与 README 一直写着它，hook 从没读过。只跳 CHECK 5，醒目打印。
+- 导入的审查按**实际模型**定级（审查者族 ≠ 实现者族 ⇒ 本机级别，否则 L0），三条导入路径共用一个函数；
+  Paseo 已验证 agent 不再因 provider 是 claude 就 exit 75，先看 Model 的族、认不出再看 Provider。
+- CHECK 5 同一 diff 有多份 PASS 时优先选异构那份，免得已有异构审查却打同族告警。
+- 派发建议改读 `hetero-check.json` 的审查模型配置（`hetero_models` 优先），不再写死已移除的
+  github-copilot 型号；`requirements.heterogeneous` 改为「优先异构，同族兜底记 L0」。
+- 顺带修了测试夹具：`write_anchored_review` 用 `${3:-L0}` 把空串也换成 L0，T11「缺标记」实际测的一直是 L0。
+
+### Gate 1：`tests.exempt`
+
+- `.agent/gates.json` 的 `tests.exempt`（glob 列表，`*` 跨目录）豁免 DTO、枚举这类没有逻辑的文件；
+  命中的文件会打印出来，不静默放行。不配置时行为不变。
+- 项目配置整份优先于用户配置；不是列表 ⇒ 告警并当作没配（⛔ 标量读取器会把列表读成 Python repr，
+  glob 永远不命中）。
+- Path A 的 CHECK 2（`.feature`）与 CHECK 6 需求矩阵不受影响。
+
+### skill 文本
+
+- `agent-review-protocol`：合并点默认**单个异构审查员**（三 Agent 流水线只在用户明确要求时用）；
+  跑法用一次性 CLI、只喂 diff 与需求文档；阻断项必须写失败场景并关联验收标准，`VERDICT: ISSUES`
+  当且仅当有阻断项；「补边界测试」默认是建议；合 master 标准顺序（验收 → R1 → 修 → test 定向回归 →
+  R2 闭合轮 → verify）；R2 闭合轮模板（§9.5）；不收敛诊断表与上报模板（§4、§9.6）。
+- `agent-workflow-rules`：§2.6 补「合 test 审不审由 strict_branches 决定（推荐不含 test，内置默认仍含）」与轮数上限；§7 计划审查最多 2 轮。
+
+### 内部
+
+- `sha256_stream` / `review_staged_*` / `artifact_store_dir` 上移到 `--due` 退出点之前（`--due` 要用它们算
+  rounds，原位置在退出点之后，计划审查抓到的阻断项）。
+- 新测试 `tests/run_review_rounds.sh`（52 条）、`tests/run_gate_test_exempt.sh`（14 条）、`tests/run_review_level_policy.sh`（23 条）、`tests/run_gate_skip_review.sh`（8 条）。
+- `lib/hetero/family.sh` 认 `qwen3.8-max` 这类不带连字符的型号（原来只认 `qwen-*`，百炼 token plan 的审查会被记成 L0）。
+- `--route paseo` 派发时的 `--escalated` 理由存进 `record.json`，导入时据此放行同一轮（代码审查抓到：否则花了钱的第 3 轮登记不进去）。
+
+## v2.9.10 — 后一轮 PASS 取代前一轮 FAIL；单维 off 真的生效；CHECK 6 报错指路
+
+🔴 一线实测被卡（2026-09-11）：第三轮审查是 PASS 且 `REVIEW_DIFF_SHA256` 与 commit
+**完全匹配**，门禁却选中了第二轮那份 FAIL（锚点早已失效）。
+
+后果不只是卡一次：**只要同一个 HEAD 上存在过一份 FAIL，CHECK 5 就永远过不去**，
+除非把那份产物删掉 —— 等于在教人删审查记录，门禁自己破坏审查链的完整性。
+而「修完再审一轮」本来就是设计里的正常流程。
+
+### 1. 取代逻辑
+
+根因：两个分支不对称 —— PASS 分支查 `REVIEW_DIFF_SHA256`，**FAIL 分支一句都不查**，
+而决策处又无条件先看 FAIL。
+
+后一轮 PASS 精确命中当前 staged diff 时，清掉那份锚在旧状态的 FAIL 并**打印取代说明**。
+
+⛔ 三条不能放松（`tests/run_gate_review_select.sh` T2/T3/T4/T4b 锁住）：
+
+| 场景 | 必须 |
+|---|---|
+| 过期 PASS + 命中当前 diff 的 FAIL | **拦** |
+| 同一份 diff 上 FAIL 与 PASS 并存 | **拦**（fail-closed） |
+| 过期 FAIL + **过期** PASS | **拦**（没有任何产物绑定当前 diff 时行为一字不变） |
+
+⚠️ 最后那条是**真正的绕过路径**：拿到 FAIL 后随便改一行（锚点即失效），再拿一份更早的
+过期 PASS 顶上。第一轮测试没覆盖，是**变异测试**逼出来的 —— 当时的断言只写「还是红的」，
+而摘掉条件后 FAIL 被清掉、倒在「缺 PASS 结论」上，仍是红但原因变了。
+⇒ 断言要钉**拦的理由**，不是「拦了没有」。
+
+### 2. 结论解析：只做两处最小收紧
+
+⚠️ 本版**没有**把结论解析整体换成 `lib/hetero/conclusion.sh`。那次尝试连着三轮异构审查
+都 FAIL（代码围栏、`1. VERDICT:` 这类前缀、token 词边界、聚合层否决，四个方向各有洞），
+已整体拆到独立分支单独设计。**这里的目标只有一个：不要让新增的取代逻辑把既有的解析
+缺陷放大成可利用的绕过。**
+
+收紧两点：
+
+- ⭐ PASS 必须**整行只有取值**（行尾锚定）⇒ `VERDICT: PASS_WITH_ISSUES` /
+  `PASSENGER` / `APPROVED_WITH_CONDITIONS` 不再被前缀匹配成干净 PASS。
+  ⛔ 这条是必须的：取代逻辑会让它清掉一份真 FAIL。
+- ⭐ 干净 PASS 的行数必须等于全部 `^VERDICT:` 行数 ⇒「脏结论 + 干净 PASS」同文件时
+  不算干净 PASS（两位独立审查者都点了这个组合）。
+
+被跳过时会**打印原因**（有几条 VERDICT 行、其中干净 PASS 几条），否则作者只看到
+「没有审查证据」，而他明明写了 VERDICT。
+
+**⛔ 本版已知不覆盖**（既有缺陷，不比今天更差，已拆分支）：
+
+- 装饰写法 `**VERDICT: FAIL**` / `## VERDICT: PASS` / 全角冒号 / `1. VERDICT:` 看不见
+- 代码围栏里的 `VERDICT: PASS` 会被当成真结论
+- `REVISE` 等规范词表取值不在内联 FAIL 集合中
+- 当前 diff 上的「结论不明」产物**不会否决**另一份当前 PASS
+- `REVIEW_LEVEL` 可在正文伪造从而绕过 Gate 2b
+
+`run_gate_review_select.sh` 里为其中两条留了**现状快照断言** —— 改动时会变红，提醒去看拆出去那块。
+
+### 3. `review.mode` / `verify.mode` = `off` 此前完全没被认
+
+实测门禁自己打印 `review=off, verify=off`，**然后两个都照样拦**：
+
+```
+ℹ️  Agent Quality Gate mode: strict (…) — review=off, verify=off
+❌ GATE: No content-anchored review evidence covers the staged change
+❌ GATE: No verifier evidence (.agent/verify/ missing)
+```
+
+源码里 `merge-only` 和 `relaxed` 各有处理，**`off` 只在需求矩阵那一处生效**。
+⚠️ 而 `bin/agent-gates-review --due` 是认 `review.mode=off` 的 ⇒ **两边口径分叉**：
+CLI 说「现在不用审」，门禁说「没有审查证据，拒绝提交」。这类分叉的失败长得像
+「配置没生效」。⛔ `off` 的处理排在 `strict_branches` override **之后** —— 那里强制
+strict，`off` 顶不掉它（`run_gate_dimension_off.sh` T4 锁住）。
+
+### 4. CHECK 6 的报错现在指出 `agent-gates-verify-import`
+
+verify 用 `pi -p` 直跑本身没错（快且便宜），但门禁只说「证据缺失」，两条报错都没提那个
+导入工具，其中一条还说「存到 `.agent/verify/<date>-<topic>.md`」——**照做还是过不去**，
+因为 CHECK 6 要的是 `VERIFY_VERDICT` 文档 **加** 一份 `staged_diff_hash` 绑定当前 diff 的
+dispatch 记录，手写文件产不出锚点。那条会话只能自己 `ls ~/.agent-gates/bin/` 翻。
+
+⚠️ 我第一版把提示写成 `--topic <name>` —— **那个参数不存在**，工具只认
+`--imported-model` / `--paseo-agent`。⇒ 测试里加了一条：把提示里出现的每个 `--xxx`
+逐个对照工具真实 usage。
+
+### ⚠️ 这一版里我自己犯的、值得记下来的
+
+- **`grep -c` 打印计数但计数为 0 时退出码非零** —— 当天第三次踩。
+  `run_gate_reported_bugs.sh` 的 BUG 1 就是这个形状，仓库里早有守卫。
+- **按文本区间回退时误删了无关的 `_gate_artifact_store_dir`** —— 切之前没核对区间里还有什么。
+  症状是全部测试一起红，反而好查。
+- **变异测试连着三次没打中**：一次替换字符串没匹配（脚本没校验命中），
+  两次打在**互为冗余**的条件上（拿掉任一条行为都不变）。⇒ 变异必须 assert 已应用，
+  且要确认打的是**唯一**的那道守卫。
+
+---
+
+## v2.9.9 — 审查的**时机**：轮不到就别审
+
+🔴 实况（2026-09-10，另一条会话自己算的账）：任务拆成小块并行开发，它**每修一小条就派
+一个 agent 跑一次全量审查**，自己每轮再复核一次全量 ——「11 个 agent + 至少 7 次全量跑」。
+那些审查全部白烧：下一次改动之后，它们看见的代码已经不是最终代码
+（实测那份审查根本没看见后来 637+ 行改动，**包括它自己要求的修复**）。
+
+⭐ 门禁配置本来就说了「现在不用审」—— `review.mode=merge-only` + `strict_branches`
+只含 `test/master/main` ⇒ 模块分支迭代期不审，合并进集成分支时审一次。
+⛔ 但那句话**只在 commit 时才打印** —— 写代码阶段没有任何东西拦它。
+
+### 两个口子
+
+1. **`agent-gates-review` 自己判时机**：轮不到就 exit 79，并说清什么时候该审。
+   逃生门 `--early` / `AGENT_GATES_REVIEW_EARLY=1` 保留，但会被打出来 ——
+   设计目标是「无法**静默**绕过」，不是「无法绕过」。
+2. **`agent-gates-review --due`**（新）：只判时机、不跑审查。给**派发侧**用 ——
+   上面那道门控只拦走本命令的审查，而烧掉 11 个 agent 的那条会话是自己用 Paseo
+   直接派的，根本没经过这个命令。
+
+```
+$ agent-gates-review --due              # 也可 -C <dir> 判别的仓库
+due=no
+reason=review mode is merge-only and 'feat/module-a' is not an integration branch
+branch=feat/module-a
+review_mode=merge-only
+when=test master main
+$ echo $?
+79                                      # 0=该审 79=轮不到
+```
+
+契约：stdout 恒为 key=value 行，`exit 0`=该审 / `exit 79`=轮不到。
+⛔ 不需要 prompt 文件、不读 capability 文件、不调任何模型、不写任何产物。
+判不出来时 **fail-open**（`due=yes` + `review_mode=undetermined`）——
+时机门控的目的是省 token，不是变成新的堵路。
+
+档位判定只有一份实现（`lib/gate-mode.sh` 的 `_gate_review_due_eval`），
+门禁、时机门控、`--due` 三个调用方共用。⛔ 复制第三份 = 第三次「两处实现分叉」，
+而分叉的档位判定失败长得像「配置没生效」，没人会去怀疑是两套逻辑。
+
+### ⚠️ 它第一件拦住的事是 agent-gates 自己的测试
+
+`run_review_verdict_diagnostics.sh` 在本仓 worktree 里调 review CLI，而本仓
+`.agent/gates.json` 是 `merge-only` ⇒ 业务分支上直接 exit 79，诊断路径一行都没跑到：
+**50 pass → 15 pass，而「exits non-zero」那条还照样绿**（79 也是非零）
+⇒ 失败长得像「诊断信息全丢了」，不像「被门控拦了」。
+已有的隔离只做了 `AGENT_GATES_DIR`（用户级），项目级那份是靠 cwd 找到的，管不住。
+修法是测试自己 `export AGENT_GATES_REVIEW_MODE=strict`。
+差分跑（门控开/关各一遍，逐文件比断言数）确认**没有别的文件被静默降级**。
+
+### 异构审查抓到的 5 条（gpt-5.6-sol，第一轮 FAIL）
+
+| # | 问题 | 方向 |
+|---|---|---|
+| 1 | `--due` 和正常审查参数混用时**静默降级成查询** —— 不跑 reviewer、不写 `--result`，却返回 exit 0 | 调用方拿着不存在的产物往下走 |
+| 2 | strict 分支上 `review.mode=off` 与门禁**口径相反** ⇒ 死锁：门禁要产物、CLI 拒绝生成 | 只能靠 `--early` 绕 |
+| 3 | 非 git 目录 + 用户级 `merge-only`/`off` ⇒ branch="" 被判成「非集成分支」⇒ exit 79 | **不是** fail-open |
+| 4 | `strict_branches` 类型写错（字符串而非数组）⇒ 静默回落 `test/master/main` ⇒ 在 `release/1.0` 上判 due=no | **不是** fail-open |
+| 5 | 4 条断言是空心的 | 见下 |
+
+第 2 条最值钱：`lib/gate-mode.sh` 抽出来的**目的**就是消除两处实现分叉，结果第一版
+仍与门禁分叉 —— 门禁有 `strict_branches` override（strict 分支强制 strict），
+判定函数里没有。现在 strict 分支的判断**排在 `off` / `merge-only` 之前**，与门禁同序。
+
+第 3、4 条同一个形状：`_gate_cfg_get` / `_gate_strict_branches` 把「键不存在」和
+「文件坏了」都当成「取不到」并静默回落，而那个回落方向是**阻断**。新增
+`_gate_cfg_sane()` 专门分辨这两者；⛔ 有意不改那两个函数 —— 门禁也在用。
+
+空心断言（第 5 条）也都是真的：
+- 「没跑审查」查的是输出里没有 `REVIEW_TOOL` —— 而 fake `pi` 本来就失败、根本不会产出那个
+  marker ⇒ 门控失效、真去调了模型，它也照样绿。改成**比模型调用次数**。
+- off 档只要求 `rc != 0` ⇒ 75（reviewer 跑了又失败）也算过。改成钉 `79` + 零调用。
+- 门禁 strict 回归断言匹配通用 `"Agent Quality Gate"` —— 而 **trivial-skip 的横幅也含这串**
+  ⇒ 档位判定整个坏掉它也绿。strict 是默认值、不打 mode 行，所以正判据是「**没有** mode 行」
+  再配一条「它确实跑了」。
+
+### 第二轮异构审查（grok-4.6）：PASS
+
+6 条逐条复核为 fixed，另答了 4 个我追加的问题（`_gate_cfg_sane` 会不会新引入阻断、
+strict 提前判会不会过严、`EARLY_EXPLICIT` 顺序、`--show-toplevel` 在 linked worktree /
+bare / submodule / gitfile 四种仓库下的行为）。它指出一条低优先级残留并已修：
+
+**`_gate_cfg_sane` 靠 python3 校验配置，python3 不在时却报「配置 unparseable /
+strict_branches 类型错」** —— 方向没错（仍放行），但**诊断在撒谎**，拿着这句话去查配置的人
+白查。已分开成 return 2，reason 改成点名 python3。⚠️ 本轮变异测试刚在同一个形状上吃过亏
+（reason 撒谎而断言靠别的字段兜住，全绿），所以这条配了专门的断言钉 `reason=` 那一行。
+
+### 🔴 顺带解决了「opencode 卸载了又自己回来」这个悬案
+
+**resurrector 是 Paseo。** `~/.config/opencode/plugins/paseo-terminal-activity.js` ——
+Paseo 的 daemon **每次启动都会写这个插件，不管 opencode 在不在**，顺手把
+`~/.config/opencode/` 建回来（实测 2026-09-11 11:44 又被建了一次，目录里**只有**那个插件）。
+⚠️ 上一轮我推断是 doctor 探测链里的 `oc_serve_ensure` 拉起来的 —— 那个推断是错的。
+
+连锁后果（一条一条全对上了）：
+
+1. Paseo 重建 `~/.config/opencode/`
+2. `doctor.sh` 的 `check_omo_registration` 只看**目录存在**就判「OMO 装着」
+3. ⇒ 黄色警告让用户跑 `install.sh --upgrade`，**去给一个已经卸载的工具注册钩子**
+4. ⇒ `run_doctor_channel.sh` 那条断言被这行无关警告触发，**main 上一直是红的**
+
+⚠️ 这个修法**改变了前置条件**，连带让 `run_doctor.sh` 的 P0-1/P0-1b 变红 ——
+那两条是在 mock HOME 里造了合法 `hooks.json` 然后期望检测到，而新前置是「opencode 真的装着」
+⇒ mock 环境必须**也把 opencode 摆上 PATH**（加了 `fake_opencode_on_path`）。
+⭐ 这是正当的测试跟随，不是把红的改绿：前置条件变了，测试就该表达新的前置条件。
+
+修法：`check_omo_registration` 改成还要求 `command -v opencode`，否则打灰色 note 说明
+「目录是 Paseo 重建的，不是 opencode 装着」。⛔ 不删那个目录 —— 它是 Paseo 的，删了下次还来。
+
+### ⚠️ 同一个文件里的假绿断言
+
+`run_doctor_channel.sh` 那条 `[[ "$out" != *"capability"*"opencode"* ]]` 是**跨行** glob：
+「Cross-review capability: L1 (codex)」这行 + 后面任何提到 opencode 路径的行**合起来**就命中
+⇒ 它测的是「capability 之后有没有出现过 opencode 这个词」，而不是「能力报告是否声称
+opencode 可用」。改成只取 `Cross-review capability` 那一行判。
+
+### 顺带
+
+`bin/with-timeout.mjs` 的 fail-closed 检查从「解析参数前直接 exit 75」改成
+「先算标志、解析后再退」—— `--due` 只读配置判时机，不跑任何 reviewer，
+不该因为这台机器没装 node 就答不出「现在该不该审」。
+
+⚠️ 更正一句我自己先写错的话：这**不是**「非 `--due` 路径的行为一字不变」。
+合法调用确实仍在任何 reviewer 执行前 exit 75（异构审复核确认没有携带空 `TIMEOUT_CMD`
+进 reviewer 的路径），但**报错优先级变了**：node 缺失时，`--result` 缺值 / 未知参数 /
+没配 `--due` 的 `-C` 这类参数错误现在先 exit 1，而旧实现一律先 exit 75。
+
+---
+
+## v2.9.8 — 审查产物终于能跨 worktree 被门禁看见
+
+🔴 卡人的实况（2026-09-10，我自己撞的）：`.gitignore` 排除 `.agent/reviews/` 与
+`.agent/verify/`（wb 的项目更狠，整个 `.agent/` 都 ignore），而 `merge-only` 档把
+审查推迟到「合并进 strict 分支」那一刻。产物在**功能分支的 worktree** 里生成、
+merge 发生在**主仓 worktree** —— 既不进 git 又不跨 worktree
+⇒ **它永远到不了那个检查点**。当天我是手工 `cp` 过去才让门禁通过的。
+
+⇒ 产物同时写进按**仓库**（不是按 worktree）分键的共享库：
+
+```
+$AGENT_GATES_DIR/artifacts/<repo-key>/reviews/
+```
+
+`repo-key` 取自 `git rev-parse --git-common-dir` ⇒ 同一仓库的所有 worktree 同键，
+不同仓库不同键。CHECK 5 现在同时扫项目内的 `.agent/reviews/` 和这个共享库。
+⛔ 不动任何项目的 `.gitignore` —— 那要各项目分别改，而且会把审查正文推进 git 历史。
+
+### ⚠️ 差点埋进去的坑：macOS 的 /var 软链
+
+worktree 里 `git-common-dir` 返回 `/private/var/...`，主 worktree 返回**相对**的 `.git`。
+把相对值转绝对得到 `/var/...` —— 而 `/var` 是 `/private/var` 的软链 ⇒ **同一个仓库在
+两个 worktree 里算出不同的 key，共享库当场失效**。实测撞到，两处实现都改成 `pwd -P`
+统一到物理路径。
+
+两处实现分叉的失败**长得像「审查根本没做」**，所以测试里钉了一条可观察的断言：
+主仓与 worktree 各登记一次后，键目录必须仍是 1 个。
+（⛔ 别把 CLI 当库 source 去问它算出什么 —— 它会跑主流程。第一版就是这么写的。）
+
+### 顺带修掉一处 fail-open
+
+`output_result()` 原来是裸 `> "$RESULT_FILE"`：父目录不存在时重定向失败，
+而函数照样返回 0、调用方照样 `exit 0` —— 表现为**「命令说成功了，产物却不在」**。
+而 `.agent/reviews/` 正是被 gitignore 的目录，新 worktree 里天然不存在 ⇒ 必踩。
+现在建父目录 + 写失败返回 75，调用方检查返回值。
+
+### 已知未做
+
+verify 侧（CHECK 6）还没接共享库：它的产物是 `.md` + `.dispatch.json` 成对的，
+接进去要动 CHECK 6 的配对逻辑，是另一块。⚠️ 但那一侧目前没有同等的卡点 ——
+`agent-gates-verify-import` 本来就不要 token、锚点当场算，可以直接在主仓生成。
+
+## v2.9.7 — 免 token 登记「自己已经跑完的审查」
+
+🔴 卡人的实况（2026-09-10，wb 一条长会话）：它用 `pi -p` 跑完七轮审查、结论都在手上，
+但 `--import-result` **强制要 `--token`**，而 token 只能由**派发**签发 ⇒ 已经审完的东西
+拿不到 token ⇒ 那条线判断「凑不出官方产物」，停在原地不合 master。
+
+而做同一件事的 `agent-gates-verify-import` **不要 token、锚点当场算**。同一个仓库里
+两种形状，后者才是对的：
+
+| | token 证明的 | 锚点证明的 |
+| --- | --- | --- |
+| 内容 | 审查发生在派发**之后** | 审的**就是这份代码** |
+| 价值 | 只是顺序 | 顺序防不住的实际问题它都能防 |
+| 当场算会不会削弱 | — | ⛔ 不会 |
+
+⇒ `--import-result` 不带 `--token` 时走 `tokenless_import()`：`capture_review_anchor`
+当场算锚点（⛔ 从不接受调用方传进来的锚点），产物记 `REVIEW_TOOL: external` +
+模型 `unverified`，CHECK 5 照常认。
+
+### 三条 fail-closed
+
+- **必须自报型号**：不给 `--imported-model` 直接拒 —— 匿名审查无法记账，
+  异构是按「产出它的模型」判的
+- **⛔ 免 token 模式不接受 `--paseo-agent`**：没有派发记录就没有 `created_at`，
+  无从排除「旧 agent 给新审查顶账」（那正是 `--paseo-agent` 那条路要防的）⇒
+  与其发一份假的「已核实」，不如拒绝并说明
+- **没有 staged 变更就拒**：没东西可锚定
+
+### 测试
+
+`tests/run_review_import_tokenless.sh` 16 条，含带 token 老路子的回归。
+⚠️ 测试第一版 harness 自己有 bug：`$(mkrepo)` 是子 shell，里面的 `cd` 带不到调用方，
+后面所有 git 命令都跑在测试自己的 cwd 上（症状是 `pathspec 'src.ts' did not match`），
+而那时 ③④⑤ 三段是**空过**的 —— token 那道门把所有输入都挡在前面，看起来全绿。
+
+## v2.9.6 — doctor 不再复活 opencode，也不再静默死掉
+
+起因：用户 2026-09-10 卸载 opencode 后，`~/.opencode` 在 40 分钟内**自己回来了**，
+端口 4096 上又起了一个 PPID=1 的 `opencode serve`（目录时间戳全是原始的 ⇒ 是被还原、
+不是重装）。排查排除了 Syncthing（三个 folder 都不覆盖它）、cron、hermes。
+最可能的机制是 doctor：它的 D6 探测**无条件** shell out 到 opencode，链路里的
+`oc_serve_ensure` 会直接把 serve 拉起来 —— 只要二进制还在，任何一次 doctor 都能复活它。
+同时它把能力报成 `L3 (opencode + codex)`，而那台机器上 opencode 已经不存在。
+
+⭐ 一个把用户明确关掉的通道重新拉起来的体检命令，比一个大声失败的更糟：
+设置在所有人认知里还在，实际已经被绕过。
+
+### 改了三处
+
+**① opencode 探测先过通道开关。** `channels.opencode.enabled=false`（或
+`HETERO_CHAN_OPENCODE=0`）时完全不探测、不进能力判定，并打印跳过原因。
+`check_opencode_health` 整段一起门控 —— 关掉之后不该再有任何代码去 pgrep 它的 serve。
+⚠️ 读取是**内联**的，⛔ 不 source `lib/hetero/select.sh`：doctor 跑在 `set -euo pipefail`
+下，整份 source 会连带执行库的顶层代码，实测同一份 doctor 在两个 fake 目录下走出了
+两条不同的路。默认值必须与 `_review_chan_default` 保持一致（opencode=0，其余=1）。
+
+**② `INSTALL_DIR` 改为听 `AGENT_GATES_DIR`。** 原来硬编码 `$HOME/.agent-gates`
+⇒ **任何一次带 `AGENT_GATES_DIR` 的 doctor 调用（包括测试）都会写真实配置**。
+本轮 RED 阶段一次测试跑就把用户手工设的 `review_models.primary`
+（`gpt-5.6-sol` → `gpt-5.5`）和 `panel_pool`（`[grok-4.5]` → `[]`）冲掉了，
+而 doctor 只打印 `wrote ~/.agent-gates/hetero-check.json`，看不出它写的不是测试目录。
+已从备份恢复。测试里加了一条断言：跑完后真实配置**一个字节都不能变**。
+
+**③ `check_opencode_health` 在 0 个 serve 时会把 doctor 杀掉。**
+
+```bash
+total=$(pgrep -f "opencode serve" 2>/dev/null | wc -l | tr -d ' ')
+if [[ "${total:-0}" -eq 0 ]]; then pass "opencode: no leaked serve processes"; return 0; fi
+```
+
+`pgrep` 无匹配退出码 1 ⇒ pipefail 放大 ⇒ 赋值非零 ⇒ `set -e` 直接退出。
+**后果是下一行那个 `pass` 永远到不了 —— 它看着在处理"零个 serve"，实际是死代码**；
+而 doctor 在 opencode 在 PATH 上、却没有 serve 在跑时，会**不打汇总就退出**，
+看起来像"跑完了"。同族的 `serve_pid=$(pgrep ... | head -1)` 一并修。
+
+⚠️ 这与本轮一线反馈的 BUG 1（`grep -c ... || echo`）**是同一个家族**：
+命令"打印了结果但退出码非零"，而调用方用管道赋值。一天里同一类踩了三次
+（BUG 1 两处 + 这里两处），全仓已扫过 `=$( (pgrep|grep -c) ... |` 形状，无残留。
+
+### 测试
+
+`tests/run_doctor_channel.sh` 11 条。⚠️ 正对照改过两次判据：
+最初用「fake opencode 是否被执行」，但真正会 exec 它的是 D6 的
+`detect_available_models`，那条链还要 `$INSTALL_DIR/bin/with-timeout.mjs` 等一整套
+安装布局，fake 目录凑不出来 ⇒ 断言永远为假，是个**空心的正对照**。
+最终判据落在「能力行里有没有 opencode」。
+
+## v2.9.5 — 一线反馈的两条 bug（都不是本次会话引入的）
+
+来自 `~/wb` 一条长会话的实测反馈（Paseo agent `3e2ffb58`，2026-09-10）。⚠️ 这两条我
+**此前完全不知道**，而且 BUG 1 就在我这两天连改三轮的那个文件里。
+
+## BUG 1 — `grep -c` + `|| echo "0"` 产出两行，静默废掉行数上限检查
+
+`hooks/git/agent-quality-gate.sh:273` 与 `:1047`（反馈里的 327/1101 是 2.9.1 行号）：
+
+```bash
+flines=$(git diff --cached -- "$f" | grep -c '^+[^+]' 2>/dev/null || echo "0")
+```
+
+`grep -c` 无匹配时**打印 `0` 并且退出码 1** ⇒ 那个 `||` 再补一个 `0`，变量成了 `0\n0`，
+随后 `[[ "$flines" -gt N ]]` 抛算术语法错。**`&&` 短路让循环继续，所以不报错、不中断**
+—— `MAX_SINGLE_FILE_LINES` 从此不再更新，单文件行数上限检查静默失效；`:1047` 那处
+同理会中断 `POST_VERIFY_LINES` 的累加。
+
+触发条件只需 diff 里有**一个纯删除文件**（新增行数 0）。引入于 `6fffbf9`
+（2026-06-27）—— 存在两个半月。
+
+改成 `{ grep -c '^+[^+]' 2>/dev/null || true; }`（`grep -c` 本来就一定打印数字）。
+全仓扫过，没有第三处同形状。
+
+## BUG 2 — 新 worktree 丢 `gates.json` ⇒ 门禁退回 strict
+
+项目 `.gitignore` 里有 `.agent/`（wb 的 crm-center / crm-platform 都是）⇒ `gates.json`
+从未被 git 跟踪 ⇒ `git worktree add` 出来的目录里根本没有它。门禁找不到项目策略就按
+**strict** 走，在普通业务分支上也强制要求 review + verify 产物，每建一个 worktree
+都得手工 `cp` 一份。
+
+采纳反馈里的第二个建议：**回退到主 worktree 去找**。`git rev-parse --git-common-dir`
+在 worktree 里返回主仓的 `.git`，其父目录就是主 worktree 根。一处改动覆盖所有项目，
+⛔ 不动任何项目的 `.gitignore`（那要各项目分别改，且会把策略文件推进 git）。
+
+⚠️ **我今天撞到的是同一族的另一个面**却没往上想一层：`.agent/reviews/` 被 ignore，
+导致审查产物在功能分支 worktree 里生成、merge 在主仓发生、**产物到不了那个检查点** ——
+当时我是手工 `cp` 过去才让门禁通过的（见 v2.9.3 的「已知未修」）。同一个根因。
+
+## 测试
+
+`tests/run_gate_reported_bugs.sh` 7 条。⚠️ 测试自己踩了两个坑，都写进注释：
+
+- `agent-quality-gate.sh:8` 那行 `AGENT_MODE != 1` **直接 exit 0、一个字不打印** ——
+  第一版没设它，把"输出为空"读成了断言失败
+- 断言 grep 的是 `mode: off`，而实际输出是 `mode=off`
+
+另外第一版试图 `eval` 从门禁里抽出来的代码片段做行为验证 —— 那段依赖门禁里的其它变量，
+抽出来跑等于测另一个东西。改成让**真门禁**跑在一个只删不加的 staged diff 上。
+
+## v2.9.4 — opencode 从审查路径彻底移除
+
+用户 2026-09-10 卸载 opencode（`~/.opencode` 185MB + volta 上的 `oh-my-opencode` +
+`.zshrc` 的 PATH + Paseo 里 6 个残留 profile；卸载时端口 4096 上**正挂着一个
+`opencode serve`**）。它的历史成本全是实测的：`agent-gates-review` 走它 120s 超时、
+手动 `--attach` 200s，同一任务 pi 约 7s；一个 serve 被观察到 4 天不退、133 分钟 CPU、
+机器上零客户端；每个 Paseo agent 起自己那份 1–1.5GB 且 idle 后不回收。
+
+### 删掉的东西
+
+- `lib/hetero/select.sh` 的 `_review_via_opencode()`（94 行）—— `_try_review_model`
+  现在是 pi-only
+- `bin/agent-gates-review` 的 `run_opencode()`（58 行）—— ⚠️ 它是 **legacy L0–L3 路由**
+  那条独立的 opencode 通道，与 hetero 分支那份是**两份实现**，只拔一份等于没拔
+- 9 个纯 opencode 测试文件：`run_oc_review` / `run_oc_review_guard` / `run_oc_serve` /
+  `run_oc_reaper` ×3 / `run_review_cmd`（60 条断言里 64 处提 opencode，是 legacy 路由的
+  集成测试）
+
+⚠️ **清理侧的 `oc-reaper` / `lib/hetero/serve.sh` 暂留** —— 万一哪天冒出个野 serve
+还能清，且它们不参与审查路径。`agent-gates-status` 的 opencode 行同理。
+
+⛔ 不要"为了兼容"把审查通道加回来。要加通道就加新的 one-shot CLI，
+别复活需要常驻 serve 的。
+
+### 同时修掉前一版审查抓到的 8 条
+
+`gpt-5.6-sol`（走新 pi 通道，产物 marker `REVIEW_TOOL: pi`）+ `grok-4.5` 两路并审：
+
+1. **通道默认与 `config.sh` 相反**（高）—— `_review_chan_enabled` 照抄了
+   `bin/oc-review` 的守卫，缺文件/缺键时把 opencode 判为**开**；而
+   `lib/hetero/config.sh` 是 `0`，`tests/run_hetero_chan_defaults.sh` D1 也钉着
+   「无配置 opencode=0」。⇒ **同一仓库两套相反默认，两边测试都绿**。两个审查者独立抓到。
+   现在按 channel 各自的默认（opencode=0，其余=1），且缺键/坏 JSON 一律落到默认而非放行。
+2. **`AG_REVIEW_TIMEOUT` 一存在，pi 的 300s 就永不生效**（高）——
+   写的是 `${AG_REVIEW_PI_TIMEOUT:-${AG_REVIEW_TIMEOUT:-300}}`，而那个变量在文档和
+   环境里常见 `120`。CHANGELOG 上一段刚论证「pi 该有自己的默认」，下一行就撤销了，
+   而且测试把它锁死成「pi 听 AG_REVIEW_TIMEOUT」。现在两个旋钮完全独立。
+3. **here-string 建临时文件失败 → `timeout_cmd` 空数组 → pi 无界运行**（高）——
+   fail-closed 被一个无关的磁盘问题绕过。改成断言数组长度。
+4. **sidecar 写失败被 `|| true` 吞**（高）—— 调用方读到空 sidecar 后转成
+   `tool=unknown` + `model=<primary 兜底>`，然后 exit 0 交出格式完好的产物。
+   一份同时写错工具和模型的凭据比没有凭据更糟（`REVIEW_MODEL` 存在的意义就是异构记账）。
+   两侧都改 fail-closed。
+5. `_REVIEW_CHAN_NOTES` 在 `set -u` 下直接调 helper 会 unbound
+6. 通道链尾的 `agent-tool` 兜底不存在（文档已改）
+7. `suggested` 写死推荐 opencode、alternatives 里连 pi 都没有 —— 在一台
+   `channels.opencode.enabled=false` 的机器上。**工具在推荐被禁的通道，agent 照做**，
+   这就是那条禁令被破两次的机制。现在按实时开关生成，并给出 `import_cmd_no_agent`。
+8. `AG_REVIEW_PI` / `AG_REVIEW_PI_TIMEOUT` 完全没文档化；头部还写着
+   `AG_REVIEW_TIMEOUT` default 300 而代码是 120
+
+### 测试
+
+41 个文件全绿，进程零残留。⚠️ errexit 那条断言**空过了两次**才修对：
+两个用例都够不到 `raw=$(...)`（pi 缺失时提前 return、pi 成功时命令替换不失败）；
+补了 pi 非零退出的用例后**仍然**空过 —— 因为 `f || true` 把整个函数放进 AND-OR 列表，
+而 bash 在 AND-OR 列表内部**挂起 errexit**。最终判据落在**错误信息有没有被打出来**
+（有守卫先打印再 return；无守卫死在赋值行、一字不出），注入变异确认变红。
+
+## v2.9.3 — agent-gates-review 终于真的能用 pi 审查
+
+`channels.opencode.enabled=false` 是 2026-08-26 设的，文档也把 opencode 降到第 3，
+但**代码层三处入口一处都没改**：
+
+- `_try_review_model()` 硬编码 `${OC_REVIEW_OPENCODE:-opencode}`，⛔ 不查任何通道开关
+- `agent-gates-review` 全文对 pi **零命中**（`grep -c` 就是 0）
+- 唯一实现了 pi 通道、唯一读 `channels.*.enabled` 的 `hetero_dispatch`，
+  **没有任何生产调用点** —— 全仓非注释引用全在 `tests/` 里
+
+`bin/oc-review:69` 的注释里早就写着这件事：
+"v2.4.0 turned that channel off by default, but only hetero_dispatch consults the flag."
+
+后果不是「配置没生效」这么轻。用户 0818 明令「⛔ 不许用 opencode 做审查」，两个子会话
+各自拿 opencode 审完报 PASS。**规则靠任务书传递，工具自己拦不住。** 更糟的是
+`--route paseo --dispatch-out` 输出的 `suggested.provider` 写死 `opencode/...`、
+alternatives 里连 pi 都没有 —— 工具在推荐被禁的通道，agent 照做。
+
+### 改了什么
+
+`_try_review_model` 变成通道路由器，原 opencode 主体拆成 `_review_via_opencode`，
+新增 `_review_via_pi`。顺序即偏好：**pi 优先，opencode 末位**。
+
+- `_review_chan_enabled <chan>`：env `HETERO_CHAN_<CHAN>` > `channels.<chan>.enabled`；
+  只强制「显式关闭」，缺文件缺键都按放行（与 `bin/oc-review` 的守卫同口径）
+- 模型 id 两边通用（`github-copilot/gpt-5.6-sol` → pi 的 `--provider` + `--model`），
+  所以复用 `review_models`，⛔ 不引入新配置键
+- ⛔ pi 一律带 `--tools read,grep,find,ls`。pi 默认工具集含 edit/write/bash，
+  2026-09-01 实测一个审查者改了被审源文件、建了分支、还 push 了
+- ⛔ pi 返回**纯文本**，不能过 `parse_opencode_json`（那个 helper 对纯文本解析出空，
+  会读成「模型什么都没说」而丢掉一份好审查）
+- `append_marker` 不再写死 `"opencode"`。工具名经 **sidecar 文件**回传 ——
+  真实调用方是 `_raw=$(run_fallback_chain ...)`，命令替换里的赋值随子 shell 消失。
+  `_REVIEW_MODEL_USED` 一直有这个洞，只是调用方静默兜底成 primary，所以 panel 模型的
+  审查一直被盖上 primary 的名字
+- pi 单独的默认超时 **300s**（`AG_REVIEW_PI_TIMEOUT` 可覆盖）。`AG_REVIEW_TIMEOUT` 的
+  120s 是给 opencode 调的 —— 那是「该通道判定为卡死」的界；pi 到 120s 是**正在干活**：
+  四次实测真实审查在 1.5–4.5 分钟，本通道第一次端到端跑就死在 200s 半途
+- `suggested` 改成 pi 首选、opencode 末位带警告；`import_cmd_no_agent` 一并给出 ——
+  自己跑完审查的会话没有 Paseo agent，此前因此认为「凑不出官方产物」而停在原地
+
+### 三条来自本通道自审的修复
+
+通道建好后拿它自己审自己（产物 marker 写着 `REVIEW_TOOL: pi`、
+`REVIEW_MODEL: github-copilot/gpt-5.6-sol`），抓到三条并全部修掉：
+
+1. **`has_valid_conclusion` 缺失时 fail-open** —— `declare -f X && ! X` 的写法在函数
+   不存在时跳过整个校验，任何非空输出（报错、拒答、半截回复）都算通过。pi 的 raw 就是
+   最终产物，select.sh 内部没有第二道解析兜得住它 ⇒ 改成 fail-closed
+2. **`X=$(...)` 后跟 `rc=$?`** —— 门禁 source 本文件（`agent-quality-gate.sh:664`）
+   且跑在 `set -euo pipefail` 下，命令替换失败会在 `rc=$?` 之前杀掉进程，整段错误处理
+   不可达。两处都改成 `if X=$(...); then`（既有的 opencode 路径是同一形状，
+   只修新的就是下次还会咬）
+3. `_l` 未声明 `local`，会覆盖调用者同名变量
+
+### 测试
+
+`tests/run_review_pi_channel.sh` 42 条。⚠️ 其中 errexit 那条**第一版是空过的**：
+两个用例都够不到 `raw=$(...)`（pi 缺失时提前 return、pi 成功时命令替换不失败），
+注入变异后照样全绿。补了 pi **非零退出**的判别用例后**仍然**空过 —— 因为 `f || true`
+把整个函数放进 AND-OR 列表，而 bash 在 AND-OR 列表内部**挂起 errexit**。
+最终判据落在**错误信息有没有被打出来**（有守卫先打印再 return；无守卫死在赋值行、
+一字不出），注入变异确认变红。
+
+同时给 12 个早于本通道的测试文件补了文件作用域 fail-safe
+`export AG_REVIEW_PI="${AG_REVIEW_PI:-/nonexistent/pi-must-not-run-in-tests}"` ——
+它们只 fake 了 opencode，而 pi 现在排第一且真的 `pi` 就在 PATH 上。
+第一版试图用收窄 PATH 来隔离，结果为了把 node 放回去写了 `dirname $(which node)`，
+那正是 `~/homebrew/bin` —— **真 pi 也在里面**，测试当场发了一次真实 API 调用并挂到 120s。
+
+### ⚠️ 本次发现但未修
+
+`.gitignore` 排除了 `.agent/reviews/` 与 `.agent/verify/`，而 `merge-only` 档把审查
+推迟到 merge 那一刻。审查产物在功能分支的 worktree 里生成，merge 发生在主仓 worktree
+—— **产物既不进 git 又不跨 worktree，等于永远到不了那个检查点**。本次是手工 `cp`
+过去才让门禁通过的。另外 `--import-result` 强制要 `--token`（只能由派发签发），
+而同样的 `agent-gates-verify-import` **不需要 token、锚点当场算** —— 后者才是对的形状。
+
+## v2.9.2 — grok 接掉 gemini 的位置，顺带发现那个格子早就是空的
+
+用户反馈 gemini 的审查质量不行，要求换 grok-4.5。换型号本来是改一行数据，但查下去发现
+四件事。
+
+**1. 光改数据不生效。** `lib/hetero/select.sh` 的 `_extract_vendor` case 表里没有 grok，
+返回 `unknown`，而 `build_review_models` 里紧跟着一句 `[[ "$v" == "unknown" ]] && continue`
+—— 配置里写了 grok，池子里也不会有它，且全程没有一行输出说明原因。同一张表在
+`merge_capability` 的内联 python 里还有第二份（`vendors = [...]`），漏了 grok 会让
+`pv` 判成 `unknown`，与 platform 未探测出来时的 `coding_vendor='unknown'` 相等，
+于是**整份本地配置被 exit 1 拒掉**。两处都补了（`lib/hetero/family.sh` 早就有
+`grok-* → xai`，那张是公司名族表，不需要改）。
+
+**2. gemini 那个格子在被发现之前就已经是空的。**
+`github-copilot/gemini-3.1-pro-preview` 在 `opencode models` 和 pi 的 catalog 里都查不到
+（2026-09-08 实测），剩下的 gemini 型号全是 `gemini-*-flash`，而 `build_review_models`
+里有一句硬编码 `[[ "$name" == *flash* ]] && continue`。那一项从型号下架起就没被选中过。
+
+**3. `data/review-model-recommendations.json` 里 `excluded_patterns` 是个装饰字段。**
+声明了 `["flash","glm"]`，但**全库 lib/ 零引用** —— flash 的剔除来自上面那句硬编码
+（`build_review_models` 和 `filter_panel_pool` 各一份），`glm` 则完全没有拦，
+写在配置里也照样进池。⚠️ 本次第一版把机制写成「flash 命中 excluded_patterns」，
+两个审查模型都指出这是假叙事，并且配的那条测试（只读 JSON 字段、名字叫「仍然排除」）
+是**给死配置续命的假绿**。已改成两条特征测试：一条证实 glm 型号进得去，
+一条证实 `excluded_patterns` 为空也照样剔 flash —— 真去实现这个字段时它们会变红。
+
+**4. `skills/agent-review-protocol/SKILL.md` 的推荐表里有两行填不出来的型号。**
+除 gemini 那条，还有 `openai/gpt-5.5-pro` —— **`openai` 这个 provider 根本不存在**
+（opencode 侧只有 github-copilot / opencode / openrouter-free / volcengine-*；pi 侧只有
+volcengine-coding / volcengine-agent-plan / jdcloud-joyagent / github-copilot）。
+表已重写，逐个探活过。同一次复查还发现推荐数据里三个 `bailian/*` 也是同样状态
+（本机没有 bailian provider），已就地标注而非删除 —— 别的机器可能配了。
+
+`tests/run_review_vendor_grok.sh` 13 条，含一条端到端：fake opencode 列出 grok-4.5，
+断言它必须真的出现在 `panel_pool` —— 只测 `_extract_vendor` 的返回值不够，那句
+`continue` 在别的函数里。
+
+`tests/run-all.sh` 一并带入。⚠️ 不带它这个新测试文件就是装饰：main 上唯一的 runner
+`tests/run.sh` 只跑 memory-reminder fixture，`run_*.sh` 一个都不执行 —— 审查抓到的，
+和之前「测试没覆盖本次新增文件」是同一类。
+
+### 顺带纠正文档里的三处错误断言
+
+- `panel_active` 被写成 "concurrent reviewers"。**一次异构审查只有一路。** 两边都是串行
+  fallback、第一个成功就停。`panel_active` 准确说是 `panel_pool[:panel_active]` 的切片上限，
+  实际链长 = `min(panel_active, len(panel_pool))`，还要再过 `panel_mode`。
+- 通道链尾写成 `→ codebuddy → agent-tool`。实际 codebuddy 之后 `channel` 保持
+  `exhausted`，**没有 agent-tool 兜底**。
+- 把 `panel_pool` 和 `channels.opencode.enabled` 绑在一起说 —— 这是本次新造的错误断言。
+  两套机制互不相干：`hetero_dispatch` 受 `channels.*` 约束、读 `pi_models.primary`；
+  而 `panel_pool` 走 `bin/agent-gates-review` → `run_fallback_chain`，
+  **完全不看 channel 开关**，只要 `opencode` 二进制在、serve 起得来就会用。
+  文档里补了一张两列对照表。
+- 「第二轮必须换族」改成「建议」：仓库不记录上一轮 reviewer 的族，也没有跨轮校验，
+  那是外部工作规则，不是 agent-gates 能强制的。
+
+⚠️ 已知未改：`_extract_vendor`（8 个厂商，marketing 名）与 `lib/hetero/family.sh`
+（14 个族，公司名）是同一个概念的两份实现。合并要连 `infer_coding_vendor`、`select_primary`
+和所有已存配置里的 `coding_vendor` 一起改，超出本次范围。代价是
+`doubao` / `hunyuan` / `mai-code` / `minimax` 在 select.sh 里仍然落在 `unknown`。
+
+### 审查记录
+
+两路并行、都是异构（实施者是 claude/anthropic）：`github-copilot/gpt-5.6-sol`（openai）
+7 条 → **FAIL**，`github-copilot/grok-4.5`（xai）多条 → **FAIL**。
+两边独立指向同一个核心问题（`excluded_patterns` 假叙事 + 那条假绿测试）；
+grok 另外单独抓到 `panel_pool` ↔ `channels.opencode` 那条错误绑定，gpt 没抓到。
+全部修完后复审。
+
+## v2.9.1 — merge 门禁此前没有可运行的钩子点
+
+`merge-only` 档把审查推迟到「合并进集成分支」那一刻。而 git 对 merge commit 走的是
+**`pre-merge-commit`**，不是 `pre-commit`，agent-gates 从来只装 `pre-commit` ——
+所以干净的非 ff merge 完全不受检，那个推迟指向的是一个**不存在的检查点**。
+（scratch 仓同时挂两个钩子实测确认：merge 只触发前者。）
+
+`gate-shim.sh` 本来就只做 `exec` 转发、不含任何 pre-commit 专属逻辑，同一份直接作为
+`pre-merge-commit` 装上即可，无需第二个实现。项目现在需要**两个**钩子，
+`init-project-gates` 的三种安装模式（lefthook / husky / bare git）已同步。
+
+`tests/run_gate_merge_hook.sh` 10 条，其中一条**刻意删掉钩子来证明空洞真实存在**
+（merge 通过且门禁零输出）—— 没有这条，这个修复看起来只是「多装一个文件」。
+
+⚠️ **fast-forward merge 仍然没有钩子点**（它不产生 commit）。合并进集成分支请用 `--no-ff`，
+或在仓库里配 `git config merge.ff false`（⛔ 显式 `--ff-only` 仍能压过它，实测）。
 
 ## v2.9.0 — 验收改成查需求遗漏，而不是第二次代码审查
 

@@ -12,6 +12,22 @@
 # fall back to codex instead of dead-ending at exit 75.
 set -uo pipefail
 
+# ⛔ FAIL-SAFE: 真的 `pi` 在 PATH 上，而 pi 通道排在 opencode 之前。本文件只 fake 了
+# opencode，不显式把 pi 指向不存在的路径就会发真实 API 调用（踩过，挂到 120s）。
+# ⚠️ opencode 二进制已于 2026-09-10 卸载，但这些用例走的是 OC_REVIEW_OPENCODE 指定的
+# **fake**，与真机是否装了 opencode 无关 ⇒ 照常有效。
+# v2.9.4: opencode 现在默认**关**（与 lib/hetero/config.sh 同口径）。本文件测的就是
+# opencode 路径，所以显式打开 —— 否则通道被跳过，断言看起来像"审查功能坏了"。
+export HETERO_CHAN_OPENCODE="${HETERO_CHAN_OPENCODE:-1}"
+
+# ⛔ 隔离**项目级**门禁配置，文件作用域。
+# 这些用例是在 agent-gates 自己的 worktree 里调 `agent-gates-review` 的 —— 而本仓
+# `.agent/gates.json` 是 `mode=merge-only`，业务分支上审查时机门控会先 exit 79，
+# 整个诊断路径一行都跑不到（实测 50 pass → 15 pass，且「exits non-zero」还照样绿，
+# 因为 79 也是非零 ⇒ 失败长得像「诊断信息全丢了」而不像「被门控拦了」）。
+# 已知的隔离只做了 AGENT_GATES_DIR（用户级），项目级那份是靠 cwd 找到的，管不住。
+export AGENT_GATES_REVIEW_MODE=strict
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REVIEW_CMD="$SCRIPT_DIR/../bin/agent-gates-review"
 WITH_TIMEOUT="$SCRIPT_DIR/../bin/with-timeout.mjs"
@@ -39,15 +55,21 @@ setup_fakes() {
 # The model prefix selects the output shape, so one fake covers every case.
 make_fake_opencode() {
   FAKE_OC=$(mktemp -d)
-  cat > "$FAKE_OC/opencode" <<'FAKE'
+  cat > "$FAKE_OC/pi" <<'FAKE'
 #!/usr/bin/env bash
-MODEL=""
-prev=""
+# 🔴 2026-09-10 起这是 **pi** 形状的 fake（opencode 已卸载，审查通道只剩 pi）：
+#   · 参数是 `--provider X --model Y` 两个独立 flag，⛔ 不是 opencode 的 `-m X/Y`
+#   · 输出是**纯文本**，⛔ 不是 NDJSON —— pi 路径不过 parse_opencode_json
+# 用例断言的是**通道无关**的诊断行为（空输出 / 缺 VERDICT / 子进程退出码），换后端照样成立。
+PROV=""; MID=""; prev=""
 for arg in "$@"; do
-  [[ "$prev" == "-m" ]] && MODEL="$arg"
+  [[ "$prev" == "--provider" ]] && PROV="$arg"
+  [[ "$prev" == "--model" ]] && MID="$arg"
   prev="$arg"
 done
-emit() { printf '{"type":"text","part":{"type":"text","text":"%s"}}\n' "$1"; }
+MODEL="$PROV/$MID"
+emit() { printf '%b
+' "$1"; }
 case "$MODEL" in
   plain/*)     emit 'VERDICT: PASS\nno issues' ;;
   bold/*)      emit '**VERDICT: PASS**\nno issues' ;;
@@ -76,7 +98,7 @@ case "$MODEL" in
 esac
 exit 0
 FAKE
-  chmod +x "$FAKE_OC/opencode"
+  chmod +x "$FAKE_OC/pi"
 }
 
 make_fake_codex() {
@@ -128,7 +150,7 @@ review_with() {
   # Point codex at a path that does not exist. These cases assert on the opencode-side
   # diagnostics; letting the F4 codex fallback reach a real codex would make the
   # assertions depend on an external tool and drag the suite out by minutes per case.
-  OUT=$(AGENT_GATES_DIR="$CAP_DIR" OC_REVIEW_OPENCODE="$FAKE_OC/opencode" \
+  OUT=$(AGENT_GATES_DIR="$CAP_DIR" AG_REVIEW_PI="$FAKE_OC/pi" \
     AG_REVIEW_CODEX="/nonexistent/codex" \
     "$@" node "$WITH_TIMEOUT" 45 bash "$REVIEW_CMD" "$PROMPT_FILE" --result "$RESULT_FILE" 2>"$errfile")
   RC=$?
@@ -192,7 +214,7 @@ verdict_accepts() {
   review_with "$model"
   # Exit 0 alone is weak evidence: require the review to have actually been written.
   local ok=false
-  if [[ $RC -eq 0 ]] && grep -q 'REVIEW_TOOL: opencode' "$RESULT_FILE" 2>/dev/null; then
+  if [[ $RC -eq 0 ]] && grep -q 'REVIEW_TOOL: pi' "$RESULT_FILE" 2>/dev/null; then
     ok=true
   fi
   assert "accepts $label" "$ok"
@@ -241,15 +263,17 @@ test_verdict_tolerance() {
   verdict_rejects "qualified with words (PASS WITH NOTES)" "wordypass/gpt-5.5"
 }
 
+# ⚠️ 2026-09-10：限时用 AG_REVIEW_PI_TIMEOUT，⛔ 不是 AG_REVIEW_TIMEOUT ——
+# pi 通道刻意不继承后者（它的 120s 是给 opencode 调的「判定卡死」界，pi 到 120s 还在干活）。
 # ---------------------------------------------------------------------------
 # F3 — every opencode invocation must be bounded by a timeout
 # ---------------------------------------------------------------------------
 
 test_timeout_guard() {
-  echo "T-T1: hung opencode + AG_REVIEW_TIMEOUT=2 → bounded failure, not a hang"
+  echo "T-T1: hung opencode + AG_REVIEW_PI_TIMEOUT=2 → bounded failure, not a hang"
   local start elapsed
   start=$(date +%s)
-  review_with "hang/gpt-5.5" env AG_REVIEW_TIMEOUT=2
+  review_with "hang/gpt-5.5" env AG_REVIEW_PI_TIMEOUT=2
   elapsed=$(( $(date +%s) - start ))
   assert "outer guard did not have to kill it (rc != 124)" \
     "$([[ $RC -ne 124 ]] && echo true || echo false)"
@@ -278,7 +302,7 @@ test_exhausted_reported_once() {
   PROMPT_FILE=$(mktemp); echo "review this change" > "$PROMPT_FILE"
   RESULT_FILE=$(mktemp)
   local err_panel
-  err_panel=$(AGENT_GATES_DIR="$CAP_DIR" OC_REVIEW_OPENCODE="$FAKE_OC/opencode" \
+  err_panel=$(AGENT_GATES_DIR="$CAP_DIR" AG_REVIEW_PI="$FAKE_OC/pi" \
     AG_REVIEW_CODEX="/nonexistent/codex" \
     node "$WITH_TIMEOUT" 45 bash "$REVIEW_CMD" "$PROMPT_FILE" --result "$RESULT_FILE" 2>&1 >/dev/null)
   n=$(printf '%s\n' "$err_panel" | grep -c 'HETERO_EXHAUSTED')
@@ -290,7 +314,7 @@ test_exhausted_reported_once() {
   PROMPT_FILE=$(mktemp); echo "review this change" > "$PROMPT_FILE"
   RESULT_FILE=$(mktemp)
   local err_off
-  err_off=$(AGENT_GATES_DIR="$CAP_DIR" OC_REVIEW_OPENCODE="$FAKE_OC/opencode" \
+  err_off=$(AGENT_GATES_DIR="$CAP_DIR" AG_REVIEW_PI="$FAKE_OC/pi" \
     AG_REVIEW_CODEX="/nonexistent/codex" \
     node "$WITH_TIMEOUT" 45 bash "$REVIEW_CMD" "$PROMPT_FILE" --result "$RESULT_FILE" 2>&1 >/dev/null)
   n=$(printf '%s\n' "$err_off" | grep -c 'HETERO_EXHAUSTED')
@@ -298,20 +322,9 @@ test_exhausted_reported_once() {
   cleanup_case
 }
 
-test_hetero_self_heals_serve() {
-  echo "T-S1: hetero path ensures the shared serve rather than only probing it"
-  # Source-level guard, not a behaviour test: oc_serve_ensure's own behaviour is covered by
-  # tests/run_oc_serve.sh, and _oc_serve_start shells out to a hardcoded /usr/bin/nohup that
-  # cannot be stubbed from here. What this pins is the regression that actually bit —
-  # _try_review_model probing with oc_serve_health_check, so a dead shared serve made the
-  # opencode channel permanently unavailable while legacy run_opencode self-healed.
-  local sel="$SCRIPT_DIR/../lib/hetero/select.sh"
-  local body; body=$(awk '/^_try_review_model\(\)/,/^\}/' "$sel")
-  assert "calls oc_serve_ensure" \
-    "$(printf '%s' "$body" | grep -q 'oc_serve_ensure' && echo true || echo false)"
-  assert "does not gate solely on oc_serve_health_check" \
-    "$(printf '%s' "$body" | grep -q 'if oc_serve_health_check' && echo false || echo true)"
-}
+# 🔴 test_hetero_self_heals_serve() 于 2026-09-10 删除：它是对 _try_review_model 里
+# opencode 分支必须调 oc_serve_ensure 的源码级守卫，而 opencode 已从本机卸载、
+# 该分支已从审查路径移除 ⇒ 守卫的对象不存在了。
 
 test_timeout_wrapper_missing_fails_closed() {
   echo "T-T2: timeout wrapper missing → fail-closed, not a silent unbounded run"
@@ -325,7 +338,7 @@ test_timeout_wrapper_missing_fails_closed() {
   make_cap "plain/gpt-5.5" "" "off"
   PROMPT_FILE=$(mktemp); echo "review this change" > "$PROMPT_FILE"
   local err rc
-  err=$(AGENT_GATES_DIR="$CAP_DIR" OC_REVIEW_OPENCODE="$FAKE_OC/opencode" \
+  err=$(AGENT_GATES_DIR="$CAP_DIR" AG_REVIEW_PI="$FAKE_OC/pi" \
     AG_REVIEW_CODEX="/nonexistent/codex" \
     node "$WITH_TIMEOUT" 45 bash "$fake_root/bin/agent-gates-review" "$PROMPT_FILE" 2>&1 >/dev/null)
   rc=$?
@@ -350,7 +363,7 @@ test_hetero_falls_back_to_codex() {
   PROMPT_FILE=$(mktemp); echo "review this change" > "$PROMPT_FILE"
   RESULT_FILE=$(mktemp)
   local out rc
-  out=$(AGENT_GATES_DIR="$CAP_DIR" OC_REVIEW_OPENCODE="$FAKE_OC/opencode" \
+  out=$(AGENT_GATES_DIR="$CAP_DIR" AG_REVIEW_PI="$FAKE_OC/pi" \
     AG_REVIEW_CODEX="$FAKE_CX/codex" \
     node "$WITH_TIMEOUT" 45 bash "$REVIEW_CMD" "$PROMPT_FILE" --result "$RESULT_FILE" 2>/dev/null)
   rc=$?
@@ -374,7 +387,7 @@ test_hetero_exhausted_when_no_codex() {
   PROMPT_FILE=$(mktemp); echo "review this change" > "$PROMPT_FILE"
   RESULT_FILE=$(mktemp)
   local out rc
-  out=$(AGENT_GATES_DIR="$CAP_DIR" OC_REVIEW_OPENCODE="$FAKE_OC/opencode" \
+  out=$(AGENT_GATES_DIR="$CAP_DIR" AG_REVIEW_PI="$FAKE_OC/pi" \
     AG_REVIEW_CODEX="/nonexistent/codex" \
     node "$WITH_TIMEOUT" 45 bash "$REVIEW_CMD" "$PROMPT_FILE" --result "$RESULT_FILE" 2>&1)
   rc=$?
@@ -391,7 +404,7 @@ test_panel_chain_diagnostics() {
   PROMPT_FILE=$(mktemp); echo "review this change" > "$PROMPT_FILE"
   RESULT_FILE=$(mktemp)
   local err rc
-  err=$(AGENT_GATES_DIR="$CAP_DIR" OC_REVIEW_OPENCODE="$FAKE_OC/opencode" \
+  err=$(AGENT_GATES_DIR="$CAP_DIR" AG_REVIEW_PI="$FAKE_OC/pi" \
     AG_REVIEW_CODEX="/nonexistent/codex" \
     node "$WITH_TIMEOUT" 45 bash "$REVIEW_CMD" "$PROMPT_FILE" --result "$RESULT_FILE" 2>&1 >/dev/null)
   rc=$?
@@ -410,7 +423,7 @@ test_diag_empty_output
 test_diag_crash_exit
 test_diag_names_the_model
 test_exhausted_reported_once
-test_hetero_self_heals_serve
+
 test_verdict_tolerance
 test_timeout_guard
 test_timeout_wrapper_missing_fails_closed

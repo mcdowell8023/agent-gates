@@ -16,14 +16,17 @@ Code review quality enforcement for AI-assisted development. This skill defines 
 
 ---
 
-## 1. Cross-Check Rule (⛔ Hard Constraint)
+## 1. Cross-Check Rule（推荐，不强制）
 
-All completed development and documentation MUST be independently verified by a different model/agent before delivery.
+完成的开发与文档**推荐**交给另一个模型 / agent 独立复核后再交付。用户 2026-10-11 明确：从一开始就是推荐异构审查，
+不是强制；token 有限，按实际取舍。选档顺序见 §8「异构 > 同构 > 不查」。测试、编译等验证不在此列，照常必须跑。
 
-| Work type | Required cross-check |
+| Work type | Recommended cross-check |
 | --- | --- |
-| Code (feature / bugfix / refactor) | Different model/agent does code review + runs tests |
+| Code (feature / bugfix / refactor) | Different model/agent does code review（测试照常由实现者跑） |
 | Documentation | Different model/agent checks accuracy, completeness, actionability |
+
+⚠️ 门禁层面：合进 strict 分支时 CHECK 5 默认要一份审查产物；决定不查时用 `SKIP_REVIEW=1`，门禁会醒目打印。
 
 ### Recommended: `agent-gates-review` (v1.10.0+)
 
@@ -35,7 +38,7 @@ Instead of manually choosing a review tool, use the unified review command:
 
 It reads `~/.agent-gates/review-capability.json`, routes to the best available heterogeneous tool (pi first since v2.4.0; opencode is disabled by default — see the priority table in §8), and auto-appends `REVIEW_TOOL` / `REVIEW_MODEL` / `REVIEW_LEVEL` markers to the output. On L0 machines (no heterogeneous tool) it exits 78 — caller falls back to same-model agent-tool.
 
-**Use this command instead of spawning a Claude subagent for review.** On L1+ machines, using a same-model subagent violates the heterogeneous-review requirement (红线 #8).
+**Use this command instead of spawning a Claude subagent for review.** 审查级别按「异构 > 同构 > 不查」选（§8）：异构通道可用时就别用同模型子 agent；异构都不可用时，同模型独立会话审查是合法兜底，会记 L0、门禁告警放行。
 
 #### ⛔ 审查失败时：先读 `review-fail[<模型>]:` 那一行
 
@@ -58,7 +61,7 @@ v2.0.2 起每种失败单独报一行。`HETERO_EXHAUSTED` 只是汇总，**本�
 
 ```bash
 SKIP_VERIFY=1 git commit ...      # 跳过 CHECK 6
-SKIP_REVIEW=1 git commit ...      # 跳过 CHECK 5
+SKIP_REVIEW=1 git commit ...      # 跳过 CHECK 5（v2.10.0 起 hook 才真的读它；也是「不查」档的出口）
 agent-gates-verify-ack <run-id>   # 给 INCOMPLETE 的 verify 记录用户放行（⚠️ 4 小时时效）
 ```
 
@@ -231,7 +234,7 @@ Cross-check MUST use a different model/vendor. Priority order:
 > 审查者只读是硬规则：它的产出是判断，不是补丁。
 | 2. **codex CLI + GPT-5 series** (备选) | Two sub-commands (see below) | pi 不可用，或 prompt 过长 |
 | 3. 🔻 **opencode CLI**（降级，需显式启用） | `opencode run --pure -m <provider/model> --dir <workdir> --format json "<prompt>"` | ⛔ **默认不要用**——见下方红字。仅在 pi 与 codex 都不可用时 |
-| 4. **code-reviewer / critic agent** (兜底) | Same Claude model, different agent role | **Only when 1–3 are genuinely unavailable** (true L0 machine). NOT a shortcut when a heterogeneous tool is installed — see §8 "L0 Fallback is a VIOLATION When L1+ is Available". |
+| 4. **code-reviewer / critic agent**（同构兜底） | Same Claude model, different agent role | **只在 1–3 的异构通道都用不了时**（额度用完、未登录、真 L0 机器）。产物记 L0、门禁告警放行；⛔ 不是异构可用时图省事的捷径 —— 见 §8「异构 > 同构 > 不查」。 |
 
 ### ⛔ 为什么 opencode 从首选降到第 3（2026-08-26）
 
@@ -272,12 +275,33 @@ agent-gates v2.4.0 起该通道默认关闭，v2.4.1 起 `oc-review` 在禁用�
 
 ### Model Selection for Cross-Check
 
+全部型号 2026-09-08 逐个探活过（`opencode models` 列举 + `pi -p ... "Reply with exactly: OK"` 实调）。
+
 | Scenario | Recommended model |
 | --- | --- |
 | Development review (find bugs/gaps) | `github-copilot/gpt-5.6-sol` |
-| Diagnosis / root-cause verification | `openai/gpt-5.5-pro` (strong reasoning) |
-| Large document review | `github-copilot/gemini-3.1-pro-preview` (long context + different perspective) |
+| 换族复核（建议第二轮换族，⛔ 门禁不强制、见下文） | `github-copilot/grok-4.5`（xai，500K 上下文） |
+| 性价比优先 | `volcengine-coding/deepseek-v4-flash` |
 | Small patch / short code | code-reviewer agent (fast, acceptable for trivial) |
+
+⚠️ 这张表 2026-09-08 之前有两行是**填不出来的型号**，两条都不会报"型号不存在"，只会表现为
+审查失败或降级：
+
+- `openai/gpt-5.5-pro` —— **`openai` 这个 provider 根本不存在**。opencode 侧只有
+  github-copilot / opencode / openrouter-free / volcengine-*；pi 侧只有 volcengine-coding /
+  volcengine-agent-plan / jdcloud-joyagent / github-copilot。
+- 同一次复查还发现推荐数据里三个 `bailian/*` 也在同样的状态：**本机两个 catalog 都没有
+  bailian provider**，所以它们和下架前的 gemini 一样选不出来（没删是因为别的机器可能配了，
+  见 `data/review-model-recommendations.json` 的 `_note_bailian_unverified`）。
+- `github-copilot/gemini-3.1-pro-preview` —— 型号已下架，两个 catalog 里都查不到，
+  剩下的 gemini 全是 `gemini-*-flash`，而 `build_review_models` / `filter_panel_pool` 里
+  各有一句**硬编码** `[[ "$name" == *flash* ]] && continue`（⛔ 剔 flash 靠的是这句，
+  **不是** `data/review-model-recommendations.json` 的 `excluded_patterns` —— 那个字段
+  全库 `lib/` 零引用，`glm` 写在里面也照样进池）。也就是说
+  **gemini 这个格子在被发现之前就已经是空的**。
+
+⛔ 往这张表里填任何型号之前先探活：`pi -p --provider <p> --model <m> --no-tools "Reply with exactly: OK"`。
+反过来也别把一次探测失败写成永久结论 —— `gpt-5.5` 在 09-01 连续 5 次返回 400，09-08 复验又正常了。
 
 ### opencode Command Template
 
@@ -357,12 +381,13 @@ If Priority #1 (opencode CLI) times out or errors:
 3. If codex also unavailable → fall through to Priority #3 (code-reviewer agent).
 4. Document which tool was actually used in the review evidence.
 
-### Non-Negotiable
+### 做了审查时必须守住的
 
-- Cross-check failure → fix → re-verify. Never skip.
-- Self-review by the same agent/model that wrote the code does NOT count.
+- 审查给出阻断项 → 修 → 按 §2.5 走 R2 闭合轮；⛔ 不能拿着 ISSUES 结论当没审过
+- 没做审查（不查档）时报告里写明原因，⛔ 不要声称「已审查」
+- 实现会话自己的自评不算审查；另开会话的同族审查是合法兜底（记 L0、告警放行），见 §8「异构 > 同构 > 不查」。
 - Evidence of cross-check must be available (reviewer output, pass/fail).
-- Same-model same-agent self-review violates 红线 #8.
+- 同一会话的自评违反红线 #8（「不同模型/agent」）；同族模型的独立会话属于「不同 agent」。
 
 ### Relationship to Three-Agent Pipeline
 
@@ -374,27 +399,152 @@ The Three-Agent Pipeline alone does NOT satisfy the Cross-Check requirement unle
 
 ---
 
-## 2. When to Use Three-Agent Review vs Simplified Review
+## 2. 审查形态：默认单个异构审查员（v2.10.0）
 
-### Three-Agent Review (Full Pipeline) — REQUIRED when:
+合并点的代码审查**默认派一个异构审查员**，一份清单同时覆盖需求核对与代码质量（§9.3 模板）。
+需求遗漏由 CHECK 6 verify 专门负责，不再让 Spec Reviewer 重复做一遍。
 
-- Changes span ≥3 files
-- Involves security, authentication, payment, or data migration
-- User explicitly requests review
-- Plan Review Gate (🔴) marked the task as critical
-- Introduces new architecture patterns or external interfaces
+| 形态 | 什么时候用 |
+|---|---|
+| ⭐ 单个异构审查员（默认） | 合并进集成分支时的整批审查，包括 ≥3 文件、安全 / 认证 / 支付 / 数据迁移 |
+| 三 Agent 流水线（§3） | **只在用户明确要求时**用。2026-09-24 实测：一次合并 4 个审查 agent、6 轮、约 $32，每多一个角色就多一份上下文重读 |
+| 不派审查 | 单文件 ≤20 行的简单修改、纯配置、纯文档 / 注释 |
 
-### Simplified Review (Self-assessment + Single Oracle Check) — ALLOWED when:
+**跑法**：一次性 CLI 调用（`codex exec --sandbox read-only` / `pi -p --tools read,grep,find,ls`），
+只喂 diff 与需求文档，⛔ 不开 Paseo 长会话让审查员自己翻仓库 —— 09-24 那 $32 里，
+输出约 7 万 token，cached 读约 2334 万 token，大头就是长会话反复重读上下文。
 
-- Single file, ≤20 lines of simple modification
-- Pure configuration change (no business logic)
-- Documentation / comment changes only
+**审查单元**：一个仓一个单元；diff 超过约 1500 行才按模块拆（大 diff 审不收敛，见 §2.5 判据一）。
+每轮每个单元只派 1 个审查员。
 
-**When in doubt, use Full Pipeline.**
+---
+
+## 2.5 审查的颗粒度与时机（⛔ 硬性约束）
+
+上面 §2 回答「用哪种审查」，这一节回答**审多大一块、什么时候审**。两者都错才是最贵的组合。
+
+### 🔴 实况：一条会话为此烧掉 11 个 agent
+
+2026-09-10，任务被拆成小块并行开发。那条会话**每修完一小条就派一个 agent 跑一次全量审查**，
+自己每轮再复核一次全量 —— 它自己算的账是「11 个 agent + 至少 7 次全量跑」。
+
+这些审查**全部白烧**，不是「有点浪费」：
+
+| | 实测 |
+|---|---|
+| 派出的审查 agent | 11 个 |
+| 全量复核 | ≥7 次 |
+| 其中一份审查**没看见**的后续改动 | **637+ 行**，包括它自己上一轮要求的修复 |
+| 合并点仍需重跑 | 全部 |
+
+机制：审查产物带锚点（`REVIEW_HEAD` / `REVIEW_FILES_SHA256` / `REVIEW_DIFF_SHA256`）。
+**代码一改，锚点就对不上，那份审查在门禁眼里不作数。**
+迭代期每改一小条审一次 ⇒ 每一次都在给**中间态**出结论，而中间态一个都不会是最终代码。
+
+### 判据一：审多大一块
+
+审查范围 = **这一小步已经做完的产出**，不是分支全量，也不是「顺手把整个模块看一遍」。
+
+```bash
+# ⭐ 对：只给这一步的 diff，并显式告诉审查者边界
+git diff <上次已审的 commit>..HEAD -- <这一步涉及的文件>
+
+# ⛔ 错：分支全量（审查者的注意力被摊薄，findings 集中在报告层，核心问题反而漏）
+git diff main..HEAD
+```
+
+⚠️ 大 diff 审**不收敛**：实测 1800 行 / 19 文件审了 9 轮，每轮都有新 findings，
+其中 3 条是修前几轮时自己引入的；拆成 5 个文件后**一轮**就抓到那 9 轮全漏的关键问题。
+出现下面任一条就该拆，而不是再审一轮：
+
+- 连续 2 轮 findings 数量没下降
+- findings 集中在同一个文件/同一层（说明其余部分根本没被审到）
+- 有 findings 是「修上一轮引入的」
+
+### 判据二：什么时候审
+
+| 阶段 | 审不审 | 为什么 |
+|---|---|---|
+| 模块分支上小步迭代 | ⛔ **不审** | 锚点下一次改动就作废 |
+| 一小步做完但还要接着改同一批 | ⛔ **不审** | 同上 |
+| 合进 test 做验收 | ⛔ **不审**（推荐配置：`strict_branches` 不含 `test`；⚠️ 没写 `strict_branches` 时内置默认含 `test`，要显式去掉） | 验收（真实数据、联调）还会改代码；而且合 test 那份审查锚在 test 的 HEAD 上，到合 master 时必然作废 |
+| 验收通过、准备合进 master | ⭐ **审一次，审整批** | 此刻的代码就是最终代码 |
+| 已审过且**此后没有新改动** | ⛔ **不重审** | 锚点还对得上，重审只是重付一次钱 |
+| 审完又改了代码 | ⭐ **R2 闭合轮**（§9.5） | 只核阻断项与修复 diff，不整批重审 |
+
+⚠️ 例外：会在测试环境留下难撤回副作用的部分 —— 共用测试库的破坏性 migration、数据回填脚本、
+会真实外发短信 / 邮件的逻辑 —— **部署 test 之前**单独审这一部分，不审整批。
+
+⛔ 这些判据**只在 commit 时才打印**，写代码阶段没有任何东西拦你。所以要主动问（下一节）。
+
+### 合进 master 的标准顺序
+
+```
+test 上冒烟 + 验收通过
+  → R1：整批审查（每个审查单元 1 个审查员，§9.3）
+  → 修阻断项
+  → 部署 test，定向回归（只回归修复影响到的验收项 + 冒烟）
+  → R2：闭合轮（只发给 R1 有阻断项的单元，§9.5）
+  → verify（CHECK 6，整批 1 次，放最后 —— 它按精确 diff 锚定）
+  → 合 master
+```
+
+- **为什么回归放在 R2 之前**：回归没过就先修，修好再发 R2，不额外多花一轮审查；R2 看的是回归通过后的最终代码。
+- **定向回归的范围**：不改变行为的修复（命名、日志、类型、删死代码）自动化测试通过即可，随这次部署带上；改变行为的修复（逻辑分支、接口契约、SQL、权限）部署 test 后回归它影响的验收项。审查员给阻断项时必须标注关联的验收标准，回归范围据此确定。
+- **master 在修复期间被别人前进**：不必整批重审 —— R2 在最新 master 上做，把解决冲突的 diff 一并纳入审查范围。
+
+### 判据三：最多审几轮（v2.10.0，代码强制）
+
+**每批自动审查最多 2 轮**（R1 整批 + R2 闭合轮）。批次 = 目标分支 | 源分支 | merge-base；
+同一份暂存状态重复审只算一轮。第 3 轮 `agent-gates-review` 直接 **exit 73**，
+派发（`--route paseo`）、直跑、导入（`--import-result`）三条路径都拦。
+
+- 两轮还不收敛 ⇒ 先做 §4 的不收敛诊断，⛔ 不要直接再发一轮
+- 诊断后确需再审：`--escalated "<诊断结论>"`，理由写进产物（`REVIEW_ESCALATED`）
+- 调整上限：`.agent/gates.json` 的 `review.max_rounds`（`0` = 不限）或 `AGENT_GATES_REVIEW_MAX_ROUNDS`
+- 计划审查同样最多 2 轮（R1 全量 + R2 闭合轮），见 `agent-workflow-rules` §7
+- ⚠️ 这是预算护栏，不是安全边界：分支改名、detached merge、功能分支把 master 合进来都会让计数重置
+
+### 派发审查之前先问一句（零成本）
+
+```bash
+agent-gates-review --due            # 判当前仓库；也可 -C <dir> 判别的仓库
+```
+
+```
+due=no
+reason=review mode is merge-only and 'feat/module-a' is not an integration branch
+branch=feat/module-a
+review_mode=merge-only
+when=test master main
+```
+
+- `exit 0` = 该审 / `exit 79` = 轮不到；stdout 恒为 key=value 行，可直接脚本解析
+- ⛔ 不需要 prompt 文件、不调任何模型、不写任何产物 —— 问它不花钱
+- 判不出来时 fail-open（`due=yes` + `review_mode=undetermined`），⛔ 它不会变成新的堵路
+- v2.10.0 追加 `rounds_used=` / `rounds_max=` 两行（恒为数字）。**先暂存 merge 再问**，
+  批次才算得对。⛔ `rounds_max > 0` 且 `rounds_used >= rounds_max` 时**不要派审查 agent** ——
+  自己用 Paseo 直接派的审查不经过本命令，这两行是唯一能在花钱前拦住它的信号
+
+`due=no` 时**不要派审查 agent**。先把这一批改完，合并进集成分支，那时审一次。
+真要提前审：`agent-gates-review --early`（会被打出来，且**不替代**合并点那一次）。
+
+### 反模式（出现即停手）
+
+- 一小步没做完就派全量审查 → 停，那份结论在下一次改动后作废
+- 每个 sub-task 各派一个审查 agent → 停，合并点审一次整批
+- R1 修完后整批重审 → 停，R2 只核阻断项与修复 diff（§9.5）
+- 撞到 exit 73 就换个分支名 / 换个入口再审 → 停，先做 §4 不收敛诊断
+- 合 test 之前就审整批 → 停，验收还会改代码（破坏性 migration / 外发消息类例外）
+- 同一批代码没有新改动却审第二次 → 停，先看上一份审查的锚点还对不对
+- 审完又改了代码但不重跑，拿旧审查去过门禁 → 停，这是**伪造产物**
+- 「为了保险起见先审一遍」 → 停，保险的做法是等这批改完
 
 ---
 
 ## 3. Three-Agent Review Pipeline
+
+> v2.10.0 起**只在用户明确要求时使用**；默认形态是 §2 的单个异构审查员。
 
 Strict sequential execution. No skipping or merging roles.
 
@@ -494,20 +644,35 @@ The agent that wrote the code produces a self-assessment report:
 
 ---
 
-## 4. Issue Severity & Handling
+## 4. Issue Severity & Handling（v2.10.0）
 
-| Severity | Definition | Required Action |
+只有两档。**`VERDICT: ISSUES` 当且仅当至少有一个阻断项**；只有建议时写 `VERDICT: PASS`。
+
+| 档 | 定义 | 处理 |
 | --- | --- | --- |
-| ❌ Critical | Functional error, security vulnerability, data loss risk | Must fix → **restart full Three-Agent Pipeline** |
-| ⚠️ Important | Poor maintainability, insufficient tests, performance risk | Must fix → **re-run Quality Reviewer only** |
-| 💡 Suggestion | Style preference, optional optimization | Record but don't block delivery |
+| 🚫 阻断 | 必须同时写出：① 具体失败场景（什么输入 / 状态 → 什么错误结果）② 关联的验收标准，或属于安全漏洞 / 数据丢失 / 生产事故风险 | 修 → 部署 test 定向回归 → R2 闭合轮 |
+| 💡 建议 | 其余一切：风格、可维护性、可选优化、补边界测试 | 记入后续待办，**不改代码、不触发新一轮** |
 
-### Anti-Loop Rule
+**测试相关的判定**（测试代码量超过业务代码的主要推手之一，单独写明）：
+- 某条验收标准**完全没有**测试覆盖 ⇒ 阻断
+- 补边界用例、补异常分支、提高覆盖率 ⇒ 建议（除非能写出对应的真实失败场景）
+- ⛔ 不因「测试不够充分」这类无失败场景的意见判 ISSUES
 
-- Same issue: max **2 rounds** of fix-and-re-review
-- After 2 rounds still unresolved → escalate to user for decision
-- Re-review only covers modified code, not unchanged sections
-- **Cascading new issues**: if a fix introduces >2 NEW issues (not the original), escalate to user instead of continuing fix cycles indefinitely
+说不出失败场景的「阻断项」，主会话直接降为建议并写明理由，不必再问审查员、也不找用户。
+
+### 不收敛诊断（替代原 Anti-Loop Rule）
+
+R2 之后仍有阻断项，或修复引入了新的阻断项 ⇒ **不再自动发第 3 轮**（门禁 exit 73，见 §2.5 判据三）。
+不收敛本身就是信号。由主会话先诊断、带建议，⛔ 不要把一堆 findings 原样丢给用户裁决：
+
+| 诊断 | 判据 | 主会话直接做什么 |
+|---|---|---|
+| 审查员越界 / 挑刺 | 阻断项说不出具体失败场景，或关联不到任何验收标准 | 降为建议，写明理由，**不找用户** |
+| 过度设计 | 阻断项落在验收范围外的代码上（多余抽象、可配置项、没人要的兜底分支） | 删掉这部分代码，而不是修它 |
+| 方向错了 | 阻断项集中在同一层；或修复又引入新阻断；或触及数据模型、接口契约等设计前提 | 停止打补丁，回到方案层：重写这一块或换做法（必要时重走计划审查） |
+| 真缺陷且修复成本高 | 问题成立，修它要动大范围 | **只有这一类找用户**，用 §9.6 模板：影响、概率、回滚方式、建议，用户只答「带已知问题上线」还是「延期」 |
+
+诊断后确需第 3 轮：`agent-gates-review ... --escalated "<诊断结论>"`，理由写进产物。
 
 ---
 
@@ -632,8 +797,8 @@ Return: PASS or specific issues with file:line references.
 ### When in the Development Cycle
 
 ```
-Plan → Plan Review (agent-workflow-rules §3) → Implement (TDD) → Self-Assessment → 
-Three-Agent Review (this skill) → Fix issues → Re-review → Deliver
+Plan → Plan Review（≤2 轮）→ Implement (TDD) → 合 test 验收 →
+R1 整批审查（单个异构审查员）→ 修阻断项 → 部署 test 定向回归 → R2 闭合轮 → verify → 合 master
 ```
 
 ### Relationship to Other Gates
@@ -652,10 +817,10 @@ Three-Agent Review (this skill) → Fix issues → Re-review → Deliver
 
 A review is NOT complete without:
 
-- [ ] Reviewer output with per-item verdicts
-- [ ] All ❌ items resolved (with fix evidence)
-- [ ] Final reviewer output showing all ✅
-- [ ] Tests passing after any review-prompted fixes
+- [ ] Reviewer output with 阻断项 / 建议 分列
+- [ ] All 🚫 阻断项 resolved (with fix evidence)，或按 §4 不收敛诊断降级 / 上报
+- [ ] Final verdict `VERDICT: PASS`（建议已记入后续待办）
+- [ ] Tests passing after any review-prompted fixes，改变行为的修复已在 test 定向回归
 
 **Forbidden:** Claiming "reviewed" without reviewer output artifact.
 
@@ -682,7 +847,50 @@ Note: L0/L1/L2/L3 refer to capability levels set by `doctor.sh`, not route prior
 
 **Route 1 — use `oc-review`, not bare `opencode run`** (v1.13.0): `~/.agent-gates/bin/oc-review` wraps `opencode run` with **retry-on-empty** and **shared serve** management. It auto-starts a persistent `opencode serve --pure --port 4096` and injects `--attach` to route all runs through it, eliminating per-run serve stacking (the P1 memory leak that caused kernel panic). On persistent empty output it exits **75** with an `oc-review:`-prefixed stderr line → treat as route failure and fall through to route 2 (codex). Set `OC_SERVE_DISABLED=1` to skip serve integration. Orphaned serves are swept by `~/.agent-gates/bin/oc-reaper --apply`.
 
-**Model selection (v1.13.0 D6)**: `doctor.sh` runs the D6 algorithm to detect available models, exclude flash/coding-vendor duplicates, probe reachability, and persist `review_models` in `review-capability.json`. Fields: `coding_vendor` (inferred from platform), `primary` (reverse-heterogeneous pick), `panel_pool` (verified alternative models), `panel_active` (concurrent reviewers). Static recommendations live in `~/.agent-gates/data/review-model-recommendations.json`.
+**Model selection (v1.13.0 D6)**: `doctor.sh` runs the D6 algorithm to detect available models, exclude flash/coding-vendor duplicates, probe reachability, and persist `review_models` in `review-capability.json`. Fields: `coding_vendor` (inferred from platform), `primary` (reverse-heterogeneous pick), `panel_pool` (verified alternative models), `panel_active` (how many of `panel_pool` are
+eligible — **not** how many reviewers run at once; see below). Static recommendations live in `~/.agent-gates/data/review-model-recommendations.json`.
+
+⚠️ **一次异构审查只有一路，不是两路。** 名字容易误读，而且这里其实是**两套互不相干的机制**，
+第一版说明把它们绑在一起，是审查抓出来的新错误断言：
+
+| | verify / 门禁派发 | `agent-gates-review` 的 hetero 分支 |
+| --- | --- | --- |
+| 入口 | `hetero_dispatch`（`lib/hetero/dispatch.sh`） | `run_fallback_chain`（`lib/hetero/select.sh`） |
+| 读哪个配置 | `pi_models.primary` / `HETERO_OC_MODEL` | `review_models.primary` + `panel_pool` |
+| 受 `channels.*.enabled` 约束 | ✅ 是 | ✅ 是（**v2.9.3 起**） |
+| 有 pi 通道 | ✅ 一直有 | ✅ **v2.9.3 起** |
+| 有 opencode 通道 | ✅ 有 | ⛔ **v2.9.4 起没有了** —— 已删除 |
+
+🔴 **2026-09-10：opencode 已从本机卸载，审查路径只剩 pi。** `_review_via_opencode` 与
+legacy 路由的 `run_opencode` 两份实现都删了（只拔一份等于没拔）。9 个纯 opencode 测试
+文件一并退役。清理侧的 `oc-reaper` / `serve.sh` 暂留 —— 万一冒出野 serve 能清，
+且不参与审查路径。⛔ 不要"为了兼容"加回来；要加通道就加新的 one-shot CLI。
+
+⚠️ **v2.9.3 之前这一行是「❌ 否」**：`_try_review_model` 硬编码 opencode 二进制、
+不查任何通道开关，`agent-gates-review` 全文对 pi 零命中，而唯一实现了 pi 通道又会读
+那个开关的 `hetero_dispatch` **没有任何生产调用点**。所以 2026-08-26 写下的
+`channels.opencode.enabled=false` 对实际被走到的审查路径完全无效 —— 用户明令禁止的
+通道照样在审查并报 PASS。现在两边同口径。
+
+两边都是**串行 fallback，第一个成功就停**，不是并发扇出：
+
+- `hetero_dispatch` 每段通道前面都是 `if [[ "$channel" == "exhausted" ]]`。链是
+  paseo → pi → opencode → codex → codebuddy → **exhausted**。
+  ⚠️ 链尾**没有** agent-tool 兜底：codebuddy 之后 `channel` 保持 `exhausted`，
+  源码里那段注释叫它 "echo fallback"。别指望链尾还能自动补一次审查。
+- `run_fallback_chain` 先试 `primary`，**只有 primary 失败**才依次试 panel；
+  而每个型号内部又先试 pi、再试 opencode（`_try_review_model` 是通道路由器）。
+  模型 id 两边通用，所以 `review_models` 一份配置同时服务两个通道，⛔ 不需要为 pi 另配键。
+- `panel_active` 是 `panel_pool[:panel_active]` 的**切片上限**，不是并发数、也不完全等于备胎链长度
+  —— 实际链长 = `min(panel_active, len(panel_pool))`，还要再过 `panel_mode`：
+  `off` 完全不用 panel / `always` 总用 / **`auto` 看 prompt 长度 ≥ 500 字符**
+  （`bin/agent-gates-review:269-271` 的 `_AUTO_PANEL_THRESHOLD`）。
+  ⚠️ `lib/hetero/select.sh` 里的 `get_review_models()` 对 `auto` 用的是另一套判据
+  （severity 为 critical|important），但那个函数**只有 `tests/run_review_selection.sh` 在调**，
+  `bin/` 零引用 —— 生产走的是 prompt 长度那条。看文档时别把它当成生效逻辑。
+
+想要真的两路，得**同一份 diff 派两次**、两次换族。⛔ 仓库不记录上一轮 reviewer 的族，
+也没有跨轮校验 —— 「第二轮换族」是外部工作规则，不是 agent-gates 能强制的东西。
 
 **Route 2 — codex prompt MUST go via stdin** (`< prompt-file`), NOT as a positional arg. `codex exec "..."` blocks on "Reading additional input from stdin..." in non-TTY/background contexts. `-s read-only` sandboxes the reviewer so it physically cannot modify files.
 
@@ -736,28 +944,25 @@ Each route has a default timeout. When exceeded, the agent automatically falls t
 | Paseo (L1) | 5 minutes | Async; agent polls for completion |
 | Agent tool (L0) | No timeout | Runs in-process |
 
-### L0 Fallback is a VIOLATION When L1+ is Available (⛔)
+### 审查级别：异构 > 同构 > 不查（v2.10.0，用户 2026-10-11 定）
 
-The Agent-tool / same-model fallback (L0) is **only** acceptable on a genuine L0 machine — one where `review-capability.json` reports `level: L0` because no opencode/codex/OMC-plugin is installed. 
+⛔ **不强制具体模型**。只按这个顺序选，能用前一档就不用后一档：
 
-**If the machine's capability is L1 or higher, using the L0 same-model fallback is a VIOLATION of the different-model requirement (红线 #8), not an acceptable degradation.** "opencode hung once before" / "it's faster to just spawn a sub-agent" are NOT valid reasons to skip heterogeneous review when a heterogeneous tool is installed. Spawning `general-purpose` / `oracle` with no model override on an Opus session = Opus reviewing Opus = same model = does not count.
+| 档 | 是什么 | 门禁怎么对待 |
+|---|---|---|
+| 1. 异构（L1+） | 审查者与实现者不同族（按 `lib/hetero/family.sh` 判，实现者族默认 `implementer_family`，可用 `HETERO_IMPLEMENTER_FAMILY` 覆盖） | 放行 |
+| 2. 同构（L0） | 同族模型、但在**独立会话 / agent** 里审；异构通道都不可用（额度用完、未登录）时用 | **告警放行**，产物记 `REVIEW_LEVEL: L0`，报告里写明为什么没用异构 |
+| 3. 不查 | 同构也跑不了 | `SKIP_REVIEW=1`（CHECK 5）、`SKIP_PLAN_CHECK=1`（CHECK 3）；门禁醒目打印，报告里写明 |
 
-Real-world finding (2026-06-02 transcript mining): ~90% of cross-review sessions on L2/L3 machines silently fell back to same-model. That is why this is now physically enforced (below), not just convention.
-
-### Physical Enforcement (v1.7.0)
-
-The CLI pre-commit gate (`agent-quality-gate.sh`) reads `review-capability.json` and **blocks the commit** when:
-- machine capability is `L1`/`L2`/`L3`, AND
-- the latest review file has `REVIEW_LEVEL: L0` **or no `REVIEW_LEVEL` marker at all**.
-
-So on any machine with opencode/codex installed, a review file MUST carry a `<!-- REVIEW_LEVEL: L1 -->` (or higher) header proving a different model was used. A true L0 machine is exempt (no alternative exists).
-
-- Escape hatch (genuine exceptions only — stale config, emergency): `SKIP_HETERO_CHECK=1`.
-- `REQUIRE_HETEROGENEOUS=1` is the agent-side equivalent for the in-session review flow (treat L0 as fail, not degraded pass).
-
-**How to fix L0**: Install at least one external review tool to reach L1+:
-- Fastest: `npm install -g @openai/codex` (L1 — GPT cross-review)
-- Best: install opencode CLI from https://opencode.ai (L2 — multi-provider)
+- 实现会话**自己的自评不是审查**，任何一档都不算 —— 同构指的是另开一个会话审。
+- 导入的审查按 `--imported-model` / 已验证 agent 的**实际模型**定级，不再按本机能力级别；
+  Paseo 已验证 agent 先看 Model 的族、认不出再看 Provider。⛔ 不按 provider 名字一刀切：
+  实现者是 OpenAI 族时，Claude 审查恰恰是异构。
+- 缺 `REVIEW_LEVEL` 标记仍然阻断：工具产出的产物都带这个标记，缺它说明产物不是工具产出的，
+  是完整性问题，与选什么模型无关。
+- 选型时先探测再选：撞到 429 / 未登录就换下一个异构通道，都不行才降到同构。
+  ⛔ 不要因为「上次某通道卡过」「派个同模型子 agent 更快」就跳过异构 ——
+  2026-06 的会话统计里，L2/L3 机器上约 90% 的交叉审查悄悄退回了同模型，这是要避免的。
 
 ### hetero-check Dispatch (v2.0.0 — Verifier / CHECK 6)
 
@@ -820,14 +1025,14 @@ Pre-written prompt templates for each review role. These solve the "sub-agent do
 | # | 维度 | 判定 | 说明 |
 |---|------|------|------|
 | 1 | 可维护性 | ✅/⚠️/❌ | 命名、结构、复杂度 |
-| 2 | 测试质量 | ✅/⚠️/❌ | 有意义、覆盖边界 |
+| 2 | 测试质量 | ✅/⚠️/❌ | 有意义；每条验收标准至少有一个测试（补边界只算建议） |
 | 3 | 代码风格 | ✅/⚠️/❌ | 项目约定一致 |
 | 4 | 安全 | ✅/⚠️/❌ | secrets、注入、权限 |
 | 5 | 性能 | ✅/⚠️/❌ | N+1、无界循环、内存泄露 |
 | 6 | 依赖合理性 | ✅/⚠️/❌ | 无多余依赖 |
 
-如有 ❌/⚠️,给出 file:line 引用。
-最后一行: VERDICT: PASS 或 VERDICT: ISSUES
+如有 ❌,必须写具体失败场景 + file:line,否则只能记 ⚠️(建议)。
+最后一行: 有 ❌ 写 VERDICT: ISSUES;只有 ⚠️ 或全 ✅ 写 VERDICT: PASS
 ```
 
 ### 9.3 Cross-Check Prompt (Heterogeneous Review)
@@ -841,16 +1046,21 @@ Pre-written prompt templates for each review role. These solve the "sub-agent do
 ## 待审查文件
 [列出文件路径]
 
+## 需求 / 验收标准
+[粘贴或给出路径；阻断项要关联到这里的编号]
+
 ## 检查重点
-1. 逻辑正确性 + 边界条件
-2. 测试覆盖充分性
-3. 安全 (hardcoded secrets, injection, permission)
-4. 代码风格与项目约定一致性
+1. 逻辑正确性：会不会在真实输入下得出错误结果
+2. 需求核对：每条验收标准是否实现、是否至少有一个测试覆盖（只问有没有，不要求补边界）
+3. 安全（hardcoded secrets, injection, permission）、数据丢失、生产事故风险
+4. 与项目既有约定是否冲突
 
 ## 输出要求
+- 先列「阻断项」：每条必须写 ① 具体失败场景（什么输入 / 状态 → 什么错误结果）② 关联的验收标准编号，或注明属于安全 / 数据丢失 / 生产事故；③ file:line
+- 再列「建议」：风格、可维护性、补边界测试等，不需要失败场景
+- 写不出失败场景的意见一律放进「建议」
 - 500 字以内
-- 每个问题引用 file:line
-- 最后一行: VERDICT: PASS 或 VERDICT: ISSUES
+- 最后一行只写结论：有阻断项写 VERDICT: ISSUES；没有阻断项写 VERDICT: PASS（只有建议也写 PASS）
 ```
 
 ### 9.4 Usage
@@ -861,3 +1071,36 @@ When performing a review, the agent:
 2. Fills in all `[placeholder]` fields with actual content (file paths, requirements, self-assessment).
 3. Sends the completed prompt through the route selected by §8 (Cross-Check Platform Routing).
 4. Parses the response for `VERDICT:` line to determine pass/fail.
+
+### 9.5 R2 闭合轮 Prompt（v2.10.0）
+
+R1 修完之后用。⛔ 不整批重审：只给 R1 的阻断项原文 + 修复 diff。
+
+```markdown
+你是闭合轮审查员，只读，不得修改文件。上一轮你给出了下面这些阻断项：
+[逐条粘贴 R1 阻断项原文，带编号]
+
+修复 diff：
+[git diff <R1 时的提交>..HEAD -- <修复涉及的文件>，master 前进过则附上解决冲突的 diff]
+
+只做两件事：
+1. 逐条判定上述阻断项是否已解决（已解决 / 未解决 + 理由）
+2. 检查修复 diff 本身是否引入新的阻断问题（同样必须写失败场景 + file:line）
+不要重审其他部分，不要提新的建议。
+300 字以内。最后一行：仍有阻断写 VERDICT: ISSUES，否则 VERDICT: PASS。
+```
+
+### 9.6 不收敛上报模板（只用于「真缺陷且修复成本高」）
+
+§4 诊断表前三类主会话自己处理，不用这个模板。
+
+```markdown
+## 需要你决定：带已知问题上线，还是延期
+
+- 问题：[一句话，含 file:line]
+- 影响：[哪些场景 / 用户 / 数据会受影响]
+- 概率：[什么条件下触发，有无数据支撑]
+- 为什么现在不修：[修复范围 / 风险]
+- 带问题上线的兜底：[监控、开关、回滚方式]
+- 我的建议：[上线并登记待办 / 延期]，理由：[…]
+```

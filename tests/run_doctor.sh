@@ -14,6 +14,17 @@ FAIL_COUNT=0
 # Override functions we don't want to actually execute so we can call main()
 # or individual checks in isolation.
 
+# 🔴 `check_omo_registration` 的前置条件从「`~/.config/opencode/` 目录存在」改成
+# 「opencode **真的装着**」—— 因为 Paseo 的 daemon 每次启动都会往那个目录写自己的插件，
+# 目录会在 opencode 卸载后自己回来（2026-09-11 实测），只看目录就会叫用户去给一个
+# 不存在的工具注册钩子。⇒ 要测 OMO 检测逻辑，mock 环境必须**也把 opencode 摆上 PATH**。
+fake_opencode_on_path() {
+  mkdir -p "$HOME/fakebin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$HOME/fakebin/opencode"
+  chmod +x "$HOME/fakebin/opencode"
+  export PATH="$HOME/fakebin:$PATH"
+}
+
 setup_mock_home() {
   MOCK_HOME=$(mktemp -d)
   export HOME="$MOCK_HOME"
@@ -60,6 +71,7 @@ test_p0_1_omo_check_exists() {
   echo "P0-1: check_omo_registration exists and works"
   (
     setup_mock_home
+    fake_opencode_on_path
     mkdir -p "$HOME/.config/opencode"
     cat > "$HOME/.config/opencode/hooks.json" << 'EOF'
 {
@@ -100,6 +112,7 @@ test_p0_1_omo_missing_hook() {
   echo "P0-1b: check_omo_registration warns when hook missing"
   (
     setup_mock_home
+    fake_opencode_on_path
     mkdir -p "$HOME/.config/opencode"
     echo '{"hooks":{}}' > "$HOME/.config/opencode/hooks.json"
     source_doctor_no_main

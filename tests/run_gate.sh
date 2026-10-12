@@ -272,15 +272,17 @@ test_hetero_block_unmarked() {
   )
 }
 
-# T12: machine L3 + review explicitly REVIEW_LEVEL: L0 → block
+# T12: machine L3 + review explicitly REVIEW_LEVEL: L0 → pass with a warning (v2.10.0)
+# 用户规则「异构 > 同构 > 不查」：同族审查是合法的兜底档，告警放行、记录在案，不再阻断。
 test_hetero_block_l0() {
-  echo "T12: cap L3 + review L0 → block"
+  echo "T12: cap L3 + review L0 → pass + warn"
   (
     setup_mock_repo
     setup_review_scenario "L0" "L3"
     output=$(bash "$GATE" 2>&1)
     rc=$?
-    assert "exits 1 when review L0 but machine L3" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+    assert "exits 0 when review L0 on L3 machine" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+    assert "warns that the review is same-family (L0)" "$(echo "$output" | grep -q 'same-family' && echo true || echo false)"
     rm -rf "${CAPDIR:-}"
     teardown_mock_repo
   )
@@ -531,7 +533,9 @@ test_review_diff_sha256() {
 }
 
 write_anchored_review() {
-  local review_file="$1" verdict="$2" review_level="${3:-L0}" head files files_sha256 diff_sha256
+  # ⚠️ `${3-L0}` 而不是 `${3:-L0}`：显式传空串表示「不写 REVIEW_LEVEL 标记」。原来的 `:-` 把空串
+  #    也换成 L0，T11「缺标记」实际测的一直是 L0，只因 L0 当时也阻断才碰巧通过（v2.10.0 发现）。
+  local review_file="$1" verdict="$2" review_level="${3-L0}" head files files_sha256 diff_sha256
   head=$(git rev-parse HEAD)
   files=$(test_review_staged_files)
   files_sha256=$(printf '%s\n' "$files" | test_sha256_stream)
@@ -866,15 +870,17 @@ test_hetero_exhausted_bad_format_blocks() {
   )
 }
 
-# T-HE4: No HETERO_EXHAUSTED + L0 on L3 → still blocks (regression)
+# T-HE4: No HETERO_EXHAUSTED + L0 on L3 → pass with a same-family warning (v2.10.0)
+# 用户规则「异构 > 同构 > 不查」：同族审查不再需要 HETERO_EXHAUSTED 才放行。
 test_no_hetero_exhausted_l0_blocks() {
-  echo "T-HE4: no HETERO_EXHAUSTED + L0 on L3 → block (regression)"
+  echo "T-HE4: no HETERO_EXHAUSTED + L0 on L3 → pass + warn"
   (
     setup_mock_repo
     setup_hetero_exhausted_scenario "L0" "false" "L3"
     output=$(bash "$GATE" 2>&1)
     rc=$?
-    assert "exits 1 (L0 without exemption blocks)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+    assert "exits 0 (same-family review is an accepted fallback)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+    assert "warns same-family" "$(echo "$output" | grep -q 'same-family' && echo true || echo false)"
     rm -rf "${CAPDIR:-}"
     teardown_mock_repo
   )
