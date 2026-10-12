@@ -249,6 +249,20 @@ test_import_rejects_unknown_agent() {
   teardown
 }
 
+# v2.11.0：报错文案要指向真正调用的命令。原文案写 `paseo agent ls --json`，
+# 而代码调的是 `agent inspect <id> --json` —— 照着文案排障会查错命令。
+test_inspect_failure_message_names_inspect() {
+  echo "T30: paseo agent inspect fails → error names 'agent inspect', not 'agent ls'"
+  arrange_dispatched
+  printf '#!/usr/bin/env bash\necho boom >&2\nexit 3\n' > "$FAKE_PASEO_DIR/paseo"; chmod +x "$FAKE_PASEO_DIR/paseo"
+  make_review "VERDICT: PASS"
+  import_result "$TOKEN" "agent-x"
+  assert "exit 75" "$([[ $RC2 -eq 75 ]] && echo true || echo false)"
+  assert "error names agent inspect" "$(printf '%s' "$ERRTXT" | grep -q 'agent inspect' && echo true || echo false)"
+  assert "error no longer claims agent ls" "$(printf '%s' "$ERRTXT" | grep -q 'agent ls' && echo false || echo true)"
+  teardown
+}
+
 test_import_rejects_same_model_agent() {
   echo "T8: agent provider is claude (same family) → accepted, recorded L0 (v2.10.0)"
   arrange_dispatched
@@ -581,6 +595,7 @@ test_import_rejects_changed_staged
 test_import_rejects_tampered_prompt
 test_import_rejects_unknown_agent
 test_import_rejects_same_model_agent
+test_inspect_failure_message_names_inspect
 test_import_rejects_agent_predating_dispatch
 test_import_rejects_expired
 test_import_token_single_use

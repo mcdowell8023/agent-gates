@@ -146,6 +146,16 @@ While the agent works inside a session, agent-gates automatically:
 
 ## What's New
 
+### v2.11.0 — CHECK 3 binds plans to branches; the installer can skip the Memory skill
+
+- **CHECK 3 only accepts plans bound to the current branch**: previously any reviewed plan in `.agent/plans/` passed.
+  New records are bound automatically; older records still pass with a warning — rebind with
+  `agent-gates-plan-review <plan> --rebind` (no model call; checks hash and verdict). Approved skips (`*.skip.md`) are
+  matched by branch too; merge commits skip CHECK 3.
+- **Installer**: `--skip-memory-skill` leaves out the bundled Memory skill and remembers it; SKILL.md backups move to
+  `~/.agent-gates/backups/skills/` and are only taken when the installed file was edited; uninstall keeps backups by default.
+- **Reminder text**: `~/.agent-gates/memory-reminder.md` replaces the body of the todo-completed reminder.
+
 ### v2.10.0 — review budget: at most 2 rounds per batch, acceptance on test before review
 
 - **Round cap**: `agent-gates-review` counts rounds per batch (target branch | source branch | merge-base);

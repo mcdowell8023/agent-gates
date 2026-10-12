@@ -2,6 +2,40 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.11.0 — 遗留问题收口：CHECK 3 绑定分支、安装器不再装回 Memory skill、备份移出 skill 目录
+
+### ⚠️ Behavior change：CHECK 3 只认绑定在当前分支的计划
+
+实测：放一份「三个月前另一件事」的已审计划，新改动自己没有计划，CHECK 3 照样 `PASSED`；
+拿走就被拦 —— 仓库只要有过一份审过的计划，CHECK 3 就形同虚设。
+
+- `agent-gates-plan-review` 记录时写 `<!-- PLAN_REVIEW_BRANCH: <当前分支> -->`（哈希本就剥掉全部 `PLAN_REVIEW_*` 行）
+- 新增 `agent-gates-plan-review <plan> --rebind`：零 token 改绑到当前分支，只在哈希一致且结论 PASS 时成功
+- 绑定在别的分支 ⇒ 不覆盖本次改动（失败提示给 `--rebind`）；**未绑定**（v2.11 之前记录）⇒ 按原作者的兼容承诺
+  照旧放行，但告警点名，并按类型给提示：有哈希的给 `--rebind`，旧格式（无哈希）给「重新记录或 `SKIP_PLAN_CHECK=1`」
+- `*.skip.md`（批准跳过）也要 `BRANCH:` 与当前分支一致 —— 记录里一直写着，门禁原来从不比对
+- merge 提交跳过 CHECK 3（计划是写代码时的纪律，功能分支提交时已检查；合并点由 CHECK 5 审整份 diff）
+- detached HEAD 不做绑定判断，告警
+- 绑定在当前分支、但审查不成立（结论非 PASS / 审后改过）的计划在场时，⛔ 不拿未绑定的旧计划兜底放行（代码审查建议）
+- `--rebind` 与 `--result` / `--model` / `--print-hash` 同时给 ⇒ 参数冲突退出，不静默忽略
+
+### 安装器
+
+- `--skip-memory-skill` / `--with-memory-skill`：不装 bundled Memory skill，选择写进 `~/.agent-gates/.skip-memory-skill`，
+  之后的安装沿用；已存在的 memory 目录 / 软链不自动删，打印清理指引。默认行为不变
+- SKILL.md 备份移到 `~/.agent-gates/backups/skills/<skill>/`，skill 目录里不再留 `.bak`；只在「已装文件 ≠ 上次安装记录的
+  sha256」时备份（清单 `installed-skills.sha256` 按绝对路径记），不再每次升级都备份并误报「本地改过」；同一秒两次备份不互相覆盖
+- `uninstall.sh`：不带 `--purge-backups` 时保留 `backups/`（原来 `rm -rf` 整个安装目录）；`--purge-backups` 也清新位置
+- 🔴 `uninstall.sh` 原有 bug：`[[ -f "$config_file" ]] || return` 返回 1，`set -e` 下在第一个不存在的配置文件处整个退出 ——
+  没装 Claude Code 的机器上卸载什么都不做。改 `return 0`
+
+### 其它
+
+- 审查级别只认整行 `<!-- REVIEW_LEVEL: Lx -->`、取最后一个：原来 Gate 2b 取第一个、择优取最后一个，且都匹配正文子串 ——
+  审查正文引用这串文字会误报同族，或冒充标记绕过「缺标记阻断」。`doctor.sh` 同口径
+- paseo 验证 agent 的报错文案改指 `agent inspect`（原写 `agent ls`，与实际调用不符）
+- 提醒钩子：`~/.agent-gates/memory-reminder.md` 存在且非空时作为 todo 完成提醒的正文（内置文案指向 Memory skill）
+
 ## v2.10.2 — `$变量` 紧跟中文逗号：门禁 CHECK 6 会崩、M8 测试从没跑过
 
 实测（macOS `/bin/bash` 3.2，`LC_ALL=C.UTF-8` / `en_US.UTF-8` / `zh_CN.UTF-8`）：`"申报 $X，"` 里

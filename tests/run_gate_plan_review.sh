@@ -196,6 +196,149 @@ echo "C11: 真正的 auth 路径仍然要被判危险"
   teardown )
 
 echo
+# B 组只看 CHECK 3：这个夹具暂存了 160 行、没有代码审查产物，CHECK 5 必拦 ⇒ 用 SKIP_REVIEW=1 隔离。
+run_gate3() { SKIP_REVIEW=1 SKIP_VERIFY=1 bash "$GATE" 2>&1; }
+echo "=== v2.11.0：计划绑定分支（原来任意一份审过的计划都放行，与本次改动无关也算）==="
+
+echo "B1: ⭐ 记录时写入 PLAN_REVIEW_BRANCH = 当前分支，绑定当前分支 ⇒ 放行且无未绑定告警"
+( setup
+  bash "$PR" .agent/plans/p.md --result review.md --model codex/gpt-5.5 >/dev/null 2>&1
+  assert "写入了 PLAN_REVIEW_BRANCH: feat/work" "$(grep -q '^<!-- PLAN_REVIEW_BRANCH: feat/work -->$' .agent/plans/p.md && echo true || echo false)"
+  out=$(run_gate3); rc=$?
+  assert "放行 (rc=$rc)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+  assert "没有「未绑定」告警" "$([[ "$out" != *"未绑定"* ]] && echo true || echo false)"
+  teardown )
+
+echo "B2: ⭐ 只有绑定在别的分支的计划 ⇒ 不覆盖本次改动，拦住并给 --rebind"
+( setup
+  bash "$PR" .agent/plans/p.md --result review.md --model codex/gpt-5.5 >/dev/null 2>&1
+  git checkout -q -b feat/other
+  out=$(run_gate3); rc=$?
+  assert "拦住 (rc=$rc)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+  assert "说明绑定在 feat/work、不覆盖 feat/other" "$([[ "$out" == *"feat/work"* && "$out" == *"feat/other"* ]] && echo true || echo false)"
+  assert "给出 --rebind" "$([[ "$out" == *"--rebind"* ]] && echo true || echo false)"
+  teardown )
+
+echo "B3: ⭐ 未绑定、但工具记录过（有哈希与结论）⇒ 放行 + 告警点名 + 给 --rebind"
+( setup
+  bash "$PR" .agent/plans/p.md --result review.md --model codex/gpt-5.5 >/dev/null 2>&1
+  sed -i.tmp '/PLAN_REVIEW_BRANCH/d' .agent/plans/p.md && rm -f .agent/plans/p.md.tmp
+  out=$(run_gate3); rc=$?
+  assert "放行（兼容旧记录）(rc=$rc)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+  assert "告警点名未绑定的计划" "$([[ "$out" == *"未绑定"* && "$out" == *"p.md"* ]] && echo true || echo false)"
+  assert "给出 --rebind" "$([[ "$out" == *"--rebind"* ]] && echo true || echo false)"
+  teardown )
+
+echo "B4: 未绑定、旧格式（无哈希无结论）⇒ 放行 + 告警，⛔ 不给做不到的 --rebind，改给重新记录 / SKIP_PLAN_CHECK"
+( setup
+  cat > .agent/plans/p.md <<'EOF'
+# 大改动
+<!-- PLAN_REVIEW: L1 -->
+<!-- PLAN_REVIEW_TOOL: codex -->
+<!-- PLAN_REVIEW_MODEL: gpt-5 -->
+EOF
+  out=$(run_gate3); rc=$?
+  assert "放行 (rc=$rc)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+  assert "告警未绑定" "$([[ "$out" == *"未绑定"* ]] && echo true || echo false)"
+  assert "不给 --rebind" "$([[ "$out" != *"--rebind"* ]] && echo true || echo false)"
+  assert "给出重新记录或 SKIP_PLAN_CHECK" "$([[ "$out" == *"--result"* && "$out" == *"SKIP_PLAN_CHECK=1"* ]] && echo true || echo false)"
+  teardown )
+
+echo "B5: 绑定当前分支的计划与未绑定旧计划并存 ⇒ 选绑定的那份，不打未绑定告警"
+( setup
+  cat > .agent/plans/a-old.md <<'EOF'
+# 很久以前的另一件事
+<!-- PLAN_REVIEW: L1 -->
+<!-- PLAN_REVIEW_TOOL: codex -->
+<!-- PLAN_REVIEW_MODEL: gpt-5 -->
+EOF
+  bash "$PR" .agent/plans/p.md --result review.md --model codex/gpt-5.5 >/dev/null 2>&1
+  out=$(run_gate3); rc=$?
+  assert "放行 (rc=$rc)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+  assert "没有「未绑定」告警" "$([[ "$out" != *"未绑定"* ]] && echo true || echo false)"
+  teardown )
+
+echo "B5b: ⭐ 本分支的计划审查是 FAIL ⇒ 未绑定的旧计划不能替它放行（审查 R1 建议 2）"
+( setup
+  cat > .agent/plans/a-old.md <<'EOF'
+# 很久以前的另一件事
+<!-- PLAN_REVIEW: L1 -->
+<!-- PLAN_REVIEW_TOOL: codex -->
+<!-- PLAN_REVIEW_MODEL: gpt-5 -->
+EOF
+  printf '方案有问题。\n\nVERDICT: FAIL\n' > review-fail.md
+  bash "$PR" .agent/plans/p.md --result review-fail.md --model codex/gpt-5.5 >/dev/null 2>&1
+  out=$(run_gate3); rc=$?
+  assert "拦住 (rc=$rc)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+  assert "报的是本分支计划的 FAIL" "$([[ "$out" == *"计划审查的结论是 FAIL"* ]] && echo true || echo false)"
+  teardown )
+
+echo "B6b: --rebind 与 --result 同时给 ⇒ 参数冲突，⛔ 不静默忽略"
+( setup
+  out=$(bash "$PR" .agent/plans/p.md --rebind --result review.md 2>&1); rc=$?
+  assert "拒绝 (rc=$rc)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+  assert "说明冲突" "$([[ "$out" == *"--rebind"* && "$out" == *"--result"* ]] && echo true || echo false)"
+  teardown )
+
+echo "B6: ⭐ --rebind：哈希一致、结论 PASS ⇒ 改绑当前分支；计划审后改过 ⇒ 拒绝"
+( setup
+  bash "$PR" .agent/plans/p.md --result review.md --model codex/gpt-5.5 >/dev/null 2>&1
+  git checkout -q -b feat/next
+  bash "$PR" .agent/plans/p.md --rebind >/dev/null 2>&1; rc=$?
+  assert "rebind 成功 (rc=$rc)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+  assert "绑定改为 feat/next，且只有一行" "$([[ "$(grep -c 'PLAN_REVIEW_BRANCH' .agent/plans/p.md)" == 1 ]] && grep -q '^<!-- PLAN_REVIEW_BRANCH: feat/next -->$' .agent/plans/p.md && echo true || echo false)"
+  out=$(run_gate3); rc=$?
+  assert "rebind 后放行 (rc=$rc)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+  echo "- 审后新加的一条需求" >> .agent/plans/p.md
+  git checkout -q -b feat/third
+  out=$(bash "$PR" .agent/plans/p.md --rebind 2>&1); rc=$?
+  assert "计划改过 ⇒ rebind 拒绝 (rc=$rc)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+  assert "绑定没被改动" "$(grep -q '^<!-- PLAN_REVIEW_BRANCH: feat/next -->$' .agent/plans/p.md && echo true || echo false)"
+  teardown )
+
+echo "B7: --rebind 遇到无哈希的旧格式 ⇒ 拒绝并说明"
+( setup
+  cat > .agent/plans/p.md <<'EOF'
+# 大改动
+<!-- PLAN_REVIEW: L1 -->
+<!-- PLAN_REVIEW_TOOL: codex -->
+<!-- PLAN_REVIEW_MODEL: gpt-5 -->
+EOF
+  out=$(bash "$PR" .agent/plans/p.md --rebind 2>&1); rc=$?
+  assert "拒绝 (rc=$rc)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+  assert "说明缺哈希" "$([[ "$out" == *"PLAN_REVIEW_SHA256"* ]] && echo true || echo false)"
+  teardown )
+
+echo "B8: ⭐ merge 时跳过 CHECK 3（写代码时的纪律已在功能分支提交时检查）"
+( setup
+  _base=$(git for-each-ref --format='%(refname:short)' refs/heads | grep -v '^feat/' | head -1)
+  git commit -q -m "feature work" --no-verify
+  rm -f .agent/plans/p.md; mkdir -p .agent/plans
+  git checkout -q "$_base"
+  git merge -q --no-ff --no-commit feat/work >/dev/null 2>&1
+  assert "前提：处于 merge 中且有暂存改动" "$(git rev-parse -q --verify MERGE_HEAD >/dev/null && [[ -n "$(git diff --cached --name-only)" ]] && echo true || echo false)"
+  out=$(run_gate3); rc=$?
+  assert "merge 中 CHECK 3 不拦（没有任何计划）" "$([[ "$out" != *"no plan or approved skip"* ]] && echo true || echo false)"
+  assert "打印跳过说明" "$([[ "$out" == *"CHECK 3 skipped"* ]] && echo true || echo false)"
+  git merge --abort >/dev/null 2>&1
+  teardown )
+
+echo "B9: ⭐ 批准跳过的记录（*.skip.md）也要绑定分支：别的分支的 skip 不放行本分支"
+( setup
+  rm -f .agent/plans/p.md
+  # ⚠️ 不用 git stash -u：它会连空的 .agent/plans 一起清掉，CHECK 3 整段被跳过，看起来像放行。
+  git checkout -q -b feat/old-skip          # 暂存的改动跟着走
+  bash "$SCRIPT_DIR/../bin/agent-gates-plan-decision" skip --reason "x" --topic oldskip >/dev/null 2>&1
+  git checkout -q feat/work
+  assert "前提：skip 记录在、且写的是 feat/old-skip" "$(grep -qx 'BRANCH: feat/old-skip' .agent/plans/*.skip.md 2>/dev/null && echo true || echo false)"
+  out=$(run_gate3); rc=$?
+  assert "别的分支的 skip 不算 (rc=$rc)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+  bash "$SCRIPT_DIR/../bin/agent-gates-plan-decision" skip --reason "y" --topic thisskip >/dev/null 2>&1
+  out=$(run_gate3); rc=$?
+  assert "本分支的 skip 放行 (rc=$rc)" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+  teardown )
+
+echo
 read -r P F < "$RESULTS_FILE"
 echo "=== PASS=$P FAIL=$F ==="
 rm -f "$RESULTS_FILE"

@@ -30,6 +30,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 usage() {
   echo "Usage: $PROG <plan.md> --result <review.md> --model <provider/model> [--tool <name>]" >&2
   echo "       $PROG <plan.md> --print-hash" >&2
+  echo "       $PROG <plan.md> --rebind          # 把已有的有效审查改绑到当前分支，不调模型" >&2
   echo "" >&2
   echo "  Records a plan review as CHECK 3 markers inside <plan.md>." >&2
   echo "  The review body must already contain 'VERDICT: PASS|FAIL|QUESTIONS' —" >&2
@@ -37,13 +38,14 @@ usage() {
   exit 2
 }
 
-PLAN=""; RESULT=""; MODEL=""; TOOL=""; PRINT_HASH=0
+PLAN=""; RESULT=""; MODEL=""; TOOL=""; PRINT_HASH=0; REBIND=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --result)     [[ $# -ge 2 ]] || usage; RESULT="$2"; shift 2 ;;
     --model)      [[ $# -ge 2 ]] || usage; MODEL="$2";  shift 2 ;;
     --tool)       [[ $# -ge 2 ]] || usage; TOOL="$2";   shift 2 ;;
     --print-hash) PRINT_HASH=1; shift ;;
+    --rebind)     REBIND=1; shift ;;
     -h|--help)    usage ;;
     -*)           echo "$PROG: unknown option '$1'" >&2; usage ;;
     *)            [[ -z "$PLAN" ]] && PLAN="$1" || { echo "$PROG: unexpected argument '$1'" >&2; usage; }; shift ;;
@@ -51,6 +53,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$PLAN" ]] || usage
+if [[ "$REBIND" -eq 1 && ( -n "$RESULT" || -n "$MODEL" || "$PRINT_HASH" -eq 1 ) ]]; then
+  echo "$PROG: --rebind 不能和 --result / --model / --print-hash 一起用 —— 改绑只沿用已有审查；要记录新审查就去掉 --rebind" >&2
+  exit 2
+fi
 [[ -f "$PLAN" ]] || { echo "$PROG: plan not found: $PLAN" >&2; exit 2; }
 
 # Hash the plan with its own PLAN_REVIEW* marker lines stripped, and with trailing
@@ -69,6 +75,51 @@ _plan_hash() {
 
 if [[ "$PRINT_HASH" -eq 1 ]]; then
   _plan_hash "$PLAN"
+  exit 0
+fi
+
+# v2.11.0：计划绑定分支。CHECK 3 原来只要 .agent/plans/ 里任意一份审查有效就放行 ——
+# 三个月前另一件事的计划也能放行今天的改动（实测）。记录时写下当前分支，门禁只认
+# 绑定在当前分支的计划。detached HEAD 没有分支可绑，不写。
+_plan_branch() {
+  local b
+  b=$(git -C "$(dirname "$1")" rev-parse --abbrev-ref HEAD 2>/dev/null) || return 1
+  [[ -n "$b" && "$b" != "HEAD" ]] || return 1
+  printf '%s' "$b"
+}
+
+# --rebind：零 token 补绑。只在「审查仍对应这份计划」可证明时才改绑 ——
+# 哈希一致（计划审后没改过）且结论 PASS。⛔ 旧格式标记没有哈希，证明不了，拒绝。
+if [[ "$REBIND" -eq 1 ]]; then
+  _rb_get() { sed -n "s|^<!--[[:space:]]*$1:[[:space:]]*\(.*\)-->\$|\1|p" "$PLAN" 2>/dev/null | head -1 | sed 's/[[:space:]]*$//'; }
+  _rb_hash=$(_rb_get PLAN_REVIEW_SHA256)
+  _rb_verdict=$(_rb_get PLAN_REVIEW_VERDICT)
+  if [[ -z "$_rb_hash" || -z "$_rb_verdict" ]]; then
+    echo "$PROG: $PLAN 缺 PLAN_REVIEW_SHA256 或 PLAN_REVIEW_VERDICT（旧格式标记）—— 无法证明审查仍对应这份计划，不能改绑" >&2
+    echo "  用审查正文重新记录：$PROG $PLAN --result <审查正文>.md --model <provider/model>" >&2
+    echo "  或本次提交用 SKIP_PLAN_CHECK=1（门禁会打印出来）" >&2
+    exit 3
+  fi
+  _rb_now=$(_plan_hash "$PLAN")
+  if [[ "$_rb_now" != "$_rb_hash" ]]; then
+    echo "$PROG: 计划在审查之后被改过（哈希 ${_rb_hash:0:12}… ≠ ${_rb_now:0:12}…）—— 旧审查不覆盖新内容，不能改绑；按新计划重新审" >&2
+    exit 3
+  fi
+  if [[ "$(printf '%s' "$_rb_verdict" | tr '[:lower:]' '[:upper:]')" != "PASS" ]]; then
+    echo "$PROG: 审查结论是 ${_rb_verdict}，不是 PASS —— 不能改绑" >&2
+    exit 3
+  fi
+  if ! _rb_branch=$(_plan_branch "$PLAN"); then
+    echo "$PROG: 当前是 detached HEAD，没有分支可绑" >&2
+    exit 3
+  fi
+  _rb_old=$(_rb_get PLAN_REVIEW_BRANCH)
+  TMP="${PLAN}.tmp.$$"
+  { grep -vE '^<!--[[:space:]]*PLAN_REVIEW_BRANCH:' "$PLAN"; echo "<!-- PLAN_REVIEW_BRANCH: ${_rb_branch} -->"; } > "$TMP"
+  mv "$TMP" "$PLAN"
+  echo "✅ plan review rebound: ${_rb_old:-<未绑定>} → ${_rb_branch}"
+  echo "   plan:   $PLAN"
+  echo "   依据:   哈希一致（${_rb_hash:0:16}…）、结论 PASS；未调用任何模型"
   exit 0
 fi
 
@@ -141,6 +192,7 @@ fi
 [[ -n "$TOOL" ]] || TOOL="external"
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%SZ")
 HASH=$(_plan_hash "$PLAN")
+BRANCH=$(_plan_branch "$PLAN" || true)
 
 # Idempotent: strip any previous marker block, then append the current one. Appending
 # without stripping would leave two PLAN_REVIEW lines and the gate would read whichever
@@ -156,6 +208,7 @@ TMP="${PLAN}.tmp.$$"
   echo "<!-- PLAN_REVIEW_SHA256: ${HASH} -->"
   echo "<!-- PLAN_REVIEW_AT: ${TIMESTAMP} -->"
   echo "<!-- PLAN_REVIEW_RAW: ${RAW_LINE:-<none>} -->"
+  [[ -z "$BRANCH" ]] || echo "<!-- PLAN_REVIEW_BRANCH: ${BRANCH} -->"
   if [[ -n "${RAW_VALUE:-}" && "$RAW_VALUE" != "$VERDICT" ]]; then
     # A relabel is mechanical, not a judgement — record both so it can be checked.
     echo "<!-- PLAN_REVIEW_RELABEL: ${RAW_VALUE} -> ${VERDICT} -->"
@@ -170,3 +223,4 @@ echo "   level:     $LEVEL$([[ "$LEVEL" == "L0" ]] && echo "  ⚠️ 同族或�
 echo "   verdict:   $VERDICT   ← 审查者原文: ${RAW_LINE:-<none>}"
 [[ -n "${RAW_VALUE:-}" && "$RAW_VALUE" != "$VERDICT" ]] && echo "   relabelled: $RAW_VALUE -> $VERDICT （机械改写，非判断）"
 echo "   anchor:    ${HASH:0:16}…  (计划正文改动后失效)"
+echo "   branch:    ${BRANCH:-<detached HEAD，未绑定>}"

@@ -316,6 +316,37 @@ test_hetero_pass_l0machine() {
   )
 }
 
+# T-RL1/T-RL2 (v2.11.0): REVIEW_LEVEL 只认整行标记、取最后一个。
+# 原来两处都匹配正文子串 —— 审查正文引用这串文字就会被当成标记：
+#   正文写了 L0、真正标记是 L1 ⇒ 误报同族；正文写了 L1、根本没有标记 ⇒ 绕过「缺标记阻断」。
+_prepend_prose() {   # _prepend_prose <file> <line>
+  local t; t=$(mktemp); { printf '%s\n\n' "$2"; cat "$1"; } > "$t" && mv "$t" "$1"
+}
+test_review_level_prose_l0_marker_l1() {
+  echo "T-RL1: prose mentions REVIEW_LEVEL: L0, real marker L1 → no same-family warning"
+  (
+    setup_mock_repo
+    setup_review_scenario "L1" "L3"
+    _prepend_prose .agent/reviews/2099-01-01-test.md "审查员说明：上一份是 REVIEW_LEVEL: L0 的同构审查"
+    output=$(bash "$GATE" 2>&1); rc=$?
+    assert "exits 0" "$([[ $rc -eq 0 ]] && echo true || echo false)"
+    assert "no same-family warning (prose is not a marker)" "$(echo "$output" | grep -q 'same-family' && echo false || echo true)"
+    rm -rf "${CAPDIR:-}"; teardown_mock_repo
+  )
+}
+test_review_level_prose_l1_no_marker() {
+  echo "T-RL2: prose mentions REVIEW_LEVEL: L1 but no marker → still blocked as unmarked"
+  (
+    setup_mock_repo
+    setup_review_scenario "" "L3"
+    _prepend_prose .agent/reviews/2099-01-01-test.md "正文里随口写了 REVIEW_LEVEL: L1 这串字"
+    output=$(bash "$GATE" 2>&1); rc=$?
+    assert "exits 1 (prose cannot stand in for the marker)" "$([[ $rc -ne 0 ]] && echo true || echo false)"
+    assert "says the marker is missing" "$(echo "$output" | grep -q 'no REVIEW_LEVEL marker' && echo true || echo false)"
+    rm -rf "${CAPDIR:-}"; teardown_mock_repo
+  )
+}
+
 # T15: SKIP_HETERO_CHECK=1 bypasses the block even on L3 machine
 test_hetero_skip_override() {
   echo "T15: SKIP_HETERO_CHECK=1 bypasses"
@@ -729,6 +760,8 @@ test_hetero_block_l0
 test_hetero_pass_l2
 test_hetero_pass_l0machine
 test_hetero_skip_override
+test_review_level_prose_l0_marker_l1
+test_review_level_prose_l1_no_marker
 test_review_picks_newest_by_mtime
 # T-D1: dangerous path (migrations/*.sql) + skip → FAIL (requires-plan, skip not accepted)
 test_check3_dangerous_skip_rejected() {
