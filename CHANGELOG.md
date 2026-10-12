@@ -2,6 +2,71 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.10.1 — Gate 1 接受 `<name>.<suffix>.spec.<ext>`
+
+> 9 月 7 日完成于 `fix/gate-accept-suffixed-spec`，当时按 v2.9.1 写；2026-10-12 合入时 main 已到 2.10.0，改记 2.10.1。
+> 与 v2.10.0 的 `tests.exempt` 改的是 Gate 1 同一个循环：先判豁免，再判精确同名与后缀 spec。
+
+### 问题
+
+Gate 1 只认 `<name>.spec.<ext>` 与 `<name>.test.<ext>`。真实项目里大量测试叫
+`intake.service.public.spec.ts` / `x.e2e.spec.ts` / `x.db.spec.ts` —— 测试确实存在，
+只是文件名带了个语义后缀。Gate 1 把这些一律报成 `No test for`，是**误报**：
+它拦住的不是「没写测试」，而是「测试没按它想的方式命名」。
+
+### 改动
+
+`_gate_has_suffixed_test()`：`<name>.*.spec.<ext>` / `<name>.*.test.<ext>` 也算数。
+
+放宽必须带**归属判断**，否则 `a.b.spec.ts`（明明是 `a.b.ts` 的测试）会给
+自己没有测试的 `a.ts` 放行。归属判断走 `_gate_path_exists_anywhere()`：
+候选 spec 去掉 `.spec.<ext>` 后的路径，只要在**工作区 ∪ 索引 ∪ HEAD** 任一处存在
+且不是当前文件，该 spec 就归它所有，不能拿来给当前文件放行。
+
+### 🔴 两个洞是上线前异构审查抓出来的，不是我自己想到的
+
+| # | 洞 | 谁抓到 | 构造 |
+|---|---|---|---|
+| 1 | 归属判断只查工作区 | gpt-5.5 (`pi -p`) | 同一次提交 `git rm a.b.ts` + 新增没测试的 `a.ts` ⇒ `a.b.spec.ts` 被改归 `a.ts`，门禁 `PASSED` |
+| 2 | glob 不排除非普通文件 | gpt-5.6-sol（验收） | 建一个叫 `x.fake.spec.ts` 的**目录** ⇒ 没测试的 `x.ts` 通过。精确同名那条用 `[[ -f ]]` 本来排除了目录，glob 这条漏了 |
+| 3 | owner 只按**当前文件的扩展名**拼一次 | gpt-5.5（Paseo 子会话） | `a.b.tsx` + `a.b.spec.ts` ⇒ 拼出的 `a.b.ts` 不存在 ⇒ `a.b.spec.ts` 被改归没测试的 `a.ts`。⇒ `_gate_owner_exists_elsewhere()` 四个扩展名都试 |
+| 4 | glob 的 `*` 匹配空串 | gpt-5.6-sol（验收） | `thing..spec.ts` 也落进候选。按 `<suffix>` 语义不合法，不拿它放行 |
+
+**四个洞全是异构审查抓的，没有一个是我自己想到的。** 前两个报 FAIL 后修了一轮，
+第二轮换 Paseo 子会话（`pi/github-copilot/gpt-5.5` + `gpt-5.6-sol`）又抓出后两个。
+⭐ 价值在**换族 + 换轮**，不在多跑几遍同一个。
+
+判据（已入 memory）：**放宽任何检查之前先问 —— 这个判据依赖的前提，
+能不能在同一次提交里被一起改掉？** 「owner 源文件存在」这个前提，恰恰可以。
+
+### ⚠️ 已知且未修（两条都不是本次引入 —— 拿原版门禁实测对照过）
+
+| 形态 | 构造 | 原版门禁的表现 |
+|---|---|---|
+| 把源文件**改名成** spec | `git mv a.b.ts a.stolen.spec.ts` + 新增没测试的 `a.ts` | `git mv a.b.ts a.spec.ts` **同样 PASSED** |
+| **未跟踪**的空 decoy 也算数 | `touch src/x.fake.spec.ts`（不 `git add`）+ staged 没测试的 `src/x.ts` | `touch src/x.spec.ts` **同样 PASSED** |
+
+根因相同：Gate 1 判的是「有没有一个叫得上名的文件」，判不了「它是不是真的测试那段代码」，
+也没要求它进了本次提交。这是这类检查的固有边界。本次只把**放宽引入的**回退补回来
+（目录伪装、归属判断只查工作区），⛔ 没有顺手收紧原有语义 —— 那超出「接受后缀 spec」这个授权范围。
+
+### 回归
+
+`tests/run_gate_spec_suffix.sh` **T1–T13**：
+
+| | 锁什么 |
+|---|---|
+| T1/T2 | `.public.spec` / `.e2e.spec` / `.db.spec` 被接受（本次要修的误报） |
+| T3 | 真的没有任何测试 —— 仍然拦住 |
+| T4/T6/T7/T9 | 归属保护：兄弟 spec · 删 owner · owner 只在索引 · **owner 跨扩展名** |
+| T8 | 目录伪装成 spec |
+| T11 | 空后缀 `thing..spec.ts` |
+| T13 | 近似名（`.spec.ts.bak`、顺序错） |
+| T5/T12 | 精确 `.spec` / `.test` 同名 —— 原行为不变 |
+| T10 | `{ts,tsx,js,jsx}` × `{spec,test}` 八种组合矩阵 |
+
+14 pass / 0 fail；全量 45 个测试脚本 45 PASS / 0 FAIL。
+
 ## v2.10.0 — 审查预算：每批最多 2 轮、先验收后审查、阻断才算 ISSUES
 
 🔴 实况（2026-09-24）：一次合并 6 轮审查、4 个审查 agent，输出约 7 万 token，cached 读约

@@ -183,6 +183,59 @@ if [[ -d openspec/changes ]] \
   IS_PATH_A=1
 fi
 
+# Gate 1 兜底：<name>.<suffix>.spec.<ext> / <name>.<suffix>.test.<ext> 也算这个源文件的测试。
+# 真实项目里大量测试叫 foo.public.spec.ts / foo.e2e.spec.ts / foo.db.spec.ts —— 测试确实
+# 存在，只是文件名带了语义后缀；只认精确同名会把它们全报成「没有测试」，是误报。
+#
+# ⛔ 放宽的边界：候选去掉 .spec.<ext> / .test.<ext> 后若存在【同名源文件】且不是当前文件，
+#    说明该 spec 归那个文件所有（a.b.spec.ts 是 a.b.ts 的测试），⛔ 不能拿来给自己没有
+#    测试的 a.ts 放行。tests/run_gate_spec_suffix.sh T4 锁住这条。
+# 归属判断专用：路径是否在【工作区 / 索引 / HEAD】任一处存在。
+# 🔴 只查工作区是不够的 —— 同一次提交可以把 owner 源文件一起删掉，
+#    让本属于它的 spec 被重新归给一个真的没测试的文件（见 tests/run_gate_spec_suffix.sh T6/T7）。
+_gate_path_exists_anywhere() {
+  local p="$1"
+  [[ -f "$p" ]] && return 0
+  git ls-files --cached --error-unmatch -- "$p" >/dev/null 2>&1 && return 0
+  git cat-file -e "HEAD:$p" >/dev/null 2>&1 && return 0
+  return 1
+}
+
+# 归属判断：候选 spec 去掉 .spec/.test 后的前缀，是否对应到【另一个】源文件。
+# 🔴 owner 的扩展名不一定和当前文件相同 —— a.b.tsx 的测试完全可以叫 a.b.spec.ts。
+#    只按当前文件的扩展名拼一次（`${owner}.${ext}`）就拼不中它，于是 a.b.spec.ts
+#    被改归给真的没有测试的 a.ts（见 T9）。⇒ 四个扩展名都要试。
+_gate_owner_exists_elsewhere() {
+  local owner="$1" self="$2" e
+  for e in ts tsx js jsx; do
+    [[ "${owner}.${e}" == "$self" ]] && continue
+    _gate_path_exists_anywhere "${owner}.${e}" && return 0
+  done
+  return 1
+}
+
+_gate_has_suffixed_test() {
+  local f="$1" ext base cand owner had_nullglob=0 rc=1
+  ext="${f##*.}"; base="${f%.*}"
+  case "$ext" in ts|tsx|js|jsx) ;; *) return 1 ;; esac
+  shopt -q nullglob && had_nullglob=1
+  shopt -s nullglob
+  for cand in "$base".*.spec."$ext" "$base".*.test."$ext"; do
+    # 🔴 glob 会匹配到目录/符号链接等非普通文件；精确同名那条判断用的是 `[[ -f ]]`，
+    #    天生就排除了它们。少了这一行，一个叫 x.fake.spec.ts 的【目录】就能让
+    #    真的没有测试的 x.ts 通过（见 T8）。
+    [[ -f "$cand" ]] || continue
+    owner="${cand%.spec.$ext}"; owner="${owner%.test.$ext}"
+    # shell glob 的 * 能匹配空串 ⇒ `thing..spec.ts` 也会落进候选，owner 是 `thing.`。
+    # 按 <name>.<suffix>.spec.<ext> 的语义那不是合法形式，不拿它放行（见 T11）。
+    [[ "$owner" == "$base." ]] && continue
+    _gate_owner_exists_elsewhere "$owner" "$f" && continue
+    rc=0; break
+  done
+  [[ "$had_nullglob" -eq 1 ]] || shopt -u nullglob
+  return "$rc"
+}
+
 # === Gate 1: Test file correspondence ===
 # tests.exempt（v2.10.0）：DTO、枚举、模块注册这类没有逻辑的文件，「每个新源文件配一个
 # 测试文件」只会凑出空心测试 —— 测试代码量超过业务代码的推手之一。glob 匹配仓库相对路径，
@@ -222,8 +275,8 @@ while IFS= read -r f; do
     *) continue ;;
   esac
 
-  if [[ ! -f "$t1" ]] && [[ -z "$t2" || ! -f "$t2" ]]; then
-    fail "No test for: $f → expected: $t1"
+  if [[ ! -f "$t1" ]] && [[ -z "$t2" || ! -f "$t2" ]] && ! _gate_has_suffixed_test "$f"; then
+    fail "No test for: $f → expected: $t1 (or ${t2:-—}, or <name>.<suffix>.spec.${f##*.} / .test.${f##*.})"
   fi
 done < <(git diff --cached --name-only --diff-filter=ACMR \
   | grep -E '\.(ts|tsx|js|jsx|py|java|kt|go)$' \

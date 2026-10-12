@@ -97,6 +97,18 @@ assert "项目 exempt=[] ⇒ 两个文件仍报缺测试" \
 cd "$ORIG"; rm -f "$GD/gates.json"
 
 echo
+echo "=== ⑦ 与后缀 spec（v2.10.1）同时生效：豁免、后缀测试、真缺测试各走各的 ==="
+R=$(mkrepo '{"mode":"merge-only","tests":{"exempt":["src/dto/*"]}}'); cd "$R"
+printf 'test\n' > src/svc/run.public.spec.ts
+printf 'export const z = 1\n' > src/svc/zero.ts
+git add src/svc/run.public.spec.ts src/svc/zero.ts
+out=$(gate)
+assert "DTO 走豁免" "$([[ "$out" == *"exempt via tests.exempt"* && "$out" != *"No test for: src/dto/user.dto.ts"* ]] && echo true || echo false)"
+assert "run.ts 有 run.public.spec.ts ⇒ 不报缺测试" "$([[ "$out" != *"No test for: src/svc/run.ts"* ]] && echo true || echo false)"
+assert "zero.ts 真没测试 ⇒ 仍然拦" "$([[ "$out" == *"No test for: src/svc/zero.ts"* ]] && echo true || echo false)"
+cd "$ORIG"
+
+echo
 read -r P F < "$RESULTS_FILE"; rm -f "$RESULTS_FILE"
 echo "PASS=$P FAIL=$F"
 [[ "$F" -eq 0 ]]
