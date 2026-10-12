@@ -1105,8 +1105,8 @@ print(a['enabled']); print(a['head']); print(a['files_sha256']); print(a['diff_s
     mv "$proc" "$pend" 2>/dev/null   # recoverable: dispatch another agent and retry
     case $vrc in
       2) echo "agent-gates-review: paseo binary not found ($PASEO_BIN) — cannot verify the reviewing agent" >&2 ;;
-      3) echo "agent-gates-review: 'paseo agent ls --json' failed — cannot verify the reviewing agent" >&2 ;;
-      7) echo "agent-gates-review: could not parse 'paseo agent ls --json' output — cannot verify the reviewing agent" >&2 ;;
+      3) echo "agent-gates-review: 'paseo agent inspect $PASEO_AGENT --json' failed — cannot verify the reviewing agent" >&2 ;;
+      7) echo "agent-gates-review: could not parse 'paseo agent inspect $PASEO_AGENT --json' output — cannot verify the reviewing agent" >&2 ;;
       4) echo "agent-gates-review: paseo agent '$PASEO_AGENT' not found — verification failed" >&2 ;;
       6) echo "agent-gates-review: paseo agent '$PASEO_AGENT' was created before this review was dispatched — an older agent cannot vouch for it" >&2 ;;
       8) echo "agent-gates-review: paseo agent '$PASEO_AGENT' has no usable createdAt — cannot establish that it postdates the dispatch (fail-closed)" >&2 ;;

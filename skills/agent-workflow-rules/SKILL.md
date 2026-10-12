@@ -379,6 +379,7 @@ This is a SHOULD (recommended), not a MUST. Omitting it does not block the commi
 2. PASS → proceed to implementation.
 3. 有阻断项 → 修订计划 → **R2 闭合轮**：只核上一轮阻断项是否解决、修订本身有没有引入新阻断（模板同 `agent-review-protocol` §9.5）。只有建议 ⇒ 视为 PASS，建议按需采纳，不再送审。
 4. **最多 2 轮**。R2 仍有阻断 ⇒ 按 `agent-review-protocol` §4 做不收敛诊断（多半是方向问题或过度设计），⛔ 不自动发第 3 轮。
+   记录用 `agent-gates-plan-review <plan> --result <审查正文> --model <provider/model>`，会绑定当前分支；CHECK 3 只认绑定在当前分支的计划（v2.11.0）。同一份计划换分支继续用：`--rebind`（零 token，校验哈希与结论）。
 5. **Never bypass review and start coding.**
 
 ### 7.3 Exemptions

@@ -592,7 +592,8 @@ RCEOF
     local latest_review
     latest_review=$(find .agent/reviews/ -name "*.md" -mmin -10080 2>/dev/null | sort -r | head -1)
     if [[ -n "$latest_review" ]]; then
-      if grep -q 'REVIEW_LEVEL: L0' "$latest_review" 2>/dev/null; then
+      # 与门禁同口径（v2.11.0）：只认整行标记、取最后一个；正文里引用的字样不算。
+      if [[ "$(sed -n 's/^[[:space:]]*<!--[[:space:]]*REVIEW_LEVEL:[[:space:]]*\(L[0-3]\)[[:space:]]*-->[[:space:]]*$/\1/p' "$latest_review" 2>/dev/null | tail -1)" == "L0" ]]; then
         warn "Recent review ($latest_review) was L0 (single-model) — does not satisfy heterogeneous requirement"
       fi
     fi

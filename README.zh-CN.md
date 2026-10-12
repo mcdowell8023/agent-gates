@@ -86,6 +86,7 @@ cd agent-gates
 **可选 flag**：
 
 - `--skip-deps` —— 不安装外部 skill 依赖（Memory / Superpowers / OpenSpec）
+- `--skip-memory-skill` —— 不安装 bundled Memory skill，并记住这个选择（`--with-memory-skill` 恢复）
 - `--with-openspec` —— 仅检测 OpenSpec CLI 是否存在（不自动安装），与默认 y/N 询问互斥
 - `--codegraph-hook` —— 额外注册 zsh `chpwd` hook，cd 进 git 仓时自动跑 `codegraph init -i`
 - `--skip-hooks` —— 跳过平台 hook 注册
@@ -145,6 +146,14 @@ agent 在 session 内开发时，agent-gates 自动：
 ```
 
 ## 新特性
+
+### v2.11.0 — CHECK 3 绑定分支、安装器可不装 Memory skill
+
+- **CHECK 3 只认绑定在当前分支的计划**：原来任意一份审过的计划都放行。新记录自动绑定；旧记录照旧放行但告警，
+  补绑用 `agent-gates-plan-review <plan> --rebind`（零 token，校验哈希与结论）。批准跳过（`*.skip.md`）同样按分支比对；merge 提交跳过 CHECK 3。
+- **安装器**：`--skip-memory-skill` 不装 bundled Memory skill 且之后沿用；SKILL.md 备份移到 `~/.agent-gates/backups/skills/`，
+  只在本地改过时备份；卸载默认保留备份。
+- **提醒文案**：`~/.agent-gates/memory-reminder.md` 可替换 todo 完成提醒的正文。
 
 ### v2.10.0 — 审查预算：每批最多 2 轮、先验收后审查
 

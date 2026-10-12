@@ -342,6 +342,19 @@ if [[ "${SKIP_PLAN_CHECK:-0}" != "1" ]] && [[ -d .agent/plans ]]; then
   [[ "$LOGIC_FILES" -gt 1 && "$DIFF_LINES" -gt 50 ]] && PLAN_NEEDED=1
   [[ "$MAX_SINGLE_FILE_LINES" -gt 150 ]] && PLAN_NEEDED=1
 
+  # v2.11.0：merge 提交跳过 CHECK 3。计划是「写代码时的纪律」，功能分支逐次提交时已检查；
+  # `.agent/` 被 gitignore 的仓库（如 wb），计划留在功能分支 worktree，主仓看不到。
+  # ⚠️ 已知局限：合并时解决冲突新加的改动不经 CHECK 3，由合并点的 CHECK 5（审整份合并 diff）兜住。
+  if [[ "$PLAN_NEEDED" -eq 1 ]] && git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+    echo "ℹ️  CHECK 3 skipped: merge commit — 计划在功能分支提交时已检查（合并点由 CHECK 5 审整份 diff）"
+    PLAN_NEEDED=0
+  fi
+
+  # 当前分支；detached HEAD 时不做分支绑定判断（没有分支名可比）。
+  _C3_BRANCH="${_GATE_BRANCH:-}"
+  _C3_DETACHED=0
+  [[ -z "$_C3_BRANCH" || "$_C3_BRANCH" == "HEAD" ]] && _C3_DETACHED=1
+
   if [[ "$PLAN_NEEDED" -eq 1 ]]; then
     PLAN_FOUND=0
     PLAN_REVIEWED=0
@@ -386,6 +399,10 @@ if [[ "${SKIP_PLAN_CHECK:-0}" != "1" ]] && [[ -d .agent/plans ]]; then
     _PR_PROBLEM=""      # non-empty ⇒ markers exist but do not hold up
     _PR_WARN=""
     _PR_ANY_CLEAN=0     # at least one plan whose review holds up
+    # v2.11.0：未绑定分支（v2.11 之前记录）的有效计划先记下，扫完都没有绑定当前分支的才用它
+    _PR_UNBOUND_FILE=""
+    _PR_UNBOUND_WARN=""
+    _PR_BOUND_PROBLEM=""   # 绑定在当前分支、但审查不成立的计划 —— 它在，旧计划就不能替它放行
     while IFS= read -r pf; do
       [[ -z "$pf" || ! -f "$pf" ]] && continue
       PLAN_FOUND=1
@@ -401,6 +418,7 @@ if [[ "${SKIP_PLAN_CHECK:-0}" != "1" ]] && [[ -d .agent/plans ]]; then
         _pr_verdict=$(_pr_get PLAN_REVIEW_VERDICT || true)
         _pr_hash=$(_pr_get PLAN_REVIEW_SHA256 || true)
         _pr_model=$(_pr_get PLAN_REVIEW_MODEL || true)
+        _pr_branch=$(_pr_get PLAN_REVIEW_BRANCH || true)
 
         # Anchor. Recomputed by the SAME tool that wrote it — duplicating the hashing here
         # would eventually diverge, and a divergent anchor produces false failures, which is
@@ -440,19 +458,58 @@ if [[ "${SKIP_PLAN_CHECK:-0}" != "1" ]] && [[ -d .agent/plans ]]; then
    }计划审查是同族的 (PLAN_REVIEW: L0)，本机支持异构 (${PLAN_CAP_LEVEL_EARLY}) —— 按「异构 > 同构 > 不查」放行，记录在案（审查者: ${_pr_model:-<未记录>}）"
         fi
 
+        # v2.11.0 分支绑定：绑定在别的分支 ⇒ 不覆盖本次改动；未绑定 ⇒ 兼容放行但要点名。
+        _this_bound=1
+        if [[ "$_C3_DETACHED" -eq 0 ]]; then
+          if [[ -z "$_pr_branch" ]]; then
+            _this_bound=0
+          elif [[ "$_pr_branch" != "$_C3_BRANCH" ]]; then
+            _this_problem="${_this_problem:+$_this_problem
+}计划绑定在分支 '${_pr_branch}'，不覆盖当前分支 '${_C3_BRANCH}' ($pf)
+   这份计划确实覆盖本次改动的话（零成本，校验哈希与结论）：~/.agent-gates/bin/agent-gates-plan-review $pf --rebind"
+          fi
+        fi
+
         PLAN_REVIEWED=1
-        if [[ -z "$_this_problem" ]]; then
+        if [[ -n "$_this_problem" && -n "$_pr_branch" && "$_pr_branch" == "$_C3_BRANCH" && -z "$_PR_BOUND_PROBLEM" ]]; then
+          _PR_BOUND_PROBLEM="$_this_problem"
+        fi
+        if [[ -z "$_this_problem" && "$_this_bound" -eq 1 ]]; then
           # A clean plan settles it: drop anything remembered from earlier candidates.
           _PR_ANY_CLEAN=1
           _PR_PROBLEM=""
           _PR_WARN="$_this_warn"
           break
         fi
+        if [[ -z "$_this_problem" && -z "$_PR_UNBOUND_FILE" ]]; then
+          _PR_UNBOUND_FILE="$pf"
+          if [[ -n "$_pr_hash" && -n "$_pr_verdict" ]]; then
+            _PR_UNBOUND_WARN="计划 $pf 未绑定分支（v2.11 之前记录），按兼容放行 —— 它可能与本次改动无关
+   确实覆盖本次改动就补绑（零成本，校验哈希与结论）：~/.agent-gates/bin/agent-gates-plan-review $pf --rebind"
+          else
+            _PR_UNBOUND_WARN="计划 $pf 未绑定分支，且是旧格式标记（无哈希 / 结论），按兼容放行 —— 它可能与本次改动无关
+   零成本补绑不适用（没有哈希，证明不了审查仍对应这份计划）：用审查正文重新记录 agent-gates-plan-review $pf --result <审查正文>.md --model <provider/model>，或本次 SKIP_PLAN_CHECK=1"
+          fi
+          _PR_UNBOUND_WARN="${_PR_UNBOUND_WARN}${_this_warn:+
+   $_this_warn}"
+          continue
+        fi
         # Remember the first problem only as a fallback for "nothing clean was found".
         [[ -z "$_PR_PROBLEM" ]] && _PR_PROBLEM="$_this_problem"
       fi
     done < <(find .agent/plans/ -maxdepth 1 -name '*.md' ! -name '*.skip.md' 2>/dev/null)
+    if [[ "$_PR_ANY_CLEAN" -ne 1 && -n "$_PR_BOUND_PROBLEM" ]]; then
+      # 显式属于本分支的计划审查不成立（结论非 PASS / 审后改过）⇒ 报它，⛔ 不拿未绑定的旧计划兜底
+      _PR_PROBLEM="$_PR_BOUND_PROBLEM"
+    elif [[ "$_PR_ANY_CLEAN" -ne 1 && -n "$_PR_UNBOUND_FILE" ]]; then
+      _PR_ANY_CLEAN=1
+      _PR_WARN="$_PR_UNBOUND_WARN"
+    fi
     [[ "$_PR_ANY_CLEAN" -eq 1 ]] && _PR_PROBLEM=""
+    if [[ "$_PR_ANY_CLEAN" -eq 1 && "$_C3_DETACHED" -eq 1 ]]; then
+      _PR_WARN="${_PR_WARN:+$_PR_WARN
+   }detached HEAD：没有分支名可比，未做计划的分支绑定检查"
+    fi
 
     # Check for approved skip (.skip.md with GENERATED_BY)
     while IFS= read -r sf; do
@@ -462,6 +519,11 @@ if [[ "${SKIP_PLAN_CHECK:-0}" != "1" ]] && [[ -d .agent/plans ]]; then
          && grep -q 'BRANCH:' "$sf" \
          && grep -q 'HEAD:' "$sf" \
          && grep -q 'REASON:' "$sf"; then
+        # v2.11.0：跳过批准也要属于当前分支（记录里一直写着 BRANCH:，门禁原来从不比对 ——
+        # 别的分支留下的一份 skip 能放行之后任何改动）。detached HEAD 不比对。
+        if [[ "$_C3_DETACHED" -eq 0 ]] && ! grep -Fqx "BRANCH: ${_C3_BRANCH}" "$sf"; then
+          continue
+        fi
         SKIP_APPROVED=1
         break
       fi
@@ -484,7 +546,6 @@ if [[ "${SKIP_PLAN_CHECK:-0}" != "1" ]] && [[ -d .agent/plans ]]; then
         fi
       elif [[ -n "$_PR_WARN" ]]; then
         echo "⚠️  CHECK 3: $_PR_WARN"
-        echo "   重新记录一次即可补上: ~/.agent-gates/bin/agent-gates-plan-review .agent/plans/<plan>.md --result <审查正文>.md --model <provider/model>"
       fi
     elif [[ "$PLAN_FOUND" -eq 1 ]]; then
       # Plan exists but no PLAN_REVIEW markers — check capability level
@@ -508,10 +569,15 @@ if [[ "${SKIP_PLAN_CHECK:-0}" != "1" ]] && [[ -d .agent/plans ]]; then
   fi
 fi
 
-# 产物是否异构（REVIEW_LEVEL 为 L1-L3）。取最后一个标记：标记追加在正文之后。
+# 产物的审查级别（v2.11.0）：只认整行 `<!-- REVIEW_LEVEL: Lx -->`，取**最后一个**（标记追加在
+# 正文之后）。⛔ 不能匹配正文子串：审查正文引用这串文字时，L0 字样会误报同族，L1 字样会
+# 冒充标记、绕过「缺标记阻断」。Gate 2b 与择优共用这一处，口径不再分叉。
+_gate_rf_level() {
+  [[ -n "${1:-}" && -f "$1" ]] || return 0
+  sed -n 's/^[[:space:]]*<!--[[:space:]]*REVIEW_LEVEL:[[:space:]]*\(L[0-3]\)[[:space:]]*-->[[:space:]]*$/\1/p' "$1" 2>/dev/null | tail -1
+}
 _gate_rf_is_hetero() {
-  [[ -n "${1:-}" && -f "$1" ]] || return 1
-  grep -oE 'REVIEW_LEVEL:[[:space:]]*L[0-3]' "$1" 2>/dev/null | tail -1 | grep -qE 'L[1-3]'
+  [[ "$(_gate_rf_level "${1:-}")" =~ ^L[1-3]$ ]]
 }
 
 # === Gate 2: Cross-review evidence ===
@@ -744,7 +810,7 @@ if [[ "$NEEDS_REVIEW" -eq 1 ]]; then
         if [[ -f "$CAP_FILE" ]]; then
           CAP_LEVEL=$(grep -oE '"level"[[:space:]]*:[[:space:]]*"L[0-3]"' "$CAP_FILE" 2>/dev/null | grep -oE 'L[0-3]' | head -1 || true)
           if [[ "$CAP_LEVEL" == "L1" || "$CAP_LEVEL" == "L2" || "$CAP_LEVEL" == "L3" ]]; then
-            RLEVEL=$(grep -oE 'REVIEW_LEVEL:[[:space:]]*L[0-3]' "$REVIEW_FILE" 2>/dev/null | grep -oE 'L[0-3]' | head -1 || true)
+            RLEVEL=$(_gate_rf_level "$REVIEW_FILE" || true)
             if [[ -z "$RLEVEL" ]]; then
               fail "Review has no REVIEW_LEVEL marker, but this machine supports heterogeneous review ($CAP_LEVEL)"
               echo "   Same-model review does NOT satisfy the different-model requirement."

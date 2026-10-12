@@ -18,6 +18,7 @@
 // Source: https://github.com/mcdowell8023/agent-gates
 
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 // NOTE on readFileSync(0, 'utf8'):
@@ -44,6 +45,22 @@ const REMINDER_EN = `You just marked a TODO as completed. Ensure you save key ou
 
 Example: Memory skill → save(category="session", content="...")
 Or update PROGRESS.md with project progress.`;
+
+// v2.11.0：todo 完成提醒的正文可由用户自定义。内置文案指向 Memory skill，而用户可能按自己的
+// 规则存记忆（比如写 inbox），Memory skill 也可能根本没装 —— 每次都提醒去调一个不存在的工具。
+// $AGENT_GATES_DIR/memory-reminder.md（默认 ~/.agent-gates/）存在且非空 ⇒ 用它；
+// 不存在 / 空 / 读失败 ⇒ 回落内置文案。⛔ 任何异常都不能让钩子非零退出。
+function loadCustomMemoryReminder() {
+  try {
+    const dir = process.env.AGENT_GATES_DIR || join(homedir(), '.agent-gates');
+    const file = join(dir, 'memory-reminder.md');
+    if (!existsSync(file)) return null;
+    const text = readFileSync(file, 'utf8').trim();
+    return text.length > 0 ? text : null;
+  } catch {
+    return null;
+  }
+}
 
 // Parallelism reminder (v1.6.1): fires once at plan time, when >=3 all-pending
 // todos are created. Teaches the A-vs-B distinction (batch tool calls vs sub-agents)
@@ -246,13 +263,15 @@ function main() {
   // when a todo just completed; otherwise check for plan-time parallelism nudge.
   let reminder = null;
   if (detectTodoCompleted(payload)) {
+    const custom = loadCustomMemoryReminder();
+    const body = custom !== null ? custom : `${REMINDER_ZH}
+
+---
+${REMINDER_EN}`;
     reminder = `<system-reminder>
 [AGENT-GATES: Memory Persistence Reminder]
 
-${REMINDER_ZH}
-
----
-${REMINDER_EN}
+${body}
 </system-reminder>`;
   } else if (detectSourceEditWithoutDecision(payload)) {
     reminder = `<system-reminder>

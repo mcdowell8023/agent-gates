@@ -31,7 +31,9 @@ remove_hook_entry() {
   local config_file="$1"
   local platform="$2"
 
-  [[ -f "$config_file" ]] || return
+  # ⚠️ 必须 `return 0`：裸 `return` 沿用上一条 [[ ]] 的失败状态，set -e 下整个卸载在第一个
+  #    不存在的配置文件处就退出了（没装 Claude Code 的机器上卸载什么都不做，v2.11.0 发现）。
+  [[ -f "$config_file" ]] || return 0
 
   if ! grep -q "memory-reminder.mjs" "$config_file" 2>/dev/null; then
     info "$platform: no agent-gates hook found"
@@ -115,6 +117,16 @@ purge_backups() {
     done
   done
 
+  # v2.11.0：备份移到了 $INSTALL_DIR/backups/skills/（不再放在 skill 目录里）
+  if [[ -d "$INSTALL_DIR/backups/skills" ]]; then
+    while IFS= read -r -d '' bak; do
+      rm -f "$bak"
+      info "Removed: $bak"
+      removed=$((removed + 1))
+    done < <(find "$INSTALL_DIR/backups/skills" -type f -print0 2>/dev/null)
+    rm -rf "$INSTALL_DIR/backups/skills"
+  fi
+
   if (( removed == 0 )); then
     info "No backup files found"
   else
@@ -159,7 +171,11 @@ main() {
   fi
 
   section "Removing hook files"
-  if [[ -d "$INSTALL_DIR" ]]; then
+  if [[ -d "$INSTALL_DIR" && "$PURGE_BACKUPS" -eq 0 && -n "$(find "$INSTALL_DIR/backups" -type f -print -quit 2>/dev/null)" ]]; then
+    # v2.11.0：备份在 $INSTALL_DIR/backups/ 里，不带 --purge-backups 就要留住（说好了保留）。
+    find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 ! -name backups -exec rm -rf {} +
+    info "Removed: $INSTALL_DIR (kept $INSTALL_DIR/backups/ — pass --purge-backups to remove it)"
+  elif [[ -d "$INSTALL_DIR" ]]; then
     rm -rf "$INSTALL_DIR"
     info "Removed: $INSTALL_DIR"
   else

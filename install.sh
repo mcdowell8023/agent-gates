@@ -37,6 +37,9 @@ WITH_OPENSPEC=0
 CODEGRAPH_HOOK=0
 SKIP_DEPS=0
 BACKED_UP_SKILLS=()
+# v2.11.0：Memory skill 可选。skip | with | ""（沿用标记）；标记文件让选择在之后的安装里持续生效。
+MEMORY_SKILL_PREF=""
+SKIP_MEMORY_SKILL=0
 
 # v1.5.2+: external dependency sources
 # Note: Memory skill is bundled in v1.5.4+ (see skills/memory/), no longer cloned at install time.
@@ -392,23 +395,85 @@ fetch_repo() {
   [[ -d "$REPO_DIR/skills" ]] || fail "Invalid repo structure: skills/ not found"
 }
 
-# --- Backup user-modified SKILL.md before overwrite ---
-# Diffs src vs dst; if different, saves dst as SKILL.md.bak.<timestamp>.
-# Tracks backups in BACKED_UP_SKILLS for the end-of-run summary.
+# --- Backup user-modified SKILL.md before overwrite (v2.11.0) ---
+# 原实现：新旧内容不同就在 skill 目录里原地写 SKILL.md.bak.<ts>。升级时内容必然不同，于是每次都
+# 备份、还误报「本地改过」；原地 .bak 又会被同步工具分发、撑大 skill 指纹。现在：
+#   · 只在「已装文件 ≠ 上次安装记录的 sha256」时备份 —— 说明装完之后被改过
+#   · 清单按目标文件的**绝对路径**记：只按 skill 名记的话，--target 装过别的目录后，
+#     本地改过的文件会被误判为未改、不备份就覆盖
+#   · 没有记录（首次 / 老版本升级 / 新目标）⇒ 保守备份一次
+#   · 备份放 $INSTALL_DIR/backups/skills/<skill>/，skill 目录里不留任何 .bak
+INSTALLED_MANIFEST_NAME="installed-skills.sha256"
+_ag_sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+_ag_abspath() { local d; d=$(cd "$(dirname "$1")" 2>/dev/null && pwd -P) || return 1; printf '%s/%s' "$d" "$(basename "$1")"; }
+_ag_manifest_get() {   # <abs-path> -> recorded sha256 or nothing
+  local m="$INSTALL_DIR/$INSTALLED_MANIFEST_NAME"
+  [[ -f "$m" ]] || return 0
+  awk -v p="$1" 'substr($0, index($0, "  ") + 2) == p { sha = $1 } END { if (sha != "") print sha }' "$m"
+}
+record_installed_sha() {   # <installed-file>
+  local f="$1" abs sha m tmp
+  [[ -f "$f" ]] || return 0
+  abs=$(_ag_abspath "$f") || return 0
+  sha=$(_ag_sha256 "$f") || return 0
+  m="$INSTALL_DIR/$INSTALLED_MANIFEST_NAME"
+  mkdir -p "$INSTALL_DIR" 2>/dev/null || return 0
+  tmp="${m}.tmp.$$"
+  { [[ -f "$m" ]] && awk -v p="$abs" 'substr($0, index($0, "  ") + 2) != p' "$m"; printf '%s  %s\n' "$sha" "$abs"; } > "$tmp" && mv "$tmp" "$m"
+}
 backup_if_modified() {
   local skill="$1"
   local src_file="$2"
   local dst_file="$3"
   [[ -f "$dst_file" ]] || return 0
   [[ -f "$src_file" ]] || return 0
-  if ! diff -q "$src_file" "$dst_file" &>/dev/null; then
-    local ts backup
-    ts=$(date +%Y%m%d-%H%M%S)
-    backup="${dst_file}.bak.${ts}"
-    cp "$dst_file" "$backup"
-    BACKED_UP_SKILLS+=("$skill: $backup")
-    warn "Backed up modified $(basename "$dst_file") → $backup"
+  diff -q "$src_file" "$dst_file" &>/dev/null && return 0      # 内容一样，覆盖不丢东西
+  local abs recorded current
+  abs=$(_ag_abspath "$dst_file") || abs="$dst_file"
+  recorded=$(_ag_manifest_get "$abs")
+  current=$(_ag_sha256 "$dst_file")
+  [[ -n "$recorded" && "$recorded" == "$current" ]] && return 0 # 装完之后没人动过
+  local ts dir backup
+  ts=$(date +%Y%m%d-%H%M%S)
+  dir="$INSTALL_DIR/backups/skills/$skill"
+  mkdir -p "$dir"
+  backup="$dir/SKILL.md.$ts"
+  # 同一秒内备份两次（多目标安装、连续升级）时，后一份不能覆盖前一份 —— 那正好丢掉本地改动。
+  local n=1
+  while [[ -e "$backup" ]]; do backup="$dir/SKILL.md.$ts.$n"; n=$((n + 1)); done
+  cp "$dst_file" "$backup"
+  BACKED_UP_SKILLS+=("$skill: $backup")
+  if [[ -n "$recorded" ]]; then
+    warn "$skill/SKILL.md differs from what was last installed (edited locally?) — backed up → $backup"
+  else
+    warn "$skill/SKILL.md has no install record (first install by this version?) — backed up once → $backup"
   fi
+}
+
+# --- Memory skill 可选（v2.11.0）---
+# 用户可能已经用别的方式管记忆（比如按自己规则写 inbox），bundled memory 每次都被装回，
+# 每次装完都得手工删。--skip-memory-skill 写标记，之后的安装都沿用；--with-memory-skill 恢复。
+# ⛔ 不自动删除已存在的 memory 目录 / 软链：那是用户的东西，只打印清理指引。
+resolve_memory_skill_pref() {
+  local marker="$INSTALL_DIR/.skip-memory-skill"
+  case "$MEMORY_SKILL_PREF" in
+    skip) mkdir -p "$INSTALL_DIR"; : > "$marker"; SKIP_MEMORY_SKILL=1 ;;
+    with) rm -f "$marker"; SKIP_MEMORY_SKILL=0 ;;
+    *)    [[ -f "$marker" ]] && SKIP_MEMORY_SKILL=1 || SKIP_MEMORY_SKILL=0 ;;
+  esac
+  [[ "$SKIP_MEMORY_SKILL" -eq 1 ]] || return 0
+  info "Memory skill: skipped（标记 ${marker}；要恢复用 --with-memory-skill）"
+  local leftovers=() d
+  [[ -n "${TARGET_DIR:-}" && ( -e "$TARGET_DIR/memory" || -L "$TARGET_DIR/memory" ) ]] && leftovers+=("$TARGET_DIR/memory")
+  for d in "$HOME/.claude/skills" "$HOME/.config/opencode/skills" "$HOME/.codex/skills" "$HOME/.agents/skills"; do
+    [[ -e "$d/memory" || -L "$d/memory" ]] && leftovers+=("$d/memory")
+  done
+  if [[ ${#leftovers[@]} -gt 0 ]]; then
+    warn "Memory skill is skipped but these still exist (not removed — they are yours):"
+    for d in "${leftovers[@]}"; do echo "    - $d"; done
+    echo "    清理（可恢复）：trash ${leftovers[*]}"
+  fi
+  return 0
 }
 
 # --- Install skills ---
@@ -420,6 +485,11 @@ install_skills() {
   for skill in "${SKILLS[@]}"; do
     local src="$REPO_DIR/skills/$skill"
     local dst="$TARGET_DIR/$skill"
+
+    if [[ "$skill" == "memory" && "$SKIP_MEMORY_SKILL" -eq 1 ]]; then
+      skipped=$((skipped + 1))
+      continue
+    fi
 
     if [[ ! -d "$src" ]]; then
       warn "Skill not found in repo: $skill (skipped)"
@@ -439,6 +509,7 @@ install_skills() {
       cp -R "$src" "$dst"
       info "Installed: $skill"
     fi
+    record_installed_sha "$dst/SKILL.md"
     installed=$((installed + 1))
   done
 
@@ -455,6 +526,7 @@ create_symlinks() {
     for dir in "${dirs[@]}"; do
       [[ -d "$dir" ]] || continue
       for skill in "${SKILLS[@]}"; do
+        [[ "$skill" == "memory" && "$SKIP_MEMORY_SKILL" -eq 1 ]] && continue
         local src="$TARGET_DIR/$skill"
         local dst="$dir/$skill"
         [[ -d "$src" ]] || continue
@@ -880,6 +952,8 @@ main() {
       --with-openspec) WITH_OPENSPEC=1; shift ;;
       --codegraph-hook) CODEGRAPH_HOOK=1; shift ;;
       --skip-deps) SKIP_DEPS=1; shift ;;
+      --skip-memory-skill) MEMORY_SKILL_PREF=skip; shift ;;
+      --with-memory-skill) MEMORY_SKILL_PREF=with; shift ;;
       -h|--help)
         echo "Usage: install.sh [--target DIR] [--skip-hooks] [--force | --upgrade | --local] [--with-openspec] [--codegraph-hook] [--skip-deps]"
         echo "  --target DIR       Override skills target directory"
@@ -890,6 +964,8 @@ main() {
         echo "  --with-openspec    Check for OpenSpec CLI availability (no auto-install)"
         echo "  --codegraph-hook   Register CodeGraph auto-init chpwd hook in ~/.zshrc"
         echo "  --skip-deps        Skip external dependency install (Memory / Superpowers / OpenSpec)"
+        echo "  --skip-memory-skill  Don't install the bundled Memory skill — remembered for later runs"
+        echo "  --with-memory-skill  Install the bundled Memory skill again (clears the remembered skip)"
         exit 0
         ;;
       *) fail "Unknown option: $1" ;;
@@ -900,6 +976,7 @@ main() {
   check_optional_deps
   [[ "$WITH_OPENSPEC" -eq 1 ]] && { check_openspec || true; }
   detect_platform
+  resolve_memory_skill_pref
   fetch_repo
   check_version
   install_skills
@@ -943,7 +1020,8 @@ main() {
     for entry in "${BACKED_UP_SKILLS[@]}"; do
       echo "    - $entry"
     done
-    echo "  Diff against the new SKILL.md to merge your changes back, then remove the .bak file."
+    echo "  Backups live in $INSTALL_DIR/backups/skills/ (never inside the skill directories)."
+    echo "  Diff against the new SKILL.md to merge your changes back, then delete the backup."
     echo "  Or run: ./uninstall.sh --purge-backups (only after merging — backups will be gone)."
     echo ""
   fi
