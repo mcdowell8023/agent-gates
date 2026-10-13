@@ -52,7 +52,11 @@ fi
 # --- skills across platforms ------------------------------------------------
 # One real directory, symlinked into each platform. A broken link stays silent until an
 # agent cannot find the skill, so resolve rather than just list.
-SKILLS=(init-project-gates agent-workflow-rules agent-review-protocol init-deep-fallback memory)
+# 清单和 install.sh 的 SKILLS 保持一致（v2.11.2）：原来写死 5 个、含 memory、漏了 agent-gates，
+# 而且不认 --skip-memory-skill 的标记 ⇒ 用了它的机器上永远报「4/5 — re-run install.sh」，
+# 重装一遍还是同一行（修不好的红灯）。标记只豁免 memory，⛔ 不放过别的 skill。
+SKILLS=(init-project-gates agent-workflow-rules agent-review-protocol init-deep-fallback agent-gates)
+[[ -f "$INSTALL_DIR/.skip-memory-skill" ]] || SKILLS+=(memory)
 MISSING=""
 for d in "$HOME/.claude/skills:claude" "$HOME/.config/opencode/skills:opencode" \
          "$HOME/.codex/skills:codex" "$HOME/.agents/skills:agents"; do
