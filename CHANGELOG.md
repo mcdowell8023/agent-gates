@@ -2,6 +2,18 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.11.3 — install.sh：平台目录里已有真实目录时不再无声退出、装一半
+
+往 Hub 装 v2.11.2 时撞到（rc=1、没有任何报错、全局门禁还是 2.0.0，skill 却已更新）。
+
+- 🔴 `create_symlinks` 循环体最后一句 `[[ -L "$dst" || ! -e "$dst" ]] && ln -sfn … && info …`：目标是**真实目录**时 `[[ ]]` 为假，
+  整条语句返回 1；它恰好是最后一次迭代，for ⇒ 函数 ⇒ main 里的 `create_symlinks` 在 `set -e` 下直接退出，
+  后面的「安装全局门禁文件」「注册平台钩子」一步没执行。Hub 上 `~/.claude/skills`、`~/.config/opencode/skills`、
+  `~/.agents/skills` 里的 skill 都是别的方式装的真实目录，所以必现；Mac 上最后一个目标碰巧是软链，一直没暴露。
+- 改成显式 if/else：软链 / 不存在 ⇒ 建；真实目录 / 普通文件 ⇒ **不覆盖，逐条点名**；函数恒返回 0
+- ⚠️ 这些位置读到的 skill 内容不会随安装更新（它们不是软链）；要统一成软链需用户自行备份、移走后重装
+- 新测试 `tests/run_install_symlinks.sh`（8 条），含 `set -e` 下调用与「普通文件挡路 / 悬空软链刷新」；临时 HOME 里端到端复现 Hub 场景验证
+
 ## v2.11.2 — status 的 skill 统计与安装器一致
 
 v2.11.0 让安装器可以不装 Memory skill（`--skip-memory-skill`，选择写进 `~/.agent-gates/.skip-memory-skill`），

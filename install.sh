@@ -523,6 +523,7 @@ create_symlinks() {
     # ~/.agents/skills is the shared directory some agents read exclusively; it was missing
     # here, so those agents saw only whatever had been linked by hand (observed: 1 of 5).
     local dirs=("$HOME/.claude/skills" "$HOME/.config/opencode/skills" "$HOME/.codex/skills" "$HOME/.agents/skills")
+    local blocked=()
     for dir in "${dirs[@]}"; do
       [[ -d "$dir" ]] || continue
       for skill in "${SKILLS[@]}"; do
@@ -530,11 +531,24 @@ create_symlinks() {
         local src="$TARGET_DIR/$skill"
         local dst="$dir/$skill"
         [[ -d "$src" ]] || continue
-        [[ -L "$dst" || ! -e "$dst" ]] && ln -sfn "$src" "$dst" 2>/dev/null && \
-          info "Symlinked: $dst"
+        # v2.11.3：原写法 `[[ -L || ! -e ]] && ln && info` 在目标是真实目录时整条语句返回 1 ——
+        # 它恰好是最后一次迭代时，for ⇒ 函数 ⇒ main 的 `create_symlinks` 在 set -e 下直接退出，
+        # rc=1、无报错，后面「安装全局门禁文件」一步没执行（Hub 上 skill 是真实目录，装成了一半）。
+        # 真实目录 / 普通文件是用户别的方式装的：⛔ 不覆盖，但要说出来。
+        if [[ -L "$dst" || ! -e "$dst" ]]; then
+          ln -sfn "$src" "$dst" 2>/dev/null && info "Symlinked: $dst"
+        else
+          blocked+=("$dst")
+        fi
       done
     done
+    if [[ ${#blocked[@]} -gt 0 ]]; then
+      warn "Not replaced with symlinks (a real directory/file is already there — left alone):"
+      for dst in "${blocked[@]}"; do echo "    - $dst"; done
+      echo "    这些位置读到的 skill 内容不会随本次安装更新；要统一成软链，先自行备份并移走它们再重装。"
+    fi
   fi
+  return 0
 }
 
 # --- Install hooks to ~/.agent-gates ---
