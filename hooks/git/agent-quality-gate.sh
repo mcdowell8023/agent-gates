@@ -165,7 +165,7 @@ CHANGED_COUNT=$(git diff --cached --name-only --diff-filter=ACMR | wc -l | tr -d
 
 NEW_SOURCE=$(git diff --cached --diff-filter=A --name-only \
   | grep -E '\.(ts|tsx|js|jsx|py|java|kt|go)$' \
-  | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.|\.setup\.)' || true)
+  | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.|\.setup\.|(^|/)test_[^/]*\.py$)' || true)
 
 if [[ -z "$NEW_SOURCE" && "$DIFF_LINES" -le 15 && "$CHANGED_COUNT" -le 2 ]]; then
   # v1.5.5: print info so user knows the gate ran and decided to skip
@@ -269,7 +269,10 @@ while IFS= read -r f; do
       dir=$(dirname "$f"); base=$(basename "$f" .py)
       t1="${dir}/test_${base}.py"; t2="${dir}/${base}_test.py" ;;
     *.java|*.kt)
-      t1=$(echo "$f" | sed 's|/main/|/test/|;s|\.\(java\|kt\)$|Test.\1|'); t2="" ;;
+      # ⚠️ 用 -E 和 `#` 分隔符：旧写法 `s|\.\(java\|kt\)$|Test.\1|` 以 `|` 为分隔符，`\|` 是**字面竖线**
+      #    而不是「或」（BSD / GNU sed 都一样），第二段替换从不命中 ⇒ 期望的测试名缺 Test 后缀，
+      #    Java / Kotlin 的 Gate 1 自首版起从没正确工作过（v2.11.1，wb 会话 fa5cdf48 报）。
+      t1=$(echo "$f" | sed -E 's|/main/|/test/|;s#\.(java|kt)$#Test.\1#'); t2="" ;;
     *.go)
       t1="${f%.go}_test.go"; t2="" ;;
     *) continue ;;
@@ -280,7 +283,7 @@ while IFS= read -r f; do
   fi
 done < <(git diff --cached --name-only --diff-filter=ACMR \
   | grep -E '\.(ts|tsx|js|jsx|py|java|kt|go)$' \
-  | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.|\.d\.ts$|\.setup\.|config)')
+  | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.|\.d\.ts$|\.setup\.|config|(^|/)test_[^/]*\.py$)')
 if [[ "$GATE1_EXEMPT_COUNT" -gt 0 ]]; then
   _more=""; [[ "$GATE1_EXEMPT_COUNT" -gt 5 ]] && _more=", …"
   echo "ℹ️  Gate 1: ${GATE1_EXEMPT_COUNT} file(s) exempt via tests.exempt: ${GATE1_EXEMPTED}${_more}"
@@ -314,7 +317,7 @@ while IFS= read -r f; do
   LOGIC_FILES=$((LOGIC_FILES + 1))
 done < <(git diff --cached --name-only --diff-filter=ACMR \
   | grep -vE '(\.(lock|md|json|yaml|yml)$|generated/|migrations/|\.d\.ts$)' \
-  | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.)')
+  | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.|(^|/)test_[^/]*\.py$)')
 
 MAX_SINGLE_FILE_LINES=0
 while IFS= read -r f; do
@@ -328,7 +331,7 @@ while IFS= read -r f; do
   [[ "$flines" -gt "$MAX_SINGLE_FILE_LINES" ]] && MAX_SINGLE_FILE_LINES="$flines"
 done < <(git diff --cached --name-only --diff-filter=ACMR \
   | grep -vE '(\.(lock|md|json|yaml|yml)$|generated/|migrations/|\.d\.ts$)' \
-  | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.)')
+  | grep -vE '(\.test\.|\.spec\.|_test\.|Test\.|(^|/)test_[^/]*\.py$)')
 
 # === CHECK 3: Plan/design decision (v1.11.0 三态方案门控) ===
 # Non-trivial code changes require either:
