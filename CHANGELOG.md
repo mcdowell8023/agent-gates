@@ -2,6 +2,16 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.11.2 — status 的 skill 统计与安装器一致
+
+v2.11.0 让安装器可以不装 Memory skill（`--skip-memory-skill`，选择写进 `~/.agent-gates/.skip-memory-skill`），
+但 `agent-gates-status` 的清单是写死的 5 个：含 `memory`、漏了 `agent-gates`、也不认那个标记 ⇒ 用了 `--skip-memory-skill`
+的机器上永远报「skills 4/5 — re-run install.sh」，重装一遍还是同一行（一条永远红灯又修不好的提示）。
+
+- 清单改为安装器装的那几个（`init-project-gates agent-workflow-rules agent-review-protocol init-deep-fallback agent-gates`），
+  没有标记时再加 `memory`；标记只豁免 memory，缺别的 skill 仍然报
+- 新测试 `tests/run_status_skills.sh`（6 条）
+
 ## v2.11.1 — Gate 1：Java / Kotlin 测试名推算从没对过；Python `test_*.py` 被当成源文件
 
 wb 会话 fa5cdf48（order-service 合并被拦「Java 源码没有对应测试」，测试文件就在惯例位置）报的，已逐项复现。
