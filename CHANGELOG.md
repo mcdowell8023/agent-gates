@@ -2,6 +2,23 @@
 
 All notable changes to agent-gates will be documented in this file.
 
+## v2.11.1 — Gate 1：Java / Kotlin 测试名推算从没对过；Python `test_*.py` 被当成源文件
+
+wb 会话 fa5cdf48（order-service 合并被拦「Java 源码没有对应测试」，测试文件就在惯例位置）报的，已逐项复现。
+
+- 🔴 **Java / Kotlin**：`sed 's|/main/|/test/|;s|\.\(java\|kt\)$|Test.\1|'` 用 `|` 当分隔符时，`\|` 是**字面竖线**，不是「或」——
+  BSD sed（macOS）与 GNU sed（Linux，Hub 上 sed 4.9 实测）都一样，第二段替换从不命中，推出的测试名是
+  `src/test/.../Foo.java`（缺 `Test` 后缀）。自 2026-05-21 首版起 Java / Kotlin 的 Gate 1 就没正确工作过；
+  仓库里没有任何 Java 用例，所以一直没被发现。改成 `sed -E` 加 `#` 分隔符。
+- ⚠️ **新开始检查的情形**：路径里没有 `/main/` 的 Java / Kotlin 文件，原来推算结果就是源文件自己，永远「存在」，
+  Gate 1 对这类布局实际从未检查过；修复后要求同目录 `FooTest.java` / `FooTest.kt`。Maven / Gradle 标准布局不受影响。
+- **Python**：排除名单只有后缀式（`_test.`、`.test.`），前缀式的 `test_mod.py` 被当成需要测试的源文件，要求有
+  `test_test_mod.py`；只新增一个 `test_x.py` 也会被当成新源文件而判成非小改动。三处排除名单（Gate 1、新源文件判定、
+  CHECK 3 的逻辑文件计数）补上 `(^|/)test_[^/]*\.py$`。
+- 新测试 `tests/run_gate_java_kotlin.sh`（13 条）；做过两处变异（还原 sed、去掉 NEW_SOURCE 的排除），均被抓到。
+- 不动：`FooTests.java` / `FooIT.java` / `TestFoo.java` 这类其它 Java 测试命名 —— order-service 实测 101 个测试文件全是 `*Test.java`，
+  没有证据需要，不预先放宽。
+
 ## v2.11.0 — 遗留问题收口：CHECK 3 绑定分支、安装器不再装回 Memory skill、备份移出 skill 目录
 
 ### ⚠️ Behavior change：CHECK 3 只认绑定在当前分支的计划
